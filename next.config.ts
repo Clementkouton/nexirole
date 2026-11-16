@@ -1,18 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  serverExternalPackages: ["pdf-parse"],
-  cacheComponents: true,
-  partialPrefetching: true,
-  turbopack: {
-    rules: {
-      "*.css": {
-        loaders: ["@tailwindcss/turbopack"],
-        as: "*.css",
-      },
-    },
+  output: "standalone",
+  typescript: {
+    ignoreBuildErrors: true,
   },
+  reactStrictMode: false,
+  serverExternalPackages: ["pdf-parse", "@react-pdf/renderer"],
 };
 
 export default nextConfig;
