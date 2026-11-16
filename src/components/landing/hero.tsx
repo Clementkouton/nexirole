@@ -5,7 +5,7 @@ import {
   IconPlayerPlay,
   IconSparkles,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
+import { buttonClasses, cx } from "@/lib/ui-classes";
 import { HeroDashboardPreview } from "@/components/landing/hero-dashboard-preview";
 
 export function Hero() {
@@ -37,27 +37,20 @@ export function Hero() {
           </p>
 
           <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <Button
-              asChild
-              size="lg"
-              className="h-12 rounded-full bg-navy px-7 text-base font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800"
+            <Link
+              href="/dashboard"
+              className={cx(buttonClasses(), "h-12 rounded-full bg-navy px-7 text-base font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800")}
             >
-              <Link href="/dashboard">
-                Lancer l&apos;Assistant
-                <IconArrowRight className="ml-2 size-5" />
-              </Link>
-            </Button>
-            <Button
-              asChild
-              variant="outline"
-              size="lg"
-              className="h-12 rounded-full border-slate-300 bg-white px-7 text-base font-semibold text-navy hover:bg-slate-50 hover:text-navy"
+              Lancer l&apos;Assistant
+              <IconArrowRight className="ml-2 size-5" />
+            </Link>
+            <Link
+              href="#comment-ca-marche"
+              className={cx(buttonClasses("outline"), "h-12 rounded-full border-slate-300 bg-white px-7 text-base font-semibold text-navy hover:bg-slate-50")}
             >
-              <Link href="#comment-ca-marche">
-                <IconPlayerPlay className="mr-2 size-4 text-gold-dark" />
-                Voir comment ça marche
-              </Link>
-            </Button>
+              <IconPlayerPlay className="mr-2 size-4 text-gold-dark" />
+              Voir comment ça marche
+            </Link>
           </div>
 
           <div className="mt-7 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-slate-500">

@@ -17,10 +17,7 @@ import {
   IconUser,
   IconX,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Button, Input, Label, Textarea } from "@/components/ui";
 import { CvLivePreview } from "@/components/cv-builder/cv-live-preview";
 import { ImproveAiButton } from "@/components/cv-builder/improve-ai-button";
 import { downloadPdf } from "@/lib/download-client";
@@ -532,7 +529,7 @@ export default function CvBuilderPage() {
               type="button"
               onClick={addExperience}
               variant="outline"
-              className="w-full rounded-xl border-dashed border-slate-300 bg-white text-sm font-semibold text-navy hover:bg-slate-50"
+              className="h-10 w-full rounded-xl border-dashed border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
             >
               <IconCirclePlus className="mr-2 size-4 text-gold-dark" />
               Ajouter une expérience
@@ -618,7 +615,7 @@ export default function CvBuilderPage() {
               type="button"
               onClick={addEducation}
               variant="outline"
-              className="w-full rounded-xl border-dashed border-slate-300 bg-white text-sm font-semibold text-navy hover:bg-slate-50"
+              className="h-10 w-full rounded-xl border-dashed border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
             >
               <IconCirclePlus className="mr-2 size-4 text-gold-dark" />
               Ajouter une formation
@@ -731,7 +728,7 @@ export default function CvBuilderPage() {
               type="button"
               onClick={addLanguage}
               variant="outline"
-              className="w-full rounded-xl border-dashed border-slate-300 bg-white text-sm font-semibold text-navy hover:bg-slate-50"
+              className="h-10 w-full rounded-xl border-dashed border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
             >
               <IconCirclePlus className="mr-2 size-4 text-gold-dark" />
               Ajouter une langue
@@ -815,7 +812,7 @@ export default function CvBuilderPage() {
                   variant="outline"
                   onClick={() => setStep((s) => Math.max(0, s - 1))}
                   disabled={step === 0}
-                  className="rounded-full border-slate-300 bg-white text-sm font-semibold text-navy hover:bg-slate-50"
+                  className="h-10 rounded-full border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
                 >
                   <IconArrowLeft className="mr-1.5 size-4" />
                   Précédent
@@ -825,7 +822,7 @@ export default function CvBuilderPage() {
                   <Button
                     type="button"
                     onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}
-                    className="rounded-full bg-navy text-sm font-semibold text-white hover:bg-navy-800"
+                    className="h-10 rounded-full bg-navy px-5 text-sm font-semibold text-white hover:bg-navy-800"
                   >
                     Suivant
                     <IconArrowRight className="ml-1.5 size-4" />
@@ -836,7 +833,7 @@ export default function CvBuilderPage() {
                       type="button"
                       onClick={handleDownloadPdf}
                       disabled={downloading}
-                      className="rounded-full bg-navy text-sm font-semibold text-white hover:bg-navy-800"
+                      className="h-10 rounded-full bg-navy px-5 text-sm font-semibold text-white hover:bg-navy-800"
                     >
                       {downloading ? (
                         <IconLoader2 className="mr-1.5 size-4 animate-spin" />
@@ -870,7 +867,7 @@ export default function CvBuilderPage() {
               onClick={handleDownloadPdf}
               disabled={downloading}
               variant="outline"
-              className="mt-3 w-full rounded-xl border-slate-300 bg-white text-sm font-semibold text-navy hover:bg-slate-50"
+              className="mt-3 h-10 w-full rounded-xl border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
             >
               {downloading ? (
                 <IconLoader2 className="mr-1.5 size-4 animate-spin" />

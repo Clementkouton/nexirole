@@ -15,11 +15,8 @@ import {
   IconTargetArrow,
   IconWand,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Button, Input, Label, Skeleton, Switch } from "@/components/ui";
+import { buttonClasses, cx } from "@/lib/ui-classes";
 import { CvUpload } from "@/components/dashboard/cv-upload";
 import { toast } from "sonner";
 import type { CvFileValue, ScoredJob, SearchJobsResponse } from "@/lib/types";
@@ -124,16 +121,15 @@ function JobCard({
             <IconWand className="mr-1.5 size-3.5 text-gold" />
             Générer CV &amp; Lettre
           </Button>
-          <Button
-            asChild
-            variant="outline"
-            className="h-9 rounded-full border-slate-300 bg-white text-xs font-semibold text-navy hover:bg-slate-50"
+          <a
+            href={job.url}
+            target="_blank"
+            rel="noreferrer"
+            className={cx(buttonClasses("outline"), "h-9 rounded-full border-slate-300 bg-white text-xs font-semibold text-navy hover:bg-slate-50")}
           >
-            <a href={job.url} target="_blank" rel="noreferrer">
-              <IconExternalLink className="mr-1.5 size-3.5 text-gold-dark" />
-              Voir l&apos;offre
-            </a>
-          </Button>
+            <IconExternalLink className="mr-1.5 size-3.5 text-gold-dark" />
+            Voir l&apos;offre
+          </a>
         </div>
       </div>
 

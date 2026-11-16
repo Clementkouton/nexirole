@@ -25,6 +25,20 @@ const FETCH_HEADERS = {
   "Accept-Language": "fr,fr-FR;q=0.9,en;q=0.8",
 };
 
+/** En-têtes d'un navigateur réel : indispensable pour lire les pages d'offres
+ * (beaucoup de sites refusent les requêtes sans en-têtes de navigateur). */
+const BROWSER_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "fr,fr-FR;q=0.9,en-US;q=0.8,en;q=0.7",
+  "Upgrade-Insecure-Requests": "1",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+};
+
 /* ------------------------------------------------------------------ */
 /*  Nettoyage HTML                                                     */
 /* ------------------------------------------------------------------ */
@@ -209,14 +223,23 @@ export class JobScrapeError extends Error {
   }
 }
 
-export async function fetchJobPageFromUrl(url: string): Promise<ScrapedJobPage> {
+function normalizeUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
+/** Extraction du texte d'une page HTML déjà téléchargée. */
+function extractOfferText(rawHtml: string): string {
+  return stripHtml(rawHtml);
+}
+
+/** Tentative directe : télécharge la page avec des en-têtes de navigateur réel. */
+async function fetchJobPageDirect(url: string): Promise<ScrapedJobPage> {
   let res: Response;
   try {
     res = await fetch(url, {
-      headers: {
-        ...FETCH_HEADERS,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
+      headers: BROWSER_HEADERS,
       redirect: "follow",
       signal: AbortSignal.timeout(15_000),
     });
@@ -250,7 +273,7 @@ export async function fetchJobPageFromUrl(url: string): Promise<ScrapedJobPage> 
     );
   }
 
-  const text = stripHtml(raw);
+  const text = extractOfferText(raw);
   if (text.length < 250) {
     throw new JobScrapeError(
       "Le contenu extrait de cette page est trop court pour être une offre. Collez le texte de l'offre manuellement."
@@ -258,4 +281,51 @@ export async function fetchJobPageFromUrl(url: string): Promise<ScrapedJobPage> 
   }
 
   return { text: text.slice(0, 8000), finalUrl: res.url || url };
+}
+
+/** Repli gratuit (sans clé) : lecteur universel r.jina.ai qui contourne
+ * la plupart des protections anti-robots des sites d'offres. */
+async function fetchJobPageViaReader(url: string): Promise<ScrapedJobPage> {
+  const readerUrl = `https://r.jina.ai/${url}`;
+  const res = await fetch(readerUrl, {
+    headers: {
+      "User-Agent": BROWSER_HEADERS["User-Agent"],
+      Accept: "text/plain",
+      "X-Return-Format": "text",
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) {
+    throw new JobScrapeError(
+      `Lecture de l'offre impossible (lecteur universel : ${res.status}).`
+    );
+  }
+  const text = (await res.text())
+    .replace(/\[image\]|\(image\)/gi, " ")
+    .trim();
+  if (text.length < 250) {
+    throw new JobScrapeError(
+      "Le contenu extrait de cette page est trop court pour être une offre."
+    );
+  }
+  return { text: text.slice(0, 8000), finalUrl: url };
+}
+
+export async function fetchJobPageFromUrl(url: string): Promise<ScrapedJobPage> {
+  const target = normalizeUrl(url);
+
+  try {
+    return await fetchJobPageDirect(target);
+  } catch (directError) {
+    // La lecture directe a échoué (protection anti-robot, page JS only…)
+    // → on retente via le lecteur universel gratuit.
+    try {
+      return await fetchJobPageViaReader(target);
+    } catch {
+      if (directError instanceof JobScrapeError) throw directError;
+      throw new JobScrapeError(
+        "Impossible de lire cette page d'offre. Collez le texte de l'annonce manuellement."
+      );
+    }
+  }
 }

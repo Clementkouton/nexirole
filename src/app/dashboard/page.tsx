@@ -10,7 +10,8 @@ import {
   IconSparkles,
   IconWand,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@/components/ui";
+import { buttonClasses, cx } from "@/lib/ui-classes";
 import { GenerateMode, type PrefillPayload } from "@/components/dashboard/generate-mode";
 import { SearchMode } from "@/components/dashboard/search-mode";
 import type { CvFileValue, ScoredJob } from "@/lib/types";
@@ -61,16 +62,13 @@ export default function DashboardPage() {
                 Votre CV importé reste actif dans tous les modes.
               </p>
             </div>
-            <Button
-              asChild
-              variant="outline"
-              className="rounded-full border-slate-300 bg-white text-sm font-semibold text-navy hover:bg-slate-50"
+            <Link
+              href="/cv-builder"
+              className={cx(buttonClasses("outline"), "h-10 rounded-full border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50")}
             >
-              <Link href="/cv-builder">
-                <IconListDetails className="mr-1.5 size-4 text-gold-dark" />
-                Créer un CV de zéro
-              </Link>
-            </Button>
+              <IconListDetails className="mr-1.5 size-4 text-gold-dark" />
+              Créer un CV de zéro
+            </Link>
           </div>
 
           {/* Onglets de mode */}
@@ -152,17 +150,14 @@ export default function DashboardPage() {
                   </li>
                 ))}
               </ul>
-              <Button
-                asChild
-                size="lg"
-                className="mt-7 h-12 rounded-full bg-navy px-8 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800"
+              <Link
+                href="/cv-builder"
+                className={cx(buttonClasses(), "mt-7 h-12 rounded-full bg-navy px-8 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800")}
               >
-                <Link href="/cv-builder">
-                  <IconWand className="mr-2 size-5 text-gold" />
-                  Ouvrir le CV Builder
-                  <IconArrowRight className="ml-2 size-5" />
-                </Link>
-              </Button>
+                <IconWand className="mr-2 size-5 text-gold" />
+                Ouvrir le CV Builder
+                <IconArrowRight className="ml-2 size-5" />
+              </Link>
             </section>
           )}
         </div>

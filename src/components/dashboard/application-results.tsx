@@ -14,8 +14,7 @@ import {
   IconTargetArrow,
   IconWand,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button, Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui";
 import { CopyButton } from "@/components/dashboard/copy-button";
 import { downloadPdf } from "@/lib/download-client";
 import { toast } from "sonner";

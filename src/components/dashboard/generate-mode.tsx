@@ -10,10 +10,7 @@ import {
   IconUser,
   IconWand,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Button, Input, Label, Textarea } from "@/components/ui";
 import { CvUpload } from "@/components/dashboard/cv-upload";
 import { ApplicationResults } from "@/components/dashboard/application-results";
 import { toast } from "sonner";

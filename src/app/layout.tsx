@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, Plus_Jakarta_Sans } from "next/font/google";
-import { Toaster } from "@/components/ui/sonner";
+import { Toaster } from "sonner";
 import { SiteNavbar } from "@/components/site-navbar";
 import "./globals.css";
 
@@ -32,8 +32,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="fr" suppressHydrationWarning>
+    <html
+      lang="fr"
+      suppressHydrationWarning
+      data-scroll-behavior="smooth"
+    >
       <body
+        suppressHydrationWarning
         className={`${inter.variable} ${jakarta.variable} font-sans antialiased bg-ice min-h-screen flex flex-col`}
       >
         <SiteNavbar />

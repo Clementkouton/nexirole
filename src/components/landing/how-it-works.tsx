@@ -6,7 +6,7 @@ import {
   IconRocket,
   IconSparkles,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
+import { buttonClasses, cx } from "@/lib/ui-classes";
 import { SectionHeading } from "@/components/landing/section-heading";
 
 const STEPS = [
@@ -78,17 +78,14 @@ export function HowItWorks() {
         </div>
 
         <div className="mt-12 text-center">
-          <Button
-            asChild
-            size="lg"
-            className="h-12 rounded-full bg-navy px-7 text-base font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800"
+          <Link
+            href="/dashboard"
+            className={cx(buttonClasses(), "h-12 rounded-full bg-navy px-7 text-base font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800")}
           >
-            <Link href="/dashboard">
-              <IconSparkles className="mr-2 size-5 text-gold" />
-              Démarrer maintenant
-              <IconArrowRight className="ml-2 size-5" />
-            </Link>
-          </Button>
+            <IconSparkles className="mr-2 size-5 text-gold" />
+            Démarrer maintenant
+            <IconArrowRight className="ml-2 size-5" />
+          </Link>
           <p className="mt-3 text-xs text-slate-400">
             Gratuit, sans inscription, sans carte bancaire.
           </p>

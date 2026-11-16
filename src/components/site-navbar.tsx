@@ -9,7 +9,7 @@ import {
   IconMenu2,
   IconX,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
+import { buttonClasses, cx } from "@/lib/ui-classes";
 
 const NAV_LINKS = [
   { href: "/#fonctionnalites", label: "Fonctionnalités" },
@@ -54,15 +54,13 @@ export function SiteNavbar() {
         </div>
 
         <div className="hidden items-center gap-3 lg:flex">
-          <Button
-            asChild
-            className="rounded-full bg-navy px-5 text-white hover:bg-navy-800"
+          <Link
+            href="/dashboard"
+            className={cx(buttonClasses(), "h-10 rounded-full bg-navy px-5 text-white hover:bg-navy-800")}
           >
-            <Link href="/dashboard">
-              Lancer l&apos;Assistant
-              <IconArrowRight className="ml-1.5 size-4" />
-            </Link>
-          </Button>
+            Lancer l&apos;Assistant
+            <IconArrowRight className="ml-1.5 size-4" />
+          </Link>
         </div>
 
         <button
@@ -88,16 +86,14 @@ export function SiteNavbar() {
                 {link.label}
               </Link>
             ))}
-            <Button
-              asChild
-              className="mt-3 w-full rounded-full bg-navy text-white hover:bg-navy-800"
+            <Link
+              href="/dashboard"
               onClick={() => setOpen(false)}
+              className={cx(buttonClasses(), "mt-3 h-10 w-full rounded-full bg-navy px-5 text-white hover:bg-navy-800")}
             >
-              <Link href="/dashboard">
-                Lancer l&apos;Assistant
-                <IconArrowRight className="ml-1.5 size-4" />
-              </Link>
-            </Button>
+              Lancer l&apos;Assistant
+              <IconArrowRight className="ml-1.5 size-4" />
+            </Link>
           </div>
         </div>
       )}

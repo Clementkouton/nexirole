@@ -1,12 +1,9 @@
 "use client";
 
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
+import { useState } from "react";
+import { IconChevronDown } from "@tabler/icons-react";
 import { SectionHeading } from "@/components/landing/section-heading";
+import { cx } from "@/components/ui";
 
 const FAQ_ITEMS = [
   {
@@ -47,8 +44,10 @@ const FAQ_ITEMS = [
 ];
 
 export function Faq() {
+  const [openIndex, setOpenIndex] = useState<number | null>(0);
+
   return (
-    <section className="bg-ice py-20 sm:py-24">
+    <section id="faq" className="bg-ice py-20 sm:py-24">
       <div className="mx-auto max-w-3xl px-4 sm:px-6 lg:px-8">
         <SectionHeading
           badge="FAQ"
@@ -61,26 +60,45 @@ export function Faq() {
           subtitle="Tout ce qu'il faut savoir avant de générer votre premier dossier de candidature."
         />
 
-        <Accordion
-          type="single"
-          collapsible
-          className="mt-10 rounded-2xl border border-slate-200 bg-white px-5 shadow-sm"
-        >
-          {FAQ_ITEMS.map((item, index) => (
-            <AccordionItem
-              key={item.question}
-              value={`item-${index}`}
-              className={index === FAQ_ITEMS.length - 1 ? "border-b-0" : ""}
-            >
-              <AccordionTrigger className="py-5 text-left text-sm font-semibold text-navy hover:no-underline sm:text-base">
-                {item.question}
-              </AccordionTrigger>
-              <AccordionContent className="pb-5 text-sm leading-relaxed text-slate-600">
-                {item.answer}
-              </AccordionContent>
-            </AccordionItem>
-          ))}
-        </Accordion>
+        <div className="mt-10 rounded-2xl border border-slate-200 bg-white px-5 shadow-sm">
+          {FAQ_ITEMS.map((item, index) => {
+            const open = openIndex === index;
+            const isLast = index === FAQ_ITEMS.length - 1;
+            return (
+              <div
+                key={item.question}
+                className={cx("border-b border-slate-200", isLast && "border-b-0")}
+              >
+                <button
+                  type="button"
+                  onClick={() => setOpenIndex(open ? null : index)}
+                  aria-expanded={open}
+                  className="flex w-full items-center justify-between gap-3 py-5 text-left text-sm font-semibold text-navy transition-colors hover:text-navy-800 sm:text-base"
+                >
+                  {item.question}
+                  <IconChevronDown
+                    className={cx(
+                      "size-4 shrink-0 text-gold-dark transition-transform duration-300",
+                      open && "rotate-180"
+                    )}
+                  />
+                </button>
+                <div
+                  className={cx(
+                    "grid transition-all duration-300 ease-out",
+                    open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
+                  )}
+                >
+                  <div className="overflow-hidden">
+                    <p className="pb-5 text-sm leading-relaxed text-slate-600">
+                      {item.answer}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </section>
   );

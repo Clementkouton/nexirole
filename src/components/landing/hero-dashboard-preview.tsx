@@ -7,7 +7,7 @@ import {
   IconChevronDown,
   IconTargetArrow,
 } from "@tabler/icons-react";
-import { Button } from "@/components/ui/button";
+import { buttonClasses, cx } from "@/lib/ui-classes";
 
 interface DemoOffer {
   id: string;
@@ -258,13 +258,12 @@ export function HeroDashboardPreview() {
             </div>
 
             <div className="mt-5 flex flex-wrap items-center gap-2">
-              <Button
-                asChild
-                size="sm"
-                className="h-8 rounded-full bg-navy px-4 text-xs text-white hover:bg-navy-800"
+              <Link
+                href="/dashboard"
+                className={cx(buttonClasses(), "h-8 rounded-full bg-navy px-4 text-xs text-white hover:bg-navy-800")}
               >
-                <Link href="/dashboard">Générer CV &amp; Lettre pour cette offre</Link>
-              </Button>
+                Générer CV &amp; Lettre pour cette offre
+              </Link>
               <span className="text-[11px] text-slate-400">
                 CV optimisé · Lettre · Kit entretien — en un clic
               </span>
