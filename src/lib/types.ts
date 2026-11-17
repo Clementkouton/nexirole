@@ -1,8 +1,40 @@
 /**
  * Types partagés entre le frontend et les réponses des routes API.
  */
+// src/lib/types.ts
 
-export type JobSource = "remotive" | "arbeitnow";
+export type JobSource = "Remotive" | "Arbeitnow";
+
+export type ScoredJob = {
+  id: string;
+  title: string;
+  company: string;
+  location: string;
+  url: string;
+  source: JobSource;
+  score: number; // 0-100
+  reason: string; // justification courte
+  aiScored: boolean; // true = score IA, false = fallback mots-clés
+  description: string;
+};
+
+export type ScanResponse = {
+  jobs: ScoredJob[];
+  warnings: string[];
+  aiAvailable: boolean;
+  cvName: string | null;
+  totalFound: number;
+  totalKept: number;
+};
+
+export type DossierResponse = {
+  cv: string;
+  lettre: string;
+  score: number | null;
+  conseils: string[];
+  warnings: string[];
+};
+
 
 export interface RawJob {
   id: string;
@@ -16,14 +48,6 @@ export interface RawJob {
   tags: string[];
 }
 
-export interface ScoredJob extends RawJob {
-  score: number;
-  strengths: string[];
-  missingSkills: string[];
-  advice: string;
-  /** "ia" = analyse Groq ; "mots-cles" = score local de repli */
-  scoreSource: "ia" | "mots-cles";
-}
 
 export interface SearchJobsResponse {
   jobs: ScoredJob[];

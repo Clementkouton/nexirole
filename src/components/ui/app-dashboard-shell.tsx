@@ -44,7 +44,8 @@ import type {
   ScoredJob,
   SearchJobsResponse,
 } from "@/lib/types";
-
+import { AgentScanPanel } from "@/components/dashboard/agent-scan-panel";
+import { DossierPanel } from "@/components/dashboard/dossier-panel";
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
@@ -74,6 +75,11 @@ interface AppDashboardShellProps {
 
 function normalize(text: string): string {
   return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function postedAtOf(job: ScoredJob): string | null {
+  const postedAt = (job as ScoredJob & { postedAt?: unknown }).postedAt;
+  return typeof postedAt === "string" && postedAt.trim() ? postedAt : null;
 }
 
 /** Réduit une série à ~14 points pour les sparklines. */
@@ -344,8 +350,8 @@ function SourceAreaChart({
 /* ------------------------------------------------------------------ */
 
 function SourceSummaryTable({ ranked }: { ranked: RankedJob[] }) {
-  const remotive = ranked.filter((r) => r.job.source === "remotive");
-  const arbeitnow = ranked.filter((r) => r.job.source === "arbeitnow");
+  const remotive = ranked.filter((r) => r.job.source === "Remotive");
+  const arbeitnow = ranked.filter((r) => r.job.source === "Arbeitnow");
 
   function row(label: string, dotClass: string, rows: RankedJob[]) {
     const count = rows.length;
@@ -355,7 +361,11 @@ function SourceSummaryTable({ ranked }: { ranked: RankedJob[] }) {
     const best = count ? Math.max(...rows.map((r) => r.job.score)) : 0;
     const high = rows.filter((r) => r.job.score >= 80).length;
     const dates = rows
-      .map((r) => r.job.postedAt)
+      .map(({ job }) =>
+        "postedAt" in job && typeof job.postedAt === "string"
+          ? job.postedAt
+          : undefined
+      )
       .filter((d): d is string => Boolean(d))
       .sort();
     const latest = dates.length > 0 ? dates[dates.length - 1] : "—";
@@ -473,10 +483,10 @@ export function AppDashboardShell({ user }: AppDashboardShellProps) {
     : 0;
   const highCount = scores.filter((v) => v >= 80).length;
   const remotiveScores = ranked
-    .filter((r) => r.job.source === "remotive")
+    .filter((r) => r.job.source.toLowerCase() === "remotive")
     .map((r) => r.job.score);
   const arbeitnowScores = ranked
-    .filter((r) => r.job.source === "arbeitnow")
+    .filter((r) => r.job.source.toLowerCase() === "arbeitnow")
     .map((r) => r.job.score);
 
   /* Séries des sparklines */
@@ -495,14 +505,14 @@ export function AppDashboardShell({ user }: AppDashboardShellProps) {
   const visibleJobs: RankedJob[] = (() => {
     let list = ranked;
     if (sourceFilter !== "all") {
-      list = list.filter((r) => r.job.source === sourceFilter);
+      list = list.filter((r) => r.job.source.toLowerCase() === sourceFilter);
     }
     const q = normalize(query.trim());
     if (q.length >= 2) {
       const tokens = q.split(/\s+/).filter(Boolean);
       list = list.filter((r) => {
         const hay = normalize(
-          `${r.job.title} ${r.job.company} ${r.job.location} ${r.job.tags.join(" ")}`
+          `${r.job.title} ${r.job.company} ${r.job.location} ${r.job.description} ${r.job.reason}`
         );
         return tokens.every((t) => hay.includes(t));
       });
@@ -511,8 +521,10 @@ export function AppDashboardShell({ user }: AppDashboardShellProps) {
     return [...list].sort((a, b) => {
       if (sortKey === "score") return (a.job.score - b.job.score) * dir;
       if (sortKey === "date") {
-        const da = a.job.postedAt ? Date.parse(a.job.postedAt) : 0;
-        const db = b.job.postedAt ? Date.parse(b.job.postedAt) : 0;
+        const postedA = postedAtOf(a.job);
+        const postedB = postedAtOf(b.job);
+        const da = postedA ? Date.parse(postedA) : 0;
+        const db = postedB ? Date.parse(postedB) : 0;
         return (da - db) * dir;
       }
       return (a.rank - b.rank) * dir;
@@ -1148,13 +1160,13 @@ export function AppDashboardShell({ user }: AppDashboardShellProps) {
                                 <span
                                   className={cx(
                                     "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold",
-                                    job.source === "remotive"
+                                    job.source.toLowerCase() === "remotive"
                                       ? "bg-navy-50 text-navy"
                                       : "bg-gold-soft text-accent-foreground"
                                   )}
                                 >
                                   <IconRadar className="size-3.5" />
-                                  {job.source === "remotive" ? "Remotive" : "Arbeitnow"}
+                                  {job.source.toLowerCase() === "remotive" ? "Remotive" : "Arbeitnow"}
                                 </span>
                               </td>
                               <td className="px-4 py-3">
@@ -1168,7 +1180,7 @@ export function AppDashboardShell({ user }: AppDashboardShellProps) {
                                 </span>
                               </td>
                               <td className="px-4 py-3 text-xs text-slate-500">
-                                {job.postedAt ?? "—"}
+                                {postedAtOf(job) ?? "—"}
                               </td>
                               <td className="px-4 py-3">
                                 {generated ? (
@@ -1237,69 +1249,13 @@ export function AppDashboardShell({ user }: AppDashboardShellProps) {
 
           {/* ═══ VUE : CV & LETTRE PAR LIEN D'OFFRE ═══ */}
           {view === "generate" && (
-            <div className="space-y-6">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h1 className="font-heading text-xl font-bold text-navy">
-                    CV &amp; Lettre par Lien d&apos;offre
-                  </h1>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Collez l&apos;URL de l&apos;annonce : NexiRole rédige votre CV
-                    optimisé, la lettre et le kit entretien.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setView("overview")}
-                  className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-navy transition hover:bg-slate-50"
-                >
-                  <IconArrowUp className="size-4 rotate-[-90deg]" />
-                  Retour aux scores
-                </button>
-              </div>
+            <DossierPanel />
 
-              <GenerateMode
-                cvFile={cvFile}
-                onCvFileChange={setCvFile}
-                profileText={profileText}
-                onProfileTextChange={setProfileText}
-                prefill={prefill}
-                onGenerated={handleGenerated}
-              />
-            </div>
           )}
 
           {/* ═══ VUE : AGENT RECHERCHE EN DIRECT ═══ */}
           {view === "agent" && (
-            <div className="space-y-6">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h1 className="font-heading text-xl font-bold text-navy">
-                    Agent Recherche en Direct
-                  </h1>
-                  <p className="mt-1 text-sm text-slate-500">
-                    Scan en direct Remotive + Arbeitnow, scoring IA de chaque
-                    offre contre votre CV.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setView("overview")}
-                  className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-navy transition hover:bg-slate-50"
-                >
-                  <IconArrowUp className="size-4 rotate-[-90deg]" />
-                  Retour aux scores
-                </button>
-              </div>
-
-              <SearchMode
-                cvFile={cvFile}
-                onCvFileChange={setCvFile}
-                profileText={profileText}
-                onResults={handleScanResults}
-                onGenerateForJob={handleGenerateForJob}
-              />
-            </div>
+            <AgentScanPanel />
           )}
         </main>
       </div>
