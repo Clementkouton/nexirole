@@ -1,69 +1,58 @@
 "use client";
 
-/**
- * Champ mot de passe accessible : bouton afficher/masquer, icône verrou,
- * message d'erreur sous le champ (aria-invalid + aria-describedby).
- */
-import { useId, useState } from "react";
-import { IconEye, IconEyeOff, IconLock } from "@tabler/icons-react";
-import { cx } from "@/lib/ui-classes";
+import { useState } from "react";
+import { IconEye, IconEyeOff } from "@tabler/icons-react";
+
+interface PasswordFieldProps {
+  label: string;
+  name: string;
+  placeholder?: string;
+  autoComplete?: string;
+  error?: string;
+  value?: string;
+  onChange?: (value: string) => void;
+}
 
 export function PasswordField({
-  name,
   label,
+  name,
+  placeholder,
+  autoComplete,
   error,
-  autoComplete = "current-password",
-  placeholder = "••••••••",
-}: {
-  name: string;
-  label: string;
-  error?: string;
-  autoComplete?: string;
-  placeholder?: string;
-}) {
+  value,
+  onChange,
+}: PasswordFieldProps) {
   const [visible, setVisible] = useState(false);
-  const errorId = useId();
 
   return (
-    <div className="space-y-1.5">
-      <label htmlFor={name} className="block text-sm font-medium text-navy">
+    <div>
+      <label htmlFor={name} className="mb-1.5 block text-sm font-semibold text-navy">
         {label}
       </label>
       <div className="relative">
-        <IconLock
-          className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-slate-400"
-          aria-hidden
-        />
         <input
           id={name}
           name={name}
           type={visible ? "text" : "password"}
+          required
+          placeholder={placeholder ?? "••••••••"}
           autoComplete={autoComplete}
-          placeholder={placeholder}
-          aria-invalid={Boolean(error)}
-          aria-describedby={error ? errorId : undefined}
-          className={cx(
-            "w-full rounded-xl border bg-white py-2.5 pl-10 pr-11 text-sm text-navy shadow-sm outline-none transition-colors placeholder:text-slate-400",
-            "focus:ring-2 focus:ring-navy/10",
-            error
-              ? "border-red-400 focus:border-red-400"
-              : "border-slate-200 focus:border-navy/40",
-          )}
+          value={value}
+          onChange={onChange ? (e) => onChange(e.target.value) : undefined}
+          className={`w-full rounded-full border bg-white px-4 py-2.5 pr-11 text-sm text-navy placeholder:text-slate-400 outline-none transition focus:border-gold focus:ring-2 focus:ring-gold/30 ${
+            error ? "border-red-400" : "border-slate-200"
+          }`}
         />
         <button
           type="button"
           onClick={() => setVisible((v) => !v)}
-          className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-slate-400 transition-colors hover:text-navy"
           aria-label={visible ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-8 w-8 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-navy"
         >
-          {visible ? <IconEyeOff className="size-4" /> : <IconEye className="size-4" />}
+          {visible ? <IconEyeOff className="size-4.5" /> : <IconEye className="size-4.5" />}
         </button>
       </div>
-      {error ? (
-        <p id={errorId} className="text-xs font-medium text-red-600" role="alert">
-          {error}
-        </p>
-      ) : null}
+      {error ? <p className="mt-1.5 text-xs text-red-500">{error}</p> : null}
     </div>
   );
 }

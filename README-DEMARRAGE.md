@@ -33,7 +33,7 @@ npm run dev
 | --- | --- |
 | `next: command not found` / `sh: next: not found` | Lancez `npm install` d'abord |
 | `Module not found: Can't resolve 'ai'` (ou autre paquet) | `npm install` puis relancez |
-| `EADDRINUSE :::3000` | Un autre programme occupe le port 3000 : fermez-le ou lancez `npm run dev -- -p 3001` |
+| `EADDRINUSE :::3000` | Un autre programme occupe le port 3000 : fermez-le ou lancez `npm run dev -- -p 3000` |
 | Le terminal ne dit pas « ✓ Ready in … » | Lisez le message d'erreur complet et corrigez le fichier indiqué |
 
 Le serveur est démarré **uniquement** quand vous voyez :

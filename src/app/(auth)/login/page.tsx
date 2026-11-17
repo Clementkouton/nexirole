@@ -17,5 +17,5 @@ export default async function LoginPage({
         ? "Votre compte a été créé. Connectez-vous pour accéder à votre espace."
         : null;
 
-  return <LoginForm info={info} />;
+  return <LoginForm {...({ info } as any)} />;
 }

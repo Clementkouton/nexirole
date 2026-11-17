@@ -1,6 +1,3 @@
-/**
- * Auth.js v5 — configuration complète (runtime Node : Prisma + bcrypt ici).
- */
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
@@ -8,40 +5,59 @@ import { PrismaAdapter } from "@auth/prisma-adapter";
 import bcrypt from "bcryptjs";
 import type { Provider } from "next-auth/providers";
 
-import { authConfig } from "./auth.config";
+import { authConfig } from "@/auth.config";
 import { prisma } from "@/lib/prisma";
-import { loginSchema } from "@/lib/auth-validations";
+import { loginSchema } from "@/lib/validations/auth";
+
+// Hash fictif : égalise le temps de réponse quand l'utilisateur n'existe
+// pas (protection contre l'énumération d'emails par analyse de timing).
+const DUMMY_HASH = bcrypt.hashSync("nexirole-timing-equalizer", 12);
 
 const providers: Provider[] = [
-  Credentials({
-    name: "Email et mot de passe",
-    credentials: { email: { label: "Email" }, password: { label: "Mot de passe" } },
-    authorize: async (credentials) => {
-      // 1. Validation stricte des entrées (Zod) avant tout accès base.
-      const parsed = loginSchema.safeParse(credentials);
-      if (!parsed.success) return null;
-      const { email, password } = parsed.data;
-
-      const user = await prisma.user.findUnique({ where: { email } });
-
-      // 2. Utilisateur inconnu OU compte Google sans mot de passe local :
-      //    même traitement (pas de fuite d'information). Le message ciblé
-      //    "utilisez Google" est géré dans loginAction (Server Action).
-      if (!user?.passwordHash) return null;
-
-      // 3. bcrypt — comparaison à coût constant.
-      const valid = await bcrypt.compare(password, user.passwordHash);
-      if (!valid) return null;
-
-      return { id: user.id, name: user.name, email: user.email, image: user.image };
-    },
-  }),
   Google({
     clientId: process.env.AUTH_GOOGLE_ID,
     clientSecret: process.env.AUTH_GOOGLE_SECRET,
-    // SÉCURITÉ (anti account-takeover) : la liaison automatique d'un compte
-    // Google à un compte email/mot de passe EXISTANT est désactivée.
-    allowDangerousEmailAccountLinking: false,
+    // SÉCURITÉ : valeur par défaut conservée (false). Auth.js refuse de lier
+    // automatiquement un compte Google à un compte existant créé par mot de
+    // passe => anti Account Takeover. L'utilisateur voit "OAuthAccountNotLinked".
+  }),
+  Credentials({
+    credentials: { email: {}, password: {} },
+    authorize: async (credentials) => {
+      // 1. Validation serveur avec Zod
+      const parsed = loginSchema.safeParse(credentials);
+      if (!parsed.success) return null;
+
+      const { email, password } = parsed.data;
+
+      // 2. Recherche de l'utilisateur
+      const user = await prisma.user.findUnique({
+        where: { email },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          image: true,
+          role: true,
+          passwordHash: true,
+        },
+      });
+
+      // 3. Comparaison Bcrypt (temps constant même si l'email est inconnu)
+      const passwordHash = user?.passwordHash ?? DUMMY_HASH;
+      const isValid = await bcrypt.compare(password, passwordHash);
+
+      if (!user || !user.passwordHash || !isValid) return null;
+
+      // 4. passwordHash n'est JAMAIS renvoyé à la session
+      return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        image: user.image,
+        role: user.role,
+      };
+    },
   }),
 ];
 
@@ -49,15 +65,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   adapter: PrismaAdapter(prisma),
   providers,
-  events: {
-    // Un compte créé via Google : l'email est vérifié par Google → on le note.
-    linkAccount: async ({ user }) => {
-      if (user.id) {
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { emailVerified: new Date() },
-        });
+  callbacks: {
+    ...authConfig.callbacks,
+    async jwt({ token, user }) {
+      if (user) {
+        token.id = user.id;
+        token.role = user.role ?? "user";
       }
+      return token;
+    },
+    async session({ session, token }) {
+      if (typeof token.id === "string") session.user.id = token.id;
+      if (typeof token.role === "string") session.user.role = token.role;
+      return session;
     },
   },
 });

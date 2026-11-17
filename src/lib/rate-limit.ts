@@ -1,53 +1,39 @@
-/**
- * Rate limiting applicatif (protection force brute — OWASP).
- * Fenêtre glissante en mémoire, par clé (IP et/ou email).
- * En multi-instances, basculer sur Upstash Redis — l'API est identique.
- */
-interface Bucket {
-  count: number;
-  resetAt: number;
-}
+// Rate limiting en mémoire, sans dépendance externe.
+// Suffisant pour démarrer. À fort trafic en production, passer sur
+// Upstash Ratelimit (@upstash/ratelimit + Redis) pour un compteur
+// partagé entre toutes les instances serverless.
+
+type Bucket = { count: number; resetAt: number };
 
 const buckets = new Map<string, Bucket>();
 
-export interface RateLimitResult {
-  allowed: boolean;
-  retryAfterSeconds: number;
+function sweep() {
+  const now = Date.now();
+  for (const [key, bucket] of buckets) {
+    if (bucket.resetAt < now) buckets.delete(key);
+  }
 }
 
 export function rateLimit(
   key: string,
   limit: number,
   windowMs: number
-): RateLimitResult {
+): { success: true; remaining: number } | { success: false; retryAfterSec: number } {
   const now = Date.now();
 
-  if (buckets.size > 10_000) {
-    for (const [k, v] of buckets) {
-      if (v.resetAt < now) buckets.delete(k);
-    }
-  }
+  if (buckets.size > 10_000) sweep();
 
   const bucket = buckets.get(key);
+
   if (!bucket || bucket.resetAt < now) {
     buckets.set(key, { count: 1, resetAt: now + windowMs });
-    return { allowed: true, retryAfterSeconds: 0 };
+    return { success: true, remaining: limit - 1 };
+  }
+
+  if (bucket.count >= limit) {
+    return { success: false, retryAfterSec: Math.ceil((bucket.resetAt - now) / 1000) };
   }
 
   bucket.count += 1;
-  if (bucket.count > limit) {
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)),
-    };
-  }
-  return { allowed: true, retryAfterSeconds: 0 };
-}
-
-export function getClientIp(headers: Headers): string {
-  const forwarded = headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0]!.trim();
-  }
-  return headers.get("x-real-ip") ?? "local";
+  return { success: true, remaining: limit - bucket.count };
 }

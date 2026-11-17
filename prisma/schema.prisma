@@ -1,32 +1,37 @@
-// NexiRole — Schéma Prisma 7 (Auth.js v5 + PostgreSQL Neon)
-// Prisma 7 : les URLs de connexion ne vivent PLUS dans ce fichier.
-//   - Migrations (CLI)  → prisma.config.ts → variable DIRECT_URL
-//   - Runtime (l'app)   → src/lib/prisma.ts → variable DATABASE_URL (poolée)
+// NexiRole — Authentification Auth.js v5 + PostgreSQL (Neon)
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
+// ── Utilisateur ──────────────────────────────────────────────
 model User {
   id            String    @id @default(cuid())
   name          String?
   email         String    @unique
   emailVerified DateTime?
   image         String?
-  // null = compte créé via Google uniquement (aucun mot de passe local)
-  passwordHash  String?
-  accounts      Account[]
-  sessions      Session[]
-  resetTokens   PasswordResetToken[]
+  passwordHash  String?   // Bcrypt coût 12 — null = compte Google uniquement
+  role          String    @default("user")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+
+  accounts    Account[]
+  sessions    Session[]
+  resetTokens PasswordResetToken[]
+
+  @@map("users")
 }
 
+// ── Comptes OAuth (Google...) — requis par Auth.js ───────────
 model Account {
+  id                String   @id @default(cuid())
   userId            String
   type              String
   provider          String
@@ -44,10 +49,12 @@ model Account {
 
   @@unique([provider, providerAccountId])
   @@index([userId])
+  @@map("accounts")
 }
 
+// ── Sessions base de données (présentes pour compatibilité) ──
 model Session {
-  sessionToken String   @unique
+  sessionToken String   @id
   userId       String
   expires      DateTime
   createdAt    DateTime @default(now())
@@ -55,26 +62,26 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@map("sessions")
 }
 
+// ── Tokens de vérification (requis par Auth.js) ──────────────
 model VerificationToken {
   identifier String
   token      String
   expires    DateTime
 
   @@unique([identifier, token])
+  @@map("verification_tokens")
 }
 
-// Tokens de réinitialisation : seule l'EMPREINTE SHA-256 du token est stockée,
-// le token brut n'existe que dans l'email — expiration 1 heure.
+// ── Réinitialisation de mot de passe ─────────────────────────
 model PasswordResetToken {
-  id        String   @id @default(cuid())
-  tokenHash String   @unique
-  userId    String
-  expires   DateTime
-  createdAt DateTime @default(now())
+  id      String   @id @default(cuid())
+  email   String
+  token   String   @unique // SHA-256 du token envoyé par email — jamais le token brut
+  expires DateTime
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
+  @@index([email])
+  @@map("password_reset_tokens")
 }
