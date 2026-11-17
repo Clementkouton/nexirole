@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter, Plus_Jakarta_Sans } from "next/font/google";
 import { Toaster } from "sonner";
 import { SiteNavbar } from "@/components/site-navbar";
+import { SessionProvider } from "next-auth/react";
 import "./globals.css";
 
 const inter = Inter({
@@ -41,9 +42,11 @@ export default function RootLayout({
         suppressHydrationWarning
         className={`${inter.variable} ${jakarta.variable} font-sans antialiased bg-ice min-h-screen flex flex-col`}
       >
-        <SiteNavbar />
-        <main className="flex-1 flex flex-col">{children}</main>
-        <Toaster position="top-center" richColors />
+        <SessionProvider>
+          <SiteNavbar />
+          <main className="flex-1 flex flex-col">{children}</main>
+          <Toaster position="top-center" richColors />
+        </SessionProvider>
       </body>
     </html>
   );

@@ -1,0 +1,80 @@
+// NexiRole — Schéma Prisma 7 (Auth.js v5 + PostgreSQL Neon)
+// Prisma 7 : les URLs de connexion ne vivent PLUS dans ce fichier.
+//   - Migrations (CLI)  → prisma.config.ts → variable DIRECT_URL
+//   - Runtime (l'app)   → src/lib/prisma.ts → variable DATABASE_URL (poolée)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  // null = compte créé via Google uniquement (aucun mot de passe local)
+  passwordHash  String?
+  accounts      Account[]
+  sessions      Session[]
+  resetTokens   PasswordResetToken[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Tokens de réinitialisation : seule l'EMPREINTE SHA-256 du token est stockée,
+// le token brut n'existe que dans l'email — expiration 1 heure.
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expires   DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
