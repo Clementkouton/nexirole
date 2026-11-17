@@ -5,7 +5,7 @@ import bcrypt from "bcryptjs";
 import { createHash, randomBytes } from "crypto";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-
+import { sendPasswordResetEmail } from "@/lib/mail";
 import { signIn } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";

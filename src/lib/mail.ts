@@ -5,7 +5,7 @@
  *    Aucun lien n'est renvoyé dans la réponse HTTP (anti-énumération).
  */
 
-const FROM = process.env.EMAIL_FROM ?? "NexiRole <onboarding@resend.dev>";
+const FROM = process.env.MAIL_FROM ?? "noreply@localhost";
 
 function resetEmailHtml(resetUrl: string, minutes: number): string {
   return `

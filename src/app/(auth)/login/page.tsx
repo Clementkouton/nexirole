@@ -2,20 +2,27 @@ import { LoginForm } from "@/components/auth/login-form";
 
 export const metadata = { title: "Connexion — NexiRole" };
 
+// Messages clairs pour les erreurs renvoyées par Auth.js
+const OAUTH_ERRORS: Record<string, string> = {
+  OAuthAccountNotLinked:
+    "Un compte existe déjà avec cet email. Connectez-vous avec votre mot de passe : Google ne peut pas être lié automatiquement.",
+  AccessDenied:
+    "Connexion Google refusée. Réessayez ou connectez-vous avec votre mot de passe.",
+};
+
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ registered?: string; reset?: string }>;
+  searchParams: Promise<{ registered?: string; reset?: string; error?: string }>;
 }) {
   const params = await searchParams;
+  const oauthError = params.error ? OAUTH_ERRORS[params.error] : undefined;
 
-  // Messages issus des autres flux (inscription terminée, mot de passe modifié).
-  const info =
-    params.reset === "1"
-      ? "Votre mot de passe a été mis à jour. Connectez-vous avec votre nouveau mot de passe."
-      : params.registered === "1"
-        ? "Votre compte a été créé. Connectez-vous pour accéder à votre espace."
-        : null;
-
-  return <LoginForm {...({ info } as any)} />;
+  return (
+    <LoginForm
+      registered={params.registered === "1"}
+      reset={params.reset === "1"}
+      oauthError={oauthError}
+    />
+  );
 }
