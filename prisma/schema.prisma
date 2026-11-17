@@ -1,13 +1,14 @@
 // NexiRole — Authentification Auth.js v5 + PostgreSQL (Neon)
+// Prisma 7 : les URLs de connexion vivent dans prisma.config.ts
+// (plus de url/directUrl ici) et le client est généré dans src/generated/prisma.
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "postgresql"
 }
 
 // ── Utilisateur ──────────────────────────────────────────────
@@ -22,9 +23,8 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  accounts    Account[]
-  sessions    Session[]
-  resetTokens PasswordResetToken[]
+  accounts Account[]
+  sessions Session[]
 
   @@map("users")
 }

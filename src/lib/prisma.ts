@@ -1,14 +1,11 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-
-const { PrismaClient } = require("@prisma/client") as {
-  PrismaClient: new (...args: any[]) => any;
-};
+import { PrismaClient } from "@/generated/prisma/client";
 
 const globalForPrisma = globalThis as unknown as {
-  prisma: InstanceType<typeof PrismaClient> | undefined;
+  prisma: PrismaClient | undefined;
 };
 
-function createPrismaClient() {
+function createPrismaClient(): PrismaClient {
   const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
   return new PrismaClient({ adapter });
 }
