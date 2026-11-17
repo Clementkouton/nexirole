@@ -9,8 +9,8 @@ export const authConfig = {
   },
   session: { strategy: "jwt" },
   providers: [], // Providers réels déclarés dans src/auth.ts
-  callbacks: {
-    // Contrôle d'accès centralisé, exécuté par le middleware
+    callbacks: {
+    // Contrôle d'accès centralisé, exécuté par le proxy
     authorized({ request, auth }) {
       const { pathname } = request.nextUrl;
       const isLoggedIn = !!auth?.user;
@@ -20,15 +20,16 @@ export const authConfig = {
       const isAuthPage = isLoginPage || isRegisterPage;
       const isProtected = pathname.startsWith("/dashboard");
 
-      // Déjà connecté : /login et /register renvoient vers /dashboard
-      // (/forgot-password et /reset-password restent toujours accessibles)
-      if (isAuthPage && isLoggedIn) {
+      // REDIRECTION UNIQUEMENT SUR GET : les Server Actions arrivent en POST
+      // sur la page où elles sont définies. Rediriger un POST provoque
+      // l'erreur "Invalid Server Actions request".
+      if (isAuthPage && isLoggedIn && request.method === "GET") {
         return Response.redirect(new URL("/dashboard", request.nextUrl));
       }
 
       // /dashboard et sous-pages : réservées aux utilisateurs connectés
       if (isProtected) {
-        return isLoggedIn; // false => redirection automatique vers /login
+        return isLoggedIn;
       }
 
       return true;

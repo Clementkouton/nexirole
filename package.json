@@ -3,9 +3,15 @@
     "version": "1.0.0",
     "private": true,
     "scripts": {
-        "dev": "next dev -p 3000",
+        "dev": "next dev",
         "build": "next build",
-        "start": "next start -p 3000"
+        "start": "next start",
+        "postinstall": "prisma generate"
+    },
+    "allowScripts": {
+        "@prisma/client": true,
+        "@prisma/engines": true,
+        "prisma": true
     },
     "dependencies": {
         "@ai-sdk/groq": "^4.0.84",

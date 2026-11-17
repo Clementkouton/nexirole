@@ -1,11 +1,13 @@
 import NextAuth from "next-auth";
-import { authConfig } from "./auth.config";
+import { authConfig } from "@/auth.config";
 
-// Next.js 16 : le handler du proxy est l'export default.
-// `auth` de NextAuth v5 est compatible avec cette signature.
+// Next.js 16 : middleware.ts devient proxy.ts.
+// Protège /dashboard et redirige /login, /register si déjà connecté.
 export default NextAuth(authConfig).auth;
 
-// Le matcher doit être un export de premier niveau nommé `config`.
 export const config = {
-  matcher: ["/dashboard/:path*", "/login", "/register"],
+  // Exclut les routes API et les fichiers statiques
+  matcher: [
+    "/((?!api|_next/static|_next/image|favicon.ico|logo.png|.*\\.(?:png|jpg|jpeg|svg|ico|webp|txt|xml)$).*)",
+  ],
 };
