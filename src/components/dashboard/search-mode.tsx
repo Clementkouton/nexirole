@@ -26,6 +26,8 @@ interface SearchModeProps {
   onCvFileChange: (value: CvFileValue | null) => void;
   profileText: string;
   onGenerateForJob: (job: ScoredJob) => void;
+  /** Notifie le shell à chaque scan réussi (KPIs + tableau du dashboard). */
+  onResults?: (results: SearchJobsResponse) => void;
 }
 
 function scoreStyle(score: number): { pill: string; bar: string; label: string } {
@@ -213,6 +215,7 @@ export function SearchMode({
   onCvFileChange,
   profileText,
   onGenerateForJob,
+  onResults,
 }: SearchModeProps) {
   const [jobTitle, setJobTitle] = useState("");
   const [location, setLocation] = useState("");
@@ -251,6 +254,7 @@ export function SearchMode({
         return;
       }
       setResults(json);
+      onResults?.(json);
       if (json.jobs.length === 0) {
         toast.message("Aucune offre trouvée", {
           description: json.message ?? "Élargissez vos filtres et réessayez.",
@@ -355,8 +359,7 @@ export function SearchMode({
           <Button
             onClick={handleSearch}
             disabled={loading}
-            size="lg"
-            className="h-12 w-full rounded-full bg-navy px-8 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800 sm:w-auto"
+            className="h-12 w-full rounded-full bg-gold px-8 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800 sm:w-auto"
           >
             {loading ? (
               <IconLoader2 className="mr-2 size-5 animate-spin" />

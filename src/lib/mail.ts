@@ -1,11 +1,18 @@
 /**
  * Envoi d'emails — réinitialisation de mot de passe.
- * 1. RESEND_API_KEY défini → envoi réel via Resend (gratuit : 100 emails/jour).
+ * 1. RESEND_API_KEY définie → envoi réel via Resend (gratuit : 100 emails/jour),
+ *    appel REST direct via fetch : aucune dépendance npm nécessaire.
  * 2. Absente → le lien est affiché dans la CONSOLE du serveur (dev).
  *    Aucun lien n'est renvoyé dans la réponse HTTP (anti-énumération).
+ *
+ * IMPORTANT Resend : tant qu'aucun domaine n'est vérifié dans votre compte
+ * Resend, l'expéditeur "onboarding@resend.dev" ne délivre qu'à l'adresse
+ * email de PROPRIÉTAIRE du compte Resend — idéal pour tester avec votre
+ * propre email. Pour écrire à tout le monde : vérifiez un domaine
+ * (Resend → Domains) puis mettez MAIL_FROM="NexiRole <noreply@votre-domaine>".
  */
 
-const FROM = process.env.MAIL_FROM ?? "noreply@localhost";
+const FROM = process.env.MAIL_FROM ?? "NexiRole <onboarding@resend.dev>";
 
 function resetEmailHtml(resetUrl: string, minutes: number): string {
   return `
@@ -27,8 +34,9 @@ function resetEmailHtml(resetUrl: string, minutes: number): string {
         </a>
       </p>
       <p style="color:#64748b;font-size:13px;line-height:1.6">
-        Ce lien est valable ${minutes} minutes. Si vous n'êtes pas à l'origine de cette demande,
-        ignorez simplement cet email — votre mot de passe actuel reste inchangé.
+        Ce lien est valable ${minutes} minutes et ne peut être utilisé qu'une seule fois.
+        Si vous n'êtes pas à l'origine de cette demande, ignorez simplement cet email —
+        votre mot de passe actuel reste inchangé.
       </p>
       <p style="color:#94a3b8;font-size:12px;border-top:1px solid #e2e8f0;padding-top:16px">
         Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :<br/>

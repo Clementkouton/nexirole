@@ -28,6 +28,8 @@ interface GenerateModeProps {
   profileText: string;
   onProfileTextChange: (value: string) => void;
   prefill: PrefillPayload | null;
+    /** Notifie le shell quand un dossier (CV + lettre) est généré avec succès. */
+  onGenerated?: (result: ApplicationResponse) => void;
 }
 
 const LOADING_STEPS = [
@@ -44,7 +46,8 @@ export function GenerateMode({
   profileText,
   onProfileTextChange,
   prefill,
-}: GenerateModeProps) {
+  onGenerated,
+}: GenerateModeProps): import("react").JSX.Element {
   const [jobUrl, setJobUrl] = useState("");
   const [jobText, setJobText] = useState("");
   const [showPasteMode, setShowPasteMode] = useState(false);
@@ -122,6 +125,7 @@ export function GenerateMode({
       }
 
       setResult(json);
+      onGenerated?.(json);
       toast.success("Votre dossier de candidature est prêt !");
     } catch {
       setError(
@@ -257,8 +261,8 @@ export function GenerateMode({
           <Button
             onClick={handleGenerate}
             disabled={loading}
-            size="lg"
-            className="h-12 w-full shrink-0 rounded-full bg-navy px-8 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800 sm:w-auto"
+            
+            className="h-12 w-full shrink-0 rounded-full bg-gold px-8 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(5,25,55,0.5)] hover:bg-navy-800 sm:w-auto"
           >
             {loading ? (
               <IconLoader2 className="mr-2 size-5 animate-spin" />

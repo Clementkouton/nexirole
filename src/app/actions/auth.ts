@@ -154,18 +154,33 @@ export async function forgotPasswordAction(
       data: { email, token: tokenHash, expires },
     });
 
-    const resetUrl = `${process.env.APP_URL ?? "http://localhost:3000"}/reset-password?token=${rawToken}`;
+    // URL de base : APP_URL si définie, sinon reconstruite depuis les
+    // en-têtes de la requête — fonctionne en local ET sur Vercel sans config.
+    const h = await headers();
+    const reqHost =
+      h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+    const reqProto =
+      h.get("x-forwarded-proto") ??
+      (reqHost.startsWith("localhost") ? "http" : "https");
+    const baseUrl = process.env.APP_URL?.trim() || `${reqProto}://${reqHost}`;
+    const resetUrl = `${baseUrl}/reset-password?token=${rawToken}`;
 
-    // PRODUCTION : remplacer ce log par un vrai envoi d'email
-    // (Resend, Postmark, Nodemailer...). Le token brut n'est JAMAIS
-    // stocké en base : seul son SHA-256 l'est.
-    if (process.env.NODE_ENV !== "production") {
+    // Envoi réel via Resend. En cas d'échec : repli console en dev,
+    // alerte serveur en prod. La réponse HTTP reste STRICTEMENT
+    // identique dans tous les cas (anti-énumération).
+    // Le token brut n'est JAMAIS stocké en base : seul son SHA-256 l'est.
+    const emailSent = await sendPasswordResetEmail(email, resetUrl, 60);
+    if (emailSent) {
       console.log(
-        `\n[DEV] Lien de réinitialisation :\n${resetUrl}\n`
+        `[forgot-password] Email de réinitialisation envoyé à ${email}.`
+      );
+    } else if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `\n[DEV] RESEND_API_KEY absente ou envoi échoué — lien de réinitialisation :\n${resetUrl}\n`
       );
     } else {
-      console.log(
-        `[forgot-password] Lien généré pour ${email} (service d'email non encore configuré).`
+      console.error(
+        `[forgot-password] Envoi email impossible pour ${email} — vérifiez RESEND_API_KEY et MAIL_FROM.`
       );
     }
   }
