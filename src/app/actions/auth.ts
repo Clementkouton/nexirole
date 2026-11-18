@@ -22,6 +22,31 @@ export type AuthState = { error?: string; success?: string } | null;
 const GENERIC_RESET_MSG =
   "Si un compte existe avec cet email, un lien de réinitialisation vient d'être envoyé. Vérifiez votre boîte de réception et vos spams.";
 
+// Message DB injoignable (Neon suspendu, DATABASE_URL absente...)
+const DB_ERROR_MSG =
+  "Service momentanément indisponible : la base de données est injoignable. Réessayez dans quelques minutes.";
+
+function isDbDown(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message : String(error ?? "");
+  return /can't reach database|p1001|p1008|etimedout|econnrefused|enotfound|ssl/i.test(
+    message
+  );
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === "P2002";
+}
+
+function getResetBaseUrl(): string {
+  return (
+    process.env.APP_URL ??
+    process.env.AUTH_URL ??
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined) ??
+    "http://localhost:3000"
+  );
+}
+
 async function getClientIp(): Promise<string> {
   const h = await headers();
   return (
@@ -53,22 +78,26 @@ export async function registerAction(
     };
   }
 
-  // 3. Email déjà utilisé ?
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) {
-    return {
-      error: "Un compte existe déjà avec cet email. Connectez-vous ou réinitialisez votre mot de passe.",
-    };
-  }
-
-  // 4. Hachage Bcrypt coût 12 — le mot de passe en clair n'est jamais stocké
-  const passwordHash = await bcrypt.hash(password, 12);
-
+  // 3-4. Email déjà utilisé + création — base protégée par try/catch :
+  // Neon suspendu ou DATABASE_URL absente ne fait plus planter la page.
   try {
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) {
+      return {
+        error: "Un compte existe déjà avec cet email. Connectez-vous ou réinitialisez votre mot de passe.",
+      };
+    }
+
+    // Hachage Bcrypt coût 12 — le mot de passe en clair n'est jamais stocké
+    const passwordHash = await bcrypt.hash(password, 12);
     await prisma.user.create({ data: { name, email, passwordHash } });
-  } catch {
-    // Course concurrente (double clic) : unicité de l'email violée
-    return { error: "Un compte existe déjà avec cet email." };
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      // Course concurrente (double clic) : unicité de l'email violée
+      return { error: "Un compte existe déjà avec cet email." };
+    }
+    console.error("[register] Erreur base de données :", error);
+    return { error: DB_ERROR_MSG };
   }
 
   // 5. Pas de session automatique après inscription : on passe par /login
@@ -109,6 +138,10 @@ export async function loginAction(
       // Message volontairement vague : aucun indice sur ce qui a échoué
       return { error: "Email ou mot de passe incorrect." };
     }
+    if (isDbDown(error)) {
+      console.error("[login] Base de données injoignable :", error);
+      return { error: DB_ERROR_MSG };
+    }
     throw error; // NEXT_REDIRECT et erreurs inattendues : on relance
   }
 
@@ -135,54 +168,46 @@ export async function forgotPasswordAction(
     return { success: GENERIC_RESET_MSG };
   }
 
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true, passwordHash: true },
-  });
-
-  // Seuls les comptes avec mot de passe reçoivent un lien.
-  // Les comptes Google-only n'ont rien à réinitialiser, mais la
-  // réponse affichée reste identique.
-  if (user?.passwordHash) {
-    const rawToken = randomBytes(32).toString("hex"); // 256 bits d'entropie
-    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
-    const expires = new Date(Date.now() + 60 * 60 * 1000); // expiration : 1 heure
-
-    // Invalide les anciens tokens du même email
-    await prisma.passwordResetToken.deleteMany({ where: { email } });
-    await prisma.passwordResetToken.create({
-      data: { email, token: tokenHash, expires },
+  try {
+    const user = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true, passwordHash: true },
     });
 
-    // URL de base : APP_URL si définie, sinon reconstruite depuis les
-    // en-têtes de la requête — fonctionne en local ET sur Vercel sans config.
-    const h = await headers();
-    const reqHost =
-      h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-    const reqProto =
-      h.get("x-forwarded-proto") ??
-      (reqHost.startsWith("localhost") ? "http" : "https");
-    const baseUrl = process.env.APP_URL?.trim() || `${reqProto}://${reqHost}`;
-    const resetUrl = `${baseUrl}/reset-password?token=${rawToken}`;
+    // Seuls les comptes avec mot de passe reçoivent un lien.
+    // Les comptes Google-only n'ont rien à réinitialiser, mais la
+    // réponse affichée reste identique.
+    if (user?.passwordHash) {
+      const rawToken = randomBytes(32).toString("hex"); // 256 bits d'entropie
+      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+      const expires = new Date(Date.now() + 60 * 60 * 1000); // expiration : 1 heure
 
-    // Envoi réel via Resend. En cas d'échec : repli console en dev,
-    // alerte serveur en prod. La réponse HTTP reste STRICTEMENT
-    // identique dans tous les cas (anti-énumération).
-    // Le token brut n'est JAMAIS stocké en base : seul son SHA-256 l'est.
-    const emailSent = await sendPasswordResetEmail(email, resetUrl, 60);
-    if (emailSent) {
-      console.log(
-        `[forgot-password] Email de réinitialisation envoyé à ${email}.`
-      );
-    } else if (process.env.NODE_ENV !== "production") {
-      console.log(
-        `\n[DEV] RESEND_API_KEY absente ou envoi échoué — lien de réinitialisation :\n${resetUrl}\n`
-      );
-    } else {
-      console.error(
-        `[forgot-password] Envoi email impossible pour ${email} — vérifiez RESEND_API_KEY et MAIL_FROM.`
-      );
+      // Invalide les anciens tokens du même email
+      await prisma.passwordResetToken.deleteMany({ where: { email } });
+      await prisma.passwordResetToken.create({
+        data: { email, token: tokenHash, expires },
+      });
+
+      const resetUrl = `${getResetBaseUrl()}/reset-password?token=${rawToken}`;
+
+      // Envoi réel via Resend (template navy/gold dans src/lib/mail.ts).
+      // Le token brut n'est JAMAIS stocké en base : seul son SHA-256 l'est.
+      const sent = await sendPasswordResetEmail(email, resetUrl, 60);
+
+      if (!sent) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`\n[DEV] Lien de réinitialisation :\n${resetUrl}\n`);
+        } else {
+          console.error(
+            `[forgot-password] Email non envoyé pour ${email} — vérifier RESEND_API_KEY et MAIL_FROM sur Vercel.`
+          );
+        }
+      }
     }
+  } catch (error) {
+    // Réponse identique (anti-énumération) : l'erreur reste dans les logs serveur
+    console.error("[forgot-password] Erreur base de données :", error);
+    return { success: GENERIC_RESET_MSG };
   }
 
   return { success: GENERIC_RESET_MSG };
@@ -201,25 +226,30 @@ export async function resetPasswordAction(
   const { token, password } = parsed.data;
   const tokenHash = createHash("sha256").update(token).digest("hex");
 
-  const resetToken = await prisma.passwordResetToken.findUnique({
-    where: { token: tokenHash },
-  });
+  try {
+    const resetToken = await prisma.passwordResetToken.findUnique({
+      where: { token: tokenHash },
+    });
 
-  if (!resetToken || resetToken.expires < new Date()) {
-    return { error: "Ce lien est invalide ou a expiré. Veuillez refaire une demande." };
+    if (!resetToken || resetToken.expires < new Date()) {
+      return { error: "Ce lien est invalide ou a expiré. Veuillez refaire une demande." };
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await prisma.user.update({
+      where: { email: resetToken.email },
+      data: { passwordHash },
+    });
+
+    // Consomme le token : il ne peut plus être réutilisé
+    await prisma.passwordResetToken.deleteMany({
+      where: { email: resetToken.email },
+    });
+  } catch (error) {
+    console.error("[reset-password] Erreur base de données :", error);
+    return { error: DB_ERROR_MSG };
   }
-
-  const passwordHash = await bcrypt.hash(password, 12);
-
-  await prisma.user.update({
-    where: { email: resetToken.email },
-    data: { passwordHash },
-  });
-
-  // Consomme le token : il ne peut plus être réutilisé
-  await prisma.passwordResetToken.deleteMany({
-    where: { email: resetToken.email },
-  });
 
   redirect("/login?reset=1");
 }

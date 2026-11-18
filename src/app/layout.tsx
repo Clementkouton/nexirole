@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, Plus_Jakarta_Sans } from "next/font/google";
+import { Toaster } from "sonner";
+import { SessionProvider } from "next-auth/react";
 import "./globals.css";
 
 const inter = Inter({
@@ -8,19 +10,17 @@ const inter = Inter({
   display: "swap",
 });
 
-const plusJakarta = Plus_Jakarta_Sans({
+const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-jakarta",
+  weight: ["400", "500", "600", "700", "800"],
   display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: {
-    default: "NexiRole — Ton assistant carrière IA",
-    template: "%s | NexiRole",
-  },
+  title: "NexiRole — Votre assistant carrière intelligents",
   description:
-    "NexiRole analyse les offres Remotive et Arbeitnow, puis génère ton CV, ta lettre de motivation et ton kit d'entretien sur mesure.",
+    "NexiRole analyse les offres d'emploi en direct, score votre CV et génère CV, lettre de motivation et kit d'entretien sur mesure grâce à l'IA.",
   icons: {
     icon: "/logo.png",
   },
@@ -28,13 +28,23 @@ export const metadata: Metadata = {
 
 export default function RootLayout({
   children,
-}: Readonly<{ children: React.ReactNode }>) {
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
-    <html lang="fr">
+    <html
+      lang="fr"
+      suppressHydrationWarning
+      data-scroll-behavior="smooth"
+    >
       <body
-        className={`${inter.variable} ${plusJakarta.variable} bg-ice font-sans text-slate-800 antialiased`}
+        suppressHydrationWarning
+        className={`${inter.variable} ${jakarta.variable} font-sans antialiased bg-ice min-h-screen flex flex-col`}
       >
-        {children}
+        <SessionProvider>
+          <main className="flex-1 flex flex-col">{children}</main>
+          <Toaster position="top-center" richColors />
+        </SessionProvider>
       </body>
     </html>
   );

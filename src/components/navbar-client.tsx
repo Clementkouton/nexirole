@@ -1,222 +1,200 @@
 "use client";
 
+/**
+ * Navbar publique interactive — exclusivement @tabler/icons-react.
+ * Connecté    : « Tableau de bord » + avatar + « Déconnexion ».
+ * Non connecté : « Connexion » + « Lancer l'Assistant ».
+ * Les ancres pointent vers les ids réels de la landing :
+ * #fonctionnalites, #generateur-lien, #agent-recherche, #comment-ca-marche.
+ */
 import Link from "next/link";
-import Image from "next/image";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { signOut } from "next-auth/react";
 import {
+  IconArrowRight,
+  IconLayoutDashboard,
+  IconLogout,
   IconMenu2,
   IconX,
-  IconLogout,
-  IconLayoutDashboard,
-  IconSparkles,
 } from "@tabler/icons-react";
 
-type SessionUser = {
+const NAV_LINKS = [
+  { href: "/#fonctionnalites", label: "Fonctionnalités" },
+  { href: "/#generateur-lien", label: "Générateur par Lien" },
+  { href: "/#agent-recherche", label: "Agent de Recherche" },
+  { href: "/#comment-ca-marche", label: "Comment ça marche" },
+];
+
+export interface NavbarUser {
   name?: string | null;
   email?: string | null;
   image?: string | null;
-};
+}
 
-const NAV_LINKS = [
-  { label: "Fonctionnalités", href: "/#fonctionnalites" },
-  { label: "Lien generator", href: "/#lien-generator" },
-  { label: "Agent de recherche", href: "/#agent-recherche" },
-  { label: "Mode d'emploi", href: "/#mode-emploi" },
-];
-
-export function NavbarClient({ user }: { user: SessionUser | null }) {
+export function NavbarClient({ user }: { user: NavbarUser | null }) {
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const closeMenu = () => setOpen(false);
 
-  const displayName = user?.name ?? user?.email ?? "Utilisateur";
-  const initials = displayName.trim().charAt(0).toUpperCase();
+  const close = () => setOpen(false);
+
+  const initial = (user?.name ?? user?.email ?? "U")
+    .trim()
+    .charAt(0)
+    .toUpperCase();
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-slate-200 bg-white/90 backdrop-blur-md">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
-        {/* Logo */}
-        <Link href="/" className="flex shrink-0 items-center gap-2.5" onClick={closeMenu}>
-          <Image
+      <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+        <Link
+          href="/"
+          className="flex items-center gap-2.5"
+          onClick={close}
+          aria-label="NexiRole — Accueil"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
             src="/logo.png"
             alt="Logo NexiRole"
-            width={36}
-            height={36}
-            className="rounded-xl"
-            priority
+            className="h-9 w-auto"
           />
-          <span className="text-lg font-extrabold tracking-tight text-navy">
-            Nexi<span className="text-gold">Role</span>
-          </span>
         </Link>
 
-        {/* Liens principaux (desktop) */}
-        <nav className="hidden items-center gap-1 lg:flex" aria-label="Navigation principale">
+        {/* Liens centraux — desktop */}
+        <div className="hidden items-center gap-1 lg:flex">
           {NAV_LINKS.map((link) => (
             <Link
               key={link.href}
               href={link.href}
-              className="rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-100 hover:text-navy"
+              className="rounded-full px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-navy"
             >
               {link.label}
             </Link>
           ))}
-        </nav>
+        </div>
 
-        {/* Zone authentification (desktop) */}
-        {user ? (
-          <div className="hidden items-center gap-3 lg:flex">
-            <Link
-              href="/dashboard"
-              className="inline-flex items-center gap-2 rounded-full bg-navy px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-navy/90"
-            >
-              <IconLayoutDashboard className="size-4" />
-              Tableau de bord
-            </Link>
-
-            <div
-              className="flex items-center gap-2 rounded-full border border-slate-200 bg-white py-1 pl-1 pr-3"
-              title={user.email ?? displayName}
-            >
-              {user.image ? (
-                <Image
-                  src={user.image}
-                  alt={displayName}
-                  width={28}
-                  height={28}
-                  unoptimized
-                  className="size-7 rounded-full object-cover"
-                />
-              ) : (
-                <span className="flex size-7 items-center justify-center rounded-full bg-navy text-xs font-bold text-gold">
-                  {initials}
-                </span>
-              )}
-              <span className="max-w-[160px] truncate text-sm font-semibold text-slate-700">
-                {displayName}
+        {/* Actions — desktop */}
+        <div className="hidden items-center gap-3 lg:flex">
+          {user ? (
+            <>
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-5 py-2 text-sm font-semibold text-navy transition-colors hover:bg-slate-50"
+              >
+                <IconLayoutDashboard className="size-4" />
+                Tableau de bord
+              </Link>
+              <span
+                className="flex size-9 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-white shadow-sm"
+                title={user.email ?? undefined}
+              >
+                {user.image ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={user.image}
+                    alt=""
+                    className="size-9 object-cover"
+                  />
+                ) : (
+                  <span className="text-xs font-bold text-navy">{initial}</span>
+                )}
               </span>
-            </div>
+              <button
+                type="button"
+                onClick={() => signOut({ redirectTo: "/" })}
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                aria-label="Se déconnecter"
+              >
+                <IconLogout className="size-4" />
+                Déconnexion
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/login"
+                className="inline-flex items-center justify-center rounded-full border border-slate-300 px-5 py-2 text-sm font-semibold text-navy transition-colors hover:bg-slate-50"
+              >
+                Connexion
+              </Link>
+              <Link
+                href="/dashboard"
+                className="inline-flex h-10 items-center gap-1.5 rounded-full bg-navy px-5 text-sm font-semibold text-white transition-colors hover:bg-navy/90"
+              >
+                Lancer l&apos;Assistant
+                <IconArrowRight className="size-4" />
+              </Link>
+            </>
+          )}
+        </div>
 
-            <button
-              type="button"
-              onClick={() => signOut({ redirectTo: "/" })}
-              className="inline-flex items-center gap-2 rounded-full border border-slate-200 px-3.5 py-2 text-sm font-semibold text-slate-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
-            >
-              <IconLogout className="size-4" />
-              Déconnexion
-            </button>
-          </div>
-        ) : (
-          <div className="hidden items-center gap-2 lg:flex">
-            <Link
-              href="/login"
-              className="rounded-full px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 hover:text-navy"
-            >
-              Connexion
-            </Link>
-            <Link
-              href="/register"
-              className="inline-flex items-center gap-2 rounded-full bg-navy px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-navy/90"
-            >
-              <IconSparkles className="size-4 text-gold" />
-              Lancer l&apos;Assistant
-            </Link>
-          </div>
-        )}
-
-        {/* Burger (mobile) */}
+        {/* Burger — mobile */}
         <button
-          type="button"
+          className="inline-flex size-10 items-center justify-center rounded-full text-navy transition-colors hover:bg-slate-100 lg:hidden"
           onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
           aria-label={open ? "Fermer le menu" : "Ouvrir le menu"}
-          className="inline-flex size-10 items-center justify-center rounded-lg text-slate-700 transition-colors hover:bg-slate-100 hover:text-navy lg:hidden"
+          aria-expanded={open}
         >
           {open ? <IconX className="size-5" /> : <IconMenu2 className="size-5" />}
         </button>
-      </div>
+      </nav>
 
-      {/* Menu mobile */}
       {open && (
-        <div className="border-t border-slate-200 bg-white lg:hidden">
-          <div className="mx-auto max-w-7xl space-y-1 px-4 py-4 sm:px-6">
+        <div className="border-t border-slate-200 bg-white px-4 pb-6 pt-3 lg:hidden">
+          <div className="flex flex-col gap-1">
             {NAV_LINKS.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                onClick={closeMenu}
-                className="block rounded-lg px-3 py-2.5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100 hover:text-navy"
+                onClick={close}
+                className="rounded-lg px-3 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-navy"
               >
                 {link.label}
               </Link>
             ))}
-
-            <div className="my-3 h-px bg-slate-200" />
-
-            {user ? (
-              <div className="space-y-1">
-                <div className="flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
-                  {user.image ? (
-                    <Image
-                      src={user.image}
-                      alt={displayName}
-                      width={36}
-                      height={36}
-                      unoptimized
-                      className="size-9 rounded-full object-cover"
-                    />
-                  ) : (
-                    <span className="flex size-9 items-center justify-center rounded-full bg-navy text-sm font-bold text-gold">
-                      {initials}
-                    </span>
-                  )}
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-bold text-navy">{displayName}</p>
-                    {user.email ? (
-                      <p className="truncate text-xs text-slate-500">{user.email}</p>
-                    ) : null}
-                  </div>
-                </div>
-
-                <Link
-                  href="/dashboard"
-                  onClick={closeMenu}
-                  className="flex items-center gap-2 rounded-lg bg-navy px-3 py-2.5 text-sm font-semibold text-white"
-                >
-                  <IconLayoutDashboard className="size-4" />
-                  Tableau de bord
-                </Link>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    closeMenu();
-                    signOut({ redirectTo: "/" });
-                  }}
-                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-red-600 transition-colors hover:bg-red-50"
-                >
-                  <IconLogout className="size-4" />
-                  Déconnexion
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-2 pt-1">
-                <Link
-                  href="/login"
-                  onClick={closeMenu}
-                  className="block rounded-lg border border-slate-200 px-3 py-2.5 text-center text-sm font-semibold text-navy transition-colors hover:bg-slate-50"
-                >
-                  Connexion
-                </Link>
-                <Link
-                  href="/register"
-                  onClick={closeMenu}
-                  className="block rounded-lg bg-navy px-3 py-2.5 text-center text-sm font-semibold text-white"
-                >
-                  Lancer l&apos;Assistant
-                </Link>
-              </div>
-            )}
+            <div className="mt-3 flex flex-col gap-2">
+              {user ? (
+                <>
+                  <Link
+                    href="/dashboard"
+                    onClick={close}
+                    className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-full border border-slate-300 px-5 text-sm font-semibold text-navy"
+                  >
+                    <IconLayoutDashboard className="size-4" />
+                    Tableau de bord
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      close();
+                      signOut({ redirectTo: "/" });
+                    }}
+                    className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                  >
+                    <IconLogout className="size-4" />
+                    Déconnexion
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Link
+                    href="/login"
+                    onClick={close}
+                    className="inline-flex h-10 w-full items-center justify-center rounded-full border border-slate-300 px-5 text-sm font-semibold text-navy"
+                  >
+                    Connexion
+                  </Link>
+                  <Link
+                    href="/dashboard"
+                    onClick={close}
+                    className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-full bg-navy px-5 text-sm font-semibold text-white"
+                  >
+                    Lancer l&apos;Assistant
+                    <IconArrowRight className="size-4" />
+                  </Link>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}

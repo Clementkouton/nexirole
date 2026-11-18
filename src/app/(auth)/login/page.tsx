@@ -8,6 +8,10 @@ const OAUTH_ERRORS: Record<string, string> = {
     "Un compte existe déjà avec cet email. Connectez-vous avec votre mot de passe : Google ne peut pas être lié automatiquement.",
   AccessDenied:
     "Connexion Google refusée. Réessayez ou connectez-vous avec votre mot de passe.",
+  Configuration:
+    "La connexion Google a échoué côté serveur. Vérifications : l'URI de redirection dans Google Console doit être EXACTEMENT « https://nexirole.vercel.app/api/auth/callback/google », la base de données doit être joignable et AUTH_SECRET définie sur Vercel, puis un Redeploy est nécessaire.",
+  Verification:
+    "Le lien de connexion a expiré ou a déjà été utilisé. Veuillez réessayer.",
 };
 
 export default async function LoginPage({
