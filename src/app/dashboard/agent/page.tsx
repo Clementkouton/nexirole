@@ -1,387 +1,586 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   IconAlertTriangle,
-  IconBriefcase,
-  IconCircleCheck,
   IconExternalLink,
+  IconFileText,
   IconLoader2,
   IconMapPin,
-  IconRefresh,
-  IconRobot,
-  IconSearch,
+  IconRadar,
   IconSparkles,
   IconUpload,
+  IconX,
 } from "@tabler/icons-react";
-import { openDossierPanel } from "@/lib/dashboard-client";
+import { toast } from "sonner";
 
-interface JobView {
-  raw: Record<string, unknown>;
-  titre: string;
-  entreprise: string;
+/* ------------------------------------------------------------------ */
+/*  Types locaux                                                       */
+/* ------------------------------------------------------------------ */
+
+interface ExtractedKeywords {
+  metier: string;
   lieu: string;
+  competences: string[];
+}
+
+interface ParseResponse {
+  ok?: boolean;
+  name?: string;
+  keywords?: ExtractedKeywords;
+  error?: string;
+}
+
+interface AgentJob {
+  id: string;
+  title: string;
+  company: string;
+  location: string;
   url: string;
-  score?: number;
-  description: string;
-  raisons: string[];
   source: string;
+  postedAt?: string;
+  tags: string[];
+  description?: string;
+  score: number;
+  reason: string;
+  strengths: string[];
+  missingSkills: string[];
+  aiScored: boolean;
 }
 
-function describeJob(job: Record<string, unknown>): JobView {
-  const j = job as Record<string, any>;
-  const nested = (j.job ?? {}) as Record<string, any>;
-  const scoreBrut = j.score ?? j.match_score ?? j.matchScore ?? j.compatibilite;
-  const score =
-    typeof scoreBrut === "number"
-      ? scoreBrut
-      : typeof scoreBrut === "string" && scoreBrut.trim() !== "" && !Number.isNaN(Number(scoreBrut))
-        ? Number(scoreBrut)
-        : undefined;
-  return {
-    raw: job,
-    titre: String(j.titre ?? j.title ?? j.poste ?? nested.title ?? "Offre sans titre"),
-    entreprise: String(j.entreprise ?? j.company ?? j.societe ?? nested.company_name ?? nested.company ?? ""),
-    lieu: String(j.lieu ?? j.location ?? j.ville ?? nested.location ?? j.candidate_required_location ?? ""),
-    url: String(j.url ?? j.lien ?? j.link ?? nested.url ?? j.url_publication ?? ""),
-    score,
-    description: String(j.description ?? j.resume ?? j.extrait ?? j.snippet ?? "").slice(0, 220),
-    raisons: Array.isArray(j.raisons)
-      ? j.raisons
-          .filter((raison: unknown) => typeof raison === "string" && raison.trim().length > 0)
-          .slice(0, 4)
-      : [],
-    source: String(j.source ?? j.origine ?? j.board ?? ""),
-  };
+interface ScanResult {
+  jobs: AgentJob[];
+  totalFound: number;
+  totalKept: number;
+  aiAvailable: boolean;
+  warnings?: string[];
+  message?: string;
+  error?: string;
 }
 
-/** Retrouve les mots-clés du CV dans n'importe quelle entrée localStorage "nexirole:*". */
-function readCvHints(): { titre: string; competences: string } {
-  try {
-    for (let i = 0; i < window.localStorage.length; i += 1) {
-      const key = window.localStorage.key(i);
-      if (!key || !key.toLowerCase().includes("nexirole")) continue;
-      const raw = window.localStorage.getItem(key);
-      if (!raw || raw.length > 20000) continue;
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      const titre = parsed.titre ?? parsed.title ?? parsed.poste ?? parsed.metier;
-      const keywords = parsed.keywords ?? parsed.competences ?? parsed.motsCles;
-      if ((typeof titre === "string" && titre.trim()) || Array.isArray(keywords)) {
-        return {
-          titre: typeof titre === "string" ? titre : "",
-          competences: Array.isArray(keywords)
-            ? keywords.filter((mot): mot is string => typeof mot === "string").join(", ")
-            : "",
-        };
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return { titre: "", competences: "" };
+/* Contrat conservé avec la page « Dossier & documents » */
+const DOSSIER_STORAGE_KEY = "nexirole:dossier-offer";
+const DOSSIER_EVENT_NAME = "nexirole:open-dossier";
+
+const ACCEPTED_FORMATS =
+  ".pdf,.png,.jpg,.jpeg,.webp,.docx,.txt,.md";
+
+function formatScoreStyle(score: number): string {
+  if (score >= 80) return "border-amber-200 bg-amber-50 text-amber-700";
+  if (score >= 60) return "border-sky-200 bg-sky-50 text-sky-700";
+  if (score >= 40) return "border-slate-200 bg-slate-50 text-slate-600";
+  return "border-red-200 bg-red-50 text-red-600";
 }
 
-export default function AgentRecherchePage() {
+function formatScoreLabel(score: number): string {
+  if (score >= 80) return "Excellent match";
+  if (score >= 60) return "Bon match";
+  if (score >= 40) return "Match correct";
+  return "Match faible";
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page                                                               */
+/* ------------------------------------------------------------------ */
+
+export default function AgentPage() {
   const router = useRouter();
-  const [titre, setTitre] = useState("");
-  const [competencesText, setCompetencesText] = useState("");
+
+  const [metier, setMetier] = useState("");
   const [lieu, setLieu] = useState("");
+  const [competences, setCompetences] = useState("");
+
+  /* Import de CV */
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [cvFileName, setCvFileName] = useState("");
+  const [importError, setImportError] = useState("");
+  const [extracted, setExtracted] = useState<ExtractedKeywords | null>(null);
+
+  /* Recherche */
   const [loading, setLoading] = useState(false);
-  const [analyseCv, setAnalyseCv] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<JobView[]>([]);
+  const [searchError, setSearchError] = useState("");
+  const [result, setResult] = useState<ScanResult | null>(null);
 
-  useEffect(() => {
-    const hints = readCvHints();
-    if (hints.titre) setTitre(hints.titre);
-    if (hints.competences) setCompetencesText(hints.competences);
-  }, []);
+  /* ---------------------------------------------------------------- */
+  /*  Import de CV — PDF, PNG, JPEG, WEBP, DOCX, TXT (réparé)          */
+  /* ---------------------------------------------------------------- */
 
-  const lancerRecherche = async () => {
-    setLoading(true);
-    setError(null);
-    setNotice(null);
-    const keywords = competencesText
-      .split(",")
-      .map((mot) => mot.trim())
-      .filter(Boolean);
-    const body = {
-      query: [titre, ...keywords].filter(Boolean).join(" "),
-      titre: titre.trim() || undefined,
-      keywords,
-      competences: keywords,
-      lieu: lieu.trim() || undefined,
-      limit: 20,
-    };
+  async function handleFile(file: File) {
+    setImportError("");
+    setExtracted(null);
+
+    if (file.size > 10 * 1024 * 1024) {
+      setImportError("Fichier trop volumineux — 10 Mo maximum.");
+      return;
+    }
+    const name = file.name.toLowerCase();
+    const ok = /\.(pdf|png|jpe?g|webp|docx|txt|md)$/.test(name);
+    if (!ok) {
+      setImportError(
+        "Format non pris en charge. Utilisez un PDF, une image (PNG, JPG, WEBP), un fichier Word (.docx) ou un fichier texte."
+      );
+      return;
+    }
+
+    setParsing(true);
     try {
-      const response = await fetch("/api/agent/scan", {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/parse-cv", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: formData,
       });
-      const json = await response.json().catch(() => null);
-      if (!response.ok) {
-        setError(
-          (json as Record<string, any>)?.error ??
-            (json as Record<string, any>)?.message ??
-            `Erreur ${response.status} — copie ce message et colle-le-moi pour l'alignement exact.`,
-        );
+      const data = (await res.json().catch(() => null)) as ParseResponse | null;
+      if (!res.ok || !data || data.error) {
+        setImportError(data?.error ?? "La lecture de ce fichier a échoué. Réessayez.");
         return;
       }
-      const liste = Array.isArray(json)
-        ? json
-        : ((json as Record<string, any>)?.results ??
-           (json as Record<string, any>)?.jobs ??
-           (json as Record<string, any>)?.offres ??
-           []);
-      const vues = Array.isArray(liste)
-        ? liste
-            .filter((offre) => offre && typeof offre === "object")
-            .map((offre) => describeJob(offre as Record<string, unknown>))
-        : [];
-      setJobs(vues);
-      if (vues.length === 0) setNotice("Aucune offre trouvée pour ces critères — essaie d'autres mots-clés.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur réseau pendant la recherche.");
+
+      const kw = data.keywords ?? { metier: "", lieu: "", competences: [] };
+      if (kw.metier) setMetier(kw.metier);
+      if (kw.lieu && !lieu.trim()) setLieu(kw.lieu);
+      if (kw.competences.length > 0) {
+        setCompetences(kw.competences.join(", "));
+      }
+      setCvFileName(data.name ?? file.name);
+      setExtracted(kw);
+      toast.success("CV lu avec succès — vérifiez les mots-clés extraits");
+    } catch {
+      setImportError(
+        "Réseau indisponible : le serveur n'a pas répondu. Réessayez dans un instant."
+      );
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  function clearCv() {
+    setCvFileName("");
+    setExtracted(null);
+    setImportError("");
+  }
+
+  /* ---------------------------------------------------------------- */
+  /*  Recherche en direct                                              */
+  /* ---------------------------------------------------------------- */
+
+  async function handleSearch() {
+    if (!metier.trim() && !competences.trim()) {
+      setSearchError(
+        "Renseignez au moins un métier ou des compétences avant de lancer la recherche."
+      );
+      return;
+    }
+    setLoading(true);
+    setSearchError("");
+    setResult(null);
+    try {
+      const res = await fetch("/api/agent/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          metier: metier.trim(),
+          lieu: lieu.trim(),
+          competences: competences
+            .split(",")
+            .map((c) => c.trim())
+            .filter(Boolean)
+            .slice(0, 15),
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as (ScanResult & { ok?: boolean }) | null;
+      if (!res.ok || !data || data.error) {
+        setSearchError(data?.error ?? "Le scan a échoué. Réessayez dans un instant.");
+        return;
+      }
+      setResult(data);
+    } catch {
+      setSearchError("Réseau indisponible : réessayez dans un instant.");
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const extraireDepuisCv = async (file: File) => {
-    setAnalyseCv(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const response = await fetch("/api/parse-cv", { method: "POST", body: form });
-      const json = await response.json().catch(() => null);
-      if (!response.ok) {
-        setError((json as Record<string, any>)?.error ?? `Analyse du CV impossible (HTTP ${response.status}).`);
-        return;
-      }
-      const j = (json ?? {}) as Record<string, any>;
-      const titreExtrait = j.titre ?? j.title ?? j.poste ?? j.metier ?? j.titre_poste ?? j.keywords?.titre ?? "";
-      const mots = j.keywords ?? j.competences ?? j.motsCles ?? j.keywords?.competences ?? [];
-      if (typeof titreExtrait === "string" && titreExtrait.trim()) setTitre(titreExtrait.trim());
-      if (Array.isArray(mots) && mots.length > 0) {
-        setCompetencesText(mots.filter((mot): mot is string => typeof mot === "string").join(", "));
-      }
-      setNotice("Mots-clés extraits du CV — vérifie puis lance la recherche.");
-    } catch {
-      setError("Erreur réseau pendant l'analyse du CV.");
-    } finally {
-      setAnalyseCv(false);
-    }
-  };
+  /* Transmet l'offre à la page « Dossier & documents » */
+  function openInDossier(job: AgentJob) {
+    window.localStorage.setItem(
+      DOSSIER_STORAGE_KEY,
+      JSON.stringify({
+        offerUrl: job.url,
+        offerTitle: `${job.title} — ${job.company}`,
+        offerDescription: (job.description ?? "").slice(0, 6000),
+        createdAt: Date.now(),
+      })
+    );
+    window.dispatchEvent(new CustomEvent(DOSSIER_EVENT_NAME));
+    router.push("/dashboard/dossiers");
+  }
 
-  const genererDossier = (job: JobView) => {
-    openDossierPanel(job.raw);
-    router.push("/dashboard/dossier");
-  };
+  const inputClass =
+    "mt-1 w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-navy shadow-sm outline-none transition placeholder:text-slate-400 focus:border-navy/40 focus:ring-2 focus:ring-navy/10";
 
   return (
     <div className="space-y-6">
+      {/* En-tête */}
       <div>
-        <h1 className="text-2xl font-extrabold tracking-tight text-[#051937] md:text-3xl">Agent de recherche en direct</h1>
-        <p className="mt-1 text-sm font-medium text-slate-500">
-          Recherche en direct sur Remotive et Arbeitnow, offres notées par l&apos;IA selon ton profil.
+        <h1 className="font-heading text-xl font-bold text-navy sm:text-2xl">
+          Agent de recherche en direct
+        </h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Recherche en direct sur Remotive et Arbeitnow : chaque offre est notée
+          par l&apos;IA selon votre profil, puis transformable en dossier complet.
         </p>
       </div>
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          void lancerRecherche();
-        }}
-        className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6"
-      >
-        <div className="grid gap-4 md:grid-cols-2">
+      {/* Formulaire de recherche */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label htmlFor="agent-titre" className="mb-1.5 block text-xs font-extrabold uppercase tracking-wide text-slate-500">
-              Métier / titre visé
+            <label htmlFor="metier" className="text-xs font-semibold text-slate-600">
+              Métier ou poste visé
             </label>
             <input
-              id="agent-titre"
-              value={titre}
-              onChange={(event) => setTitre(event.target.value)}
-              placeholder="Ex. Senior Java Developer"
-              className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-[#051937] outline-none transition focus:border-[#FFC107]"
+              id="metier"
+              type="text"
+              value={metier}
+              onChange={(evt) => setMetier(evt.target.value)}
+              placeholder="Ex. Développeur web, Commercial, Data analyst…"
+              className={inputClass}
             />
           </div>
           <div>
-            <label htmlFor="agent-lieu" className="mb-1.5 block text-xs font-extrabold uppercase tracking-wide text-slate-500">
-              Lieu / télétravail (optionnel)
+            <label htmlFor="lieu" className="text-xs font-semibold text-slate-600">
+              Lieu / Télétravail (optionnel)
             </label>
             <input
-              id="agent-lieu"
+              id="lieu"
+              type="text"
               value={lieu}
-              onChange={(event) => setLieu(event.target.value)}
-              placeholder="Ex. Remote, Cotonou, Paris"
-              className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-[#051937] outline-none transition focus:border-[#FFC107]"
+              onChange={(evt) => setLieu(evt.target.value)}
+              placeholder="Ex. Paris, France, Remote…"
+              className={inputClass}
             />
           </div>
-          <div className="md:col-span-2">
-            <label htmlFor="agent-competences" className="mb-1.5 block text-xs font-extrabold uppercase tracking-wide text-slate-500">
+          <div className="sm:col-span-2">
+            <label htmlFor="competences" className="text-xs font-semibold text-slate-600">
               Compétences clés (séparées par des virgules)
             </label>
             <input
-              id="agent-competences"
-              value={competencesText}
-              onChange={(event) => setCompetencesText(event.target.value)}
+              id="competences"
+              type="text"
+              value={competences}
+              onChange={(evt) => setCompetences(evt.target.value)}
               placeholder="Ex. WordPress, PHP, MySQL"
-              className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-[#051937] outline-none transition focus:border-[#FFC107]"
+              className={inputClass}
             />
           </div>
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <button
-            type="submit"
-            disabled={loading}
-            className="flex items-center gap-2 rounded-xl bg-[#051937] px-5 py-2.5 text-sm font-bold text-white transition hover:bg-[#0A2A5C] disabled:opacity-60"
-          >
-            {loading ? <IconLoader2 size={18} stroke={2} className="animate-spin" /> : <IconSearch size={18} stroke={2} />}
-            {loading ? "Recherche en cours…" : "Lancer la recherche en direct"}
-          </button>
+        {/* Import de CV réparé : PDF, images, Word, texte + glisser-déposer */}
+        <div className="mt-5 border-t border-slate-100 pt-5">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_FORMATS}
+            className="hidden"
+            onChange={(evt) => {
+              const file = evt.target.files?.[0];
+              if (file) void handleFile(file);
+              evt.target.value = "";
+            }}
+            aria-hidden
+          />
 
-          <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-[#051937] transition hover:border-[#FFC107]">
-            {analyseCv ? <IconLoader2 size={18} stroke={2} className="animate-spin" /> : <IconUpload size={18} stroke={1.8} />}
-            {analyseCv ? "Analyse du CV…" : "Extraire depuis mon CV"}
-            <input
-              type="file"
-              className="hidden"
-              accept=".pdf,.doc,.docx,.txt"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) void extraireDepuisCv(file);
-                event.target.value = "";
-              }}
-            />
-          </label>
-
-          {jobs.length > 0 && (
+          {!cvFileName ? (
             <button
               type="button"
-              onClick={() => {
-                setJobs([]);
-                setNotice(null);
-                setError(null);
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(evt) => {
+                evt.preventDefault();
+                setDragging(true);
               }}
-              className="flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-600 transition hover:border-[#FFC107]"
+              onDragLeave={() => setDragging(false)}
+              onDrop={(evt) => {
+                evt.preventDefault();
+                setDragging(false);
+                const file = evt.dataTransfer.files?.[0];
+                if (file) void handleFile(file);
+              }}
+              className={`flex w-full flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed px-4 py-6 text-center transition-colors ${
+                dragging
+                  ? "border-gold bg-gold-soft/60"
+                  : "border-slate-300 bg-white hover:border-navy/40 hover:bg-slate-50"
+              }`}
+              aria-label="Importer votre CV"
             >
-              <IconRefresh size={18} stroke={1.8} />
-              Nouvelle recherche
+              {parsing ? (
+                <IconLoader2 className="size-5 animate-spin text-navy" />
+              ) : (
+                <IconUpload className="size-5 text-navy" />
+              )}
+              <span className="text-sm font-semibold text-navy">
+                {parsing
+                  ? "Lecture du CV en cours… (10 à 30 s)"
+                  : "Extraire depuis mon CV"}
+              </span>
+              <span className="text-xs text-slate-500">
+                Glissez-déposez ou cliquez — PDF, PNG, JPEG, WEBP, Word (.docx), TXT
+                · 10 Mo max
+              </span>
             </button>
+          ) : (
+            <div className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+              <IconFileText className="size-5 shrink-0 text-emerald-700" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-emerald-800">
+                  {cvFileName}
+                </p>
+                <p className="text-xs text-emerald-700">
+                  CV analysé — mots-clés remplis ci-dessus, vérifiez puis lancez la
+                  recherche.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="rounded-lg px-2 py-1 text-xs font-semibold text-emerald-800 underline underline-offset-2 hover:bg-emerald-100"
+              >
+                Changer
+              </button>
+              <button
+                type="button"
+                onClick={clearCv}
+                className="rounded-full p-1.5 text-emerald-700 transition-colors hover:bg-emerald-100"
+                aria-label="Retirer le CV"
+              >
+                <IconX className="size-4" />
+              </button>
+            </div>
+          )}
+
+          {importError && (
+            <p className="mt-2 flex items-start gap-1.5 text-xs font-medium text-red-600">
+              <IconAlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              {importError}
+            </p>
+          )}
+
+          {extracted && !parsing && (
+            <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-gold-soft/70 px-4 py-3 text-sm text-accent-foreground">
+              <IconSparkles className="mt-0.5 size-4 shrink-0 text-gold-dark" />
+              <p className="flex-1">
+                <span className="font-semibold">Mots-clés extraits du CV</span> —
+                vérifie puis lance la recherche.
+                {extracted.metier ? ` Métier détecté : ${extracted.metier}.` : ""}
+                {extracted.competences.length > 0
+                  ? ` ${extracted.competences.length} compétences récupérées.`
+                  : ""}
+              </p>
+            </div>
           )}
         </div>
 
-        <p className="mt-3 text-xs font-medium text-slate-400">
-          Le premier scan peut prendre 30 à 90 s : l&apos;agent interroge deux plateformes puis note chaque offre avec l&apos;IA.
-        </p>
-      </form>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4">
-          <IconAlertTriangle size={20} stroke={1.8} className="mt-0.5 shrink-0 text-red-600" />
-          <p className="text-sm font-semibold text-red-700">{error}</p>
-        </div>
-      )}
-      {notice && (
-        <div className="flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-4">
-          <IconCircleCheck size={20} stroke={1.8} className="mt-0.5 shrink-0 text-amber-600" />
-          <p className="text-sm font-semibold text-amber-800">{notice}</p>
-        </div>
-      )}
-
-      {jobs.length > 0 && (
-        <div className="space-y-4">
-          <p className="text-sm font-bold text-slate-500">
-            {jobs.length} offre{jobs.length > 1 ? "s" : ""} trouvée{jobs.length > 1 ? "s" : ""}
-          </p>
-          {jobs.map((job, index) => (
-            <article
-              key={`${job.titre}-${index}`}
-              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-[#FFC107]"
+        {/* Boutons d'action */}
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleSearch}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-xl bg-navy px-5 py-3 text-sm font-bold text-white shadow-md transition hover:bg-navy-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading ? (
+              <IconLoader2 className="size-5 animate-spin" />
+            ) : (
+              <IconRadar className="size-5 text-gold" />
+            )}
+            {loading ? "Recherche en cours…" : "Lancer la recherche en direct"}
+          </button>
+          {!cvFileName && !parsing && (
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-navy transition hover:bg-slate-50"
             >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
+              <IconUpload className="size-4 text-gold-dark" />
+              Extraire depuis mon CV
+            </button>
+          )}
+        </div>
+        <p className="mt-3 flex items-center gap-1.5 text-xs text-slate-400">
+          <IconMapPin className="size-3.5" />
+          Le premier scan prend 30 à 90 secondes : l&apos;agent interroge les deux
+          plateformes puis note chaque offre avec l&apos;IA.
+        </p>
+      </section>
+
+      {/* Erreur de recherche */}
+      {searchError && (
+        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <p className="flex-1">{searchError}</p>
+          <button
+            type="button"
+            onClick={() => setSearchError("")}
+            className="rounded p-1 hover:bg-red-100"
+            aria-label="Fermer"
+          >
+            <IconX className="size-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Résultats */}
+      {result && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <h2 className="font-heading text-lg font-bold text-navy">
+              {result.jobs.length} offre{result.jobs.length > 1 ? "s" : ""} triée
+              {result.jobs.length > 1 ? "s" : ""} par pertinence
+            </h2>
+            <span className="text-xs text-slate-500">
+              {result.totalKept} retenues sur {result.totalFound} trouvées
+            </span>
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                result.aiAvailable
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-amber-200 bg-amber-50 text-amber-700"
+              }`}
+            >
+              <IconSparkles className="size-3.5" />
+              {result.aiAvailable
+                ? "Offres notées par l'IA"
+                : "Analyse IA partielle (repli mots-clés)"}
+            </span>
+          </div>
+
+          {result.message && (
+            <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <p className="flex-1">{result.message}</p>
+            </div>
+          )}
+
+          {result.warnings?.map((warning, i) => (
+            <div
+              key={i}
+              className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800"
+            >
+              <IconAlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              <p className="flex-1">{warning}</p>
+            </div>
+          ))}
+
+          {result.jobs.length === 0 && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center">
+              <p className="text-sm font-semibold text-navy">
+                Aucune offre trouvée pour ces critères
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                Essayez un métier plus général (ex. « développeur ») ou retirez le
+                filtre de lieu.
+              </p>
+            </div>
+          )}
+
+          {result.jobs.map((job, index) => (
+            <article
+              key={job.id}
+              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-base font-extrabold text-[#051937]">{job.titre}</h2>
-                    {job.score !== undefined && (
-                      <span className="rounded-full bg-[#FFC107] px-2.5 py-1 text-xs font-extrabold text-[#051937]">
-                        {job.score <= 1 ? `${Math.round(job.score * 100)} %` : `${job.score}`} match
+                    <span className="text-xs font-bold text-slate-400">
+                      #{index + 1}
+                    </span>
+                    <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold uppercase text-slate-700">
+                      {job.source}
+                    </span>
+                    {job.aiScored && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                        <IconSparkles className="size-3" />
+                        Score IA
                       </span>
                     )}
-                    {job.source && (
-                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                        {job.source}
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-semibold text-slate-500">
-                    {job.entreprise && (
-                      <span className="flex items-center gap-1.5">
-                        <IconBriefcase size={14} stroke={1.8} />
-                        {job.entreprise}
-                      </span>
-                    )}
-                    {job.lieu && (
-                      <span className="flex items-center gap-1.5">
-                        <IconMapPin size={14} stroke={1.8} />
-                        {job.lieu}
+                    {job.postedAt && (
+                      <span className="text-[11px] text-slate-400">
+                        publiée le {job.postedAt}
                       </span>
                     )}
                   </div>
-                </div>
-                <div className="flex shrink-0 flex-wrap items-center gap-2">
-                  {job.url && (
+                  <h3 className="mt-1.5 font-heading text-base font-bold text-navy">
+                    {job.title}
+                  </h3>
+                  <p className="text-sm text-slate-500">
+                    {job.company}
+                    {job.location ? ` · ${job.location}` : ""}
+                  </p>
+                  {job.reason && (
+                    <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                      {job.reason}
+                    </p>
+                  )}
+                  {job.strengths.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {job.strengths.map((s, i) => (
+                        <span
+                          key={`s-${i}`}
+                          className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700"
+                        >
+                          + {s}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {job.missingSkills.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {job.missingSkills.map((s, i) => (
+                        <span
+                          key={`m-${i}`}
+                          className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-600"
+                        >
+                          − {s}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openInDossier(job)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-gold px-3 py-2 text-sm font-bold text-navy transition hover:bg-gold-dark"
+                    >
+                      <IconFileText className="size-4" />
+                      Générer CV et lettre
+                    </button>
                     <a
                       href={job.url}
                       target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3.5 py-2 text-xs font-bold text-slate-600 transition hover:border-[#FFC107]"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
                     >
-                      <IconExternalLink size={15} stroke={1.8} />
                       Voir l&apos;offre
+                      <IconExternalLink className="size-4" />
                     </a>
-                  )}
-                  <button
-                    onClick={() => genererDossier(job)}
-                    className="flex items-center gap-1.5 rounded-xl bg-[#FFC107] px-3.5 py-2 text-xs font-extrabold text-[#051937] transition hover:bg-[#FFD54F]"
-                  >
-                    <IconSparkles size={15} stroke={1.8} />
-                    Générer le dossier
-                  </button>
+                  </div>
+                </div>
+                <div
+                  className={`flex flex-col items-center rounded-xl border px-4 py-3 ${formatScoreStyle(
+                    job.score
+                  )}`}
+                >
+                  <span className="text-xl font-bold">{job.score}%</span>
+                  <span className="text-[11px] font-semibold">
+                    {formatScoreLabel(job.score)}
+                  </span>
                 </div>
               </div>
-
-              {job.raisons.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {job.raisons.map((raison) => (
-                    <span key={raison} className="rounded-full bg-[#051937]/5 px-2.5 py-1 text-xs font-bold text-[#051937]">
-                      {raison}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {job.description && (
-                <p className="mt-3 text-sm font-medium leading-relaxed text-slate-600">{job.description}…</p>
-              )}
             </article>
           ))}
-        </div>
-      )}
-
-      {!loading && jobs.length === 0 && !error && !notice && (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-10 text-center">
-          <IconRobot size={36} stroke={1.5} className="mx-auto text-slate-300" />
-          <p className="mt-3 text-sm font-semibold text-slate-500">
-            Lance ta première recherche : l&apos;agent remonte les offres les mieux notées pour ton profil.
-          </p>
         </div>
       )}
     </div>
