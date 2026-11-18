@@ -1,13 +1,30 @@
 // src/lib/groq.ts
-// Client Groq robuste : chaîne de modèles, retry sur quota, timeout, erreurs explicites.
+// Client Groq auto-adaptatif :
+// - détecte automatiquement les modèles disponibles sur le compte (la gamme Groq évolue) ;
+// - surcharge possible via GROQ_MODEL dans .env.local ;
+// - retry sur quota (429), timeout, erreurs explicites remontées jusqu'à l'UI.
 
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_API_BASE = "https://api.groq.com/openai/v1";
+const TIMEOUT_MS = 45_000;
+const RETRIES_PER_MODEL = 3;
+const MODELS_CACHE_MS = 10 * 60 * 1000;
+const MAX_MODEL_ATTEMPTS = 4;
 
-/** Chaîne de modèles : on tente dans l'ordre jusqu'à ce qu'un réponde. */
-export const GROQ_MODEL_CHAIN = [
-  "llama-3.3-70b-versatile", // qualité maximale
-  "llama-3.1-8b-instant",    // limites plus larges, réponses rapides
-] as const;
+// Ordre de préférence : le premier modèle disponible sur le compte est utilisé.
+const MODEL_PREFERENCES = [
+  "llama-3.3-70b-versatile",
+  "openai/gpt-oss-120b",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "qwen/qwen3-32b",
+  "moonshotai/kimi-k2-instruct-0905",
+  "deepseek-r1-distill-llama-70b",
+  "openai/gpt-oss-20b",
+  "llama-3.1-8b-instant",
+];
+
+// Modèles non conversationnels, exclus de la sélection automatique
+const NON_CHAT = /whisper|tts|guard|embed|safety/i;
 
 export type GroqErrorCode =
   | "GROQ_NO_KEY"
@@ -35,9 +52,6 @@ export function isGroqConfigured(): boolean {
   return Boolean(key && key.trim().startsWith("gsk_"));
 }
 
-const TIMEOUT_MS = 45_000;
-const RETRIES_PER_MODEL = 3;
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type ChatArgs = {
@@ -48,8 +62,60 @@ type ChatArgs = {
   jsonMode?: boolean;
 };
 
-async function callModel(model: string, args: ChatArgs): Promise<string> {
-  const apiKey = process.env.GROQ_API_KEY as string;
+let modelsCache: { ids: string[]; at: number } | null = null;
+let currentModel: string | null = null;
+const excludedModels = new Set<string>();
+
+async function listChatModels(apiKey: string): Promise<string[]> {
+  if (modelsCache && Date.now() - modelsCache.at < MODELS_CACHE_MS) {
+    return modelsCache.ids;
+  }
+
+  const res = await fetch(`${GROQ_API_BASE}/models`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(10_000),
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    throw new GroqError(
+      res.status === 401 ? "GROQ_AUTH" : "GROQ_NETWORK",
+      `Impossible de lister les modèles Groq (HTTP ${res.status}).`,
+      res.status
+    );
+  }
+
+  const data = (await res.json()) as { data?: { id?: string }[] };
+  const ids = (data.data ?? [])
+    .map((m) => m.id ?? "")
+    .filter((id) => id.length > 0 && !NON_CHAT.test(id));
+
+  modelsCache = { ids, at: Date.now() };
+  return ids;
+}
+
+async function resolveModel(apiKey: string): Promise<string> {
+  // Surcharge manuelle : GROQ_MODEL dans .env.local
+  const override = process.env.GROQ_MODEL?.trim();
+  if (override) return override;
+
+  if (currentModel && !excludedModels.has(currentModel)) return currentModel;
+
+  const available = await listChatModels(apiKey);
+  const preferred = MODEL_PREFERENCES.filter((m) => !excludedModels.has(m)).find((m) =>
+    available.includes(m)
+  );
+  const model = preferred ?? available.find((m) => !excludedModels.has(m));
+
+  if (!model) {
+    throw new GroqError("GROQ_MODEL", "Aucun modèle conversationnel disponible sur ce compte Groq.");
+  }
+
+  currentModel = model;
+  return model;
+}
+
+async function callModel(model: string, args: ChatArgs, apiKey: string): Promise<string> {
   const messages = [
     ...(args.system ? [{ role: "system", content: args.system }] : []),
     { role: "user", content: args.user },
@@ -59,7 +125,7 @@ async function callModel(model: string, args: ChatArgs): Promise<string> {
     let res: Response;
 
     try {
-      res = await fetch(GROQ_URL, {
+      res = await fetch(`${GROQ_API_BASE}/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -108,13 +174,20 @@ async function callModel(model: string, args: ChatArgs): Promise<string> {
 
     if (!res.ok) {
       const raw = await res.text();
-      if (res.status === 400 && /decommissioned|not found|does not exist|no longer supported/i.test(raw)) {
-        throw new GroqError("GROQ_MODEL", `Modèle indisponible : ${model}.`, 400);
+
+      // Modèle supprimé / inexistant / sans accès → le suivant sera tenté
+      if (
+        res.status === 404 ||
+        (res.status === 400 && /decommissioned|not found|does not exist|no longer supported/i.test(raw))
+      ) {
+        throw new GroqError("GROQ_MODEL", `Modèle indisponible : ${model}.`, res.status);
       }
+
       if (res.status >= 500 && attempt < RETRIES_PER_MODEL) {
         await sleep(2000 * attempt);
         continue;
       }
+
       throw new GroqError("GROQ_UNKNOWN", `Erreur Groq HTTP ${res.status} : ${raw.slice(0, 200)}`, res.status);
     }
 
@@ -129,7 +202,6 @@ async function callModel(model: string, args: ChatArgs): Promise<string> {
   throw new GroqError("GROQ_UNKNOWN", "Appels Groq épuisés.");
 }
 
-/** Appel chat simple : renvoie le texte de la réponse. */
 export async function groqChat(args: ChatArgs): Promise<string> {
   if (!isGroqConfigured()) {
     throw new GroqError(
@@ -138,23 +210,32 @@ export async function groqChat(args: ChatArgs): Promise<string> {
     );
   }
 
+  const apiKey = process.env.GROQ_API_KEY as string;
+  const hasOverride = Boolean(process.env.GROQ_MODEL?.trim());
+  const maxAttempts = hasOverride ? 1 : MAX_MODEL_ATTEMPTS;
   const failures: string[] = [];
 
-  for (const model of GROQ_MODEL_CHAIN) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const model = await resolveModel(apiKey);
+
     try {
-      return await callModel(model, args);
+      return await callModel(model, args, apiKey);
     } catch (err) {
-      if (err instanceof GroqError && (err.code === "GROQ_NO_KEY" || err.code === "GROQ_AUTH")) {
-        throw err; // clé en cause : inutile d'essayer les autres modèles
+      if (err instanceof GroqError && err.code === "GROQ_MODEL") {
+        // Modèle supprimé ou absent : on l'exclut et on tente le suivant
+        excludedModels.add(model);
+        currentModel = null;
+        modelsCache = null;
+        failures.push(`${model} indisponible`);
+        continue;
       }
-      failures.push(`${model} → ${(err as Error).message}`);
+      throw err;
     }
   }
 
-  throw new GroqError("GROQ_UNKNOWN", `Tous les modèles ont échoué. ${failures.join(" | ")}`);
+  throw new GroqError("GROQ_UNKNOWN", `Aucun modèle Groq n'a fonctionné. ${failures.join(" | ")}`);
 }
 
-/** Appel avec réponse JSON stricte (le prompt doit contenir le mot « JSON »). */
 export async function groqJSON<T>(args: ChatArgs): Promise<T> {
   const text = await groqChat({ ...args, jsonMode: true });
   const cleaned = text.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
@@ -169,7 +250,6 @@ export async function groqJSON<T>(args: ChatArgs): Promise<T> {
   }
 }
 
-/** Exécute des tâches async par petits lots pour respecter les quotas free tier. */
 export async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,

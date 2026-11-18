@@ -114,8 +114,9 @@ export function DossierPanel() {
         // Données de pré-remplissage invalides : on ignore
       }
     };
-    window.addEventListener("nexirole:open-dossier", handler);
-    return () => window.removeEventListener("nexirole:open-dossier", handler);
+window.addEventListener("nexirole:open-dossier", handler);
+handler();
+return () => window.removeEventListener("nexirole:open-dossier", handler);
   }, []);
 
   const handleFile = async (file: File) => {

@@ -13,7 +13,7 @@ import { z } from "zod";
  *   si le paquet n'existe pas sur votre machine, il est simplement ignoré.
  */
 
-export const GROQ_MODEL_ID = "llama-3.3-70b-versatile";
+const GROQ_MODEL_ID = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 
 export function hasGroqKey(): boolean {
   return Boolean(process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.length > 10);
@@ -79,7 +79,7 @@ function skeletonFromSchema(schema: unknown): unknown {
  * JAMAIS résolu à la compilation — absent de votre machine, il est ignoré.
  */
 async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
-  let client: {
+  type OpenAICompatibleClient = {
     chat: {
       completions: {
         create: (args: Record<string, unknown>) => Promise<{
@@ -87,12 +87,14 @@ async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
         }>;
       };
     };
-  } | null = null;
+  };
+
+  let client: OpenAICompatibleClient | null = null;
 
   try {
-    const mod: unknown = await import(
-      /* webpackIgnore: true */ /* turbopackIgnore: true */ "z-ai-web-dev-sdk"
-    );
+    // Une variable empêche TypeScript de résoudre ce paquet optionnel à la compilation.
+    const optionalSdkModule = "@ai-sdk/sdk";
+    const mod: unknown = await import(optionalSdkModule);
     const factory =
       typeof mod === "function"
         ? mod
@@ -110,7 +112,7 @@ async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
     );
   }
 
-  const zai = client;
+  const zai: OpenAICompatibleClient = client;
   const jsonSchema = z.toJSONSchema(opts.schema, { target: "draft-7" });
   const skeleton = skeletonFromSchema(jsonSchema);
 
