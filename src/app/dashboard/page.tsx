@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { AppDashboardShell } from "@/components/ui/app-dashboard-shell";
 
-export const metadata: Metadata = { title: "Dashboard | NexiRole" };
+export const metadata: Metadata = { title: "Tableau de bord" };
 
 export default async function DashboardPage() {
   // Double protection : le proxy filtre déjà, ici ceinture et bretelles
@@ -13,11 +13,8 @@ export default async function DashboardPage() {
 
   return (
     <AppDashboardShell
-      user={{
-        name: session.user.name,
-        email: session.user.email,
-        image: session.user.image,
-      }}
+      userName={session.user.name ?? null}
+      userEmail={session.user.email ?? null}
     />
   );
 }

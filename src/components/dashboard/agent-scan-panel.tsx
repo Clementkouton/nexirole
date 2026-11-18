@@ -1,316 +1,396 @@
 "use client";
 
-// src/components/dashboard/agent-scan-panel.tsx
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import {
   IconAlertTriangle,
-  IconBuilding,
-  IconCheck,
   IconExternalLink,
   IconFileText,
   IconLoader2,
-  IconMapPin,
-  IconSearch,
+  IconRadar,
   IconSparkles,
   IconUpload,
-  IconWorld,
+  IconX,
 } from "@tabler/icons-react";
-import type { ScanResponse, ScoredJob } from "@/lib/types";
+import type { ScoredJob, ScanResponse } from "@/lib/types";
 
-function scoreStyle(score: number): string {
-  if (score >= 80) return "bg-amber-100 text-amber-800 border-amber-300";
-  if (score >= 60) return "bg-sky-100 text-sky-700 border-sky-300";
-  if (score >= 40) return "bg-slate-100 text-slate-600 border-slate-300";
-  return "bg-red-50 text-red-600 border-red-200";
-}
+const STORAGE_KEY = "nexirole:dossier-offer";
+const EVENT_NAME = "nexirole:open-dossier";
 
-function scoreLabel(score: number): string {
-  if (score >= 80) return "Excellente correspondance";
-  if (score >= 60) return "Bonne correspondance";
-  if (score >= 40) return "Pertinence moyenne";
-  return "Faible pertinence";
-}
+const scoreStyle = (score: number) =>
+  score >= 80
+    ? "border-amber-200 bg-amber-50 text-amber-700"
+    : score >= 60
+      ? "border-sky-200 bg-sky-50 text-sky-700"
+      : score >= 40
+        ? "border-slate-200 bg-slate-50 text-slate-600"
+        : "border-red-200 bg-red-50 text-red-600";
+
+const scoreLabel = (score: number) =>
+  score >= 80
+    ? "Excellent match"
+    : score >= 60
+      ? "Bon match"
+      : score >= 40
+        ? "Match correct"
+        : "Match faible";
 
 export function AgentScanPanel() {
-  const [cvName, setCvName] = useState<string | null>(null);
+  const [cvName, setCvName] = useState("");
   const [cvText, setCvText] = useState("");
-  const [cvLoading, setCvLoading] = useState(false);
+  const [parsing, setParsing] = useState(false);
   const [query, setQuery] = useState("");
   const [region, setRegion] = useState("France");
   const [remoteOnly, setRemoteOnly] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  const [error, setError] = useState("");
   const [result, setResult] = useState<ScanResponse | null>(null);
 
-  const handleFile = useCallback(async (file: File) => {
-    setCvLoading(true);
-    setError(null);
+  const cvReady = cvText.trim().length >= 50;
+
+  const handleFile = async (file: File) => {
+    setError("");
+    setParsing(true);
+    setResult(null);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/parse-cv", { method: "POST", body: fd });
-      const data = (await res.json()) as { text?: string; name?: string; error?: string };
-      if (!res.ok || !data.text) {
-        setError(data.error ?? "Extraction du CV impossible.");
-        setCvName(null);
-        setCvText("");
-      } else {
-        setCvText(data.text);
-        setCvName(data.name ?? file.name);
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/parse-cv", { method: "POST", body: formData });
+      const data = (await res.json().catch(() => null)) as {
+        text?: string;
+        name?: string;
+        error?: string;
+      } | null;
+      if (!res.ok || !data?.text) {
+        setError(data?.error ?? "Impossible de lire ce fichier.");
+        return;
       }
+      setCvText(data.text);
+      setCvName(data.name ?? file.name);
     } catch {
-      setError("Import impossible — vérifie ta connexion puis réessaie.");
+      setError("Réseau indisponible : réessaie dans un instant.");
     } finally {
-      setCvLoading(false);
+      setParsing(false);
     }
-  }, []);
+  };
 
   const handleScan = async () => {
-    if (!cvText) {
-      setError("Ajoute d'abord ton CV : il sert de base au scoring des offres.");
-      return;
-    }
+    if (!cvReady) return;
     setLoading(true);
-    setError(null);
+    setError("");
     setResult(null);
-    setWarnings([]);
     try {
       const res = await fetch("/api/agent/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cvText, cvName, query, region, remoteOnly }),
+        body: JSON.stringify({
+          cvText: cvText.trim(),
+          cvName: cvName.trim(),
+          query: query.trim(),
+          region: region.trim(),
+          remoteOnly,
+        }),
       });
-      const data = (await res.json()) as ScanResponse & { error?: string };
-      if (!res.ok) {
-        setError(data.error ?? "Le scan a échoué. Réessaie dans un instant.");
-      } else {
-        setResult(data);
-        setWarnings(data.warnings ?? []);
+      const data = (await res.json().catch(() => null)) as
+        | (ScanResponse & { error?: string })
+        | null;
+      if (!res.ok || !data || data.error) {
+        setError(data?.error ?? "Le scan a échoué. Réessaie dans un instant.");
+        return;
       }
+      setResult(data);
     } catch {
-      setError("Serveur inaccessible — vérifie que le serveur de développement tourne puis réessaie.");
+      setError("Réseau indisponible : réessaie dans un instant.");
     } finally {
       setLoading(false);
     }
   };
 
+  // Transmet l'offre au panneau « CV & Lettre par offre » :
+  // écriture dans localStorage + événement écouté par le shell et le DossierPanel.
   const openInDossier = (job: ScoredJob) => {
     window.localStorage.setItem(
-      "nexirole:dossier-offer",
+      STORAGE_KEY,
       JSON.stringify({
         offerUrl: job.url,
         offerTitle: `${job.title} — ${job.company}`,
-        offerDescription: job.description ?? "",
+        offerDescription: (job.description ?? "").slice(0, 6000),
+        createdAt: Date.now(),
       })
     );
-    window.dispatchEvent(new CustomEvent("nexirole:open-dossier"));
+    window.dispatchEvent(new CustomEvent(EVENT_NAME));
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-extrabold text-navy">Agent Recherche en Direct</h2>
+        <h2 className="font-heading text-xl font-bold text-navy">
+          Agent Recherche en Direct
+        </h2>
         <p className="mt-1 text-sm text-slate-500">
-          Scan en direct Remotive + Arbeitnow, avec score de compatibilité IA pour chaque offre.
+          Scan en direct de Remotive et Arbeitnow : chaque offre est scorée selon ton
+          CV, puis transformable en dossier complet en un clic.
         </p>
       </div>
 
-      {/* Étape 1 : CV de référence */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-bold text-navy">1. Ton CV de référence</h3>
-        {cvName ? (
-          <div className="mt-3 flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
-            <span className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-700">
-              <IconCheck className="size-4" />
+      {/* Étape 1 : le CV */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+          Étape 1 — Ton CV
+        </h3>
+        <label className="mt-4 flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-200 px-4 py-6 text-sm font-semibold text-slate-500 transition hover:border-navy hover:text-navy">
+          <IconUpload className="h-5 w-5" />
+          {parsing
+            ? "Lecture du fichier..."
+            : "Clique pour charger ton CV (PDF, TXT ou MD)"}
+          <input
+            type="file"
+            accept=".pdf,.txt,.md"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleFile(file);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        {cvName && (
+          <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+            <IconFileText className="h-4 w-4 shrink-0" />
+            <span className="flex-1 truncate font-semibold">
               CV chargé : {cvName}
             </span>
             <button
               type="button"
               onClick={() => {
-                setCvName(null);
+                setCvName("");
                 setCvText("");
+                setResult(null);
               }}
-              className="text-xs font-semibold text-slate-500 transition-colors hover:text-navy"
+              aria-label="Retirer le CV"
+              className="rounded p-1 hover:bg-emerald-100"
             >
-              Remplacer
+              <IconX className="h-4 w-4" />
             </button>
           </div>
-        ) : (
-          <label className="mt-3 flex cursor-pointer flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center transition-colors hover:border-navy hover:bg-slate-100">
-            {cvLoading ? (
-              <IconLoader2 className="size-6 animate-spin text-navy" />
-            ) : (
-              <IconUpload className="size-6 text-slate-400" />
-            )}
-            <span className="text-sm font-semibold text-slate-600">
-              {cvLoading ? "Extraction du texte en cours…" : "Clique pour importer ton CV (PDF)"}
-            </span>
-            <input
-              type="file"
-              accept=".pdf,.txt,.md"
-              className="hidden"
-              disabled={cvLoading}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void handleFile(f);
-              }}
-            />
-          </label>
         )}
       </section>
 
-      {/* Étape 2 : filtres */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <h3 className="text-sm font-bold text-navy">2. Filtres de recherche</h3>
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <div className="relative">
-            <IconSearch className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+      {/* Étape 2 : les filtres + scan */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+          Étape 2 — Tes filtres
+        </h3>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <div>
+            <label
+              htmlFor="scan-query"
+              className="text-xs font-semibold text-slate-600"
+            >
+              Poste, entreprise ou mot-clé
+            </label>
             <input
+              id="scan-query"
+              type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Poste, mot-clé (ex. réseaux, React…)"
-              className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-navy focus:outline-none"
+              placeholder="Ex. React, Data Engineer, Product Manager..."
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-navy focus:ring-2 focus:ring-navy/10"
             />
           </div>
-          <div className="relative">
-            <IconMapPin className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+          <div>
+            <label
+              htmlFor="scan-region"
+              className="text-xs font-semibold text-slate-600"
+            >
+              Zone géographique
+            </label>
             <input
+              id="scan-region"
+              type="text"
               value={region}
               onChange={(e) => setRegion(e.target.value)}
-              placeholder="Région / pays"
-              className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-navy focus:outline-none"
+              placeholder="Ex. France, Europe, Worldwide..."
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-navy focus:ring-2 focus:ring-navy/10"
             />
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => setRemoteOnly((v) => !v)}
-          className={`mt-3 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition-colors ${
-            remoteOnly
-              ? "border-navy bg-navy text-white"
-              : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-          }`}
-        >
-          <IconWorld className="size-4" />
-          Remote uniquement
-        </button>
+
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setRemoteOnly(!remoteOnly)}
+            aria-pressed={remoteOnly}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition ${
+              remoteOnly ? "bg-navy" : "bg-slate-300"
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 rounded-full bg-white transition ${
+                remoteOnly ? "translate-x-6" : "translate-x-1"
+              }`}
+            />
+          </button>
+          <div>
+            <p className="text-sm font-semibold text-navy">
+              Télétravail uniquement
+            </p>
+            <p className="text-xs text-slate-400">
+              Ne garder que les offres remote ou remote-friendly.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleScan}
+            disabled={!cvReady || loading}
+            className="inline-flex items-center gap-2 rounded-xl bg-navy px-5 py-3 text-sm font-bold text-white shadow-md transition hover:bg-navy/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? (
+              <IconLoader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <IconRadar className="h-5 w-5 text-gold" />
+            )}
+            {loading ? "Scan en cours..." : "Lancer le scan & le scoring"}
+          </button>
+          {!cvReady && (
+            <p className="text-xs text-slate-400">
+              Charge d'abord ton CV (étape 1).
+            </p>
+          )}
+        </div>
+        {loading && (
+          <p className="mt-3 text-xs text-slate-400">
+            Lecture des offres Remotive & Arbeitnow, puis scoring IA par lots. Compte
+            20 à 60 secondes selon le nombre d'offres.
+          </p>
+        )}
       </section>
 
-      {/* Étape 3 : scan */}
-      <button
-        type="button"
-        onClick={() => void handleScan()}
-        disabled={loading || cvLoading || !cvText}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-navy px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-navy/90 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {loading ? <IconLoader2 className="size-5 animate-spin" /> : <IconSparkles className="size-5 text-gold" />}
-        {loading ? "Scan et scoring en cours (1 à 2 minutes)…" : "Lancer le scan & le scoring"}
-      </button>
-
       {error && (
-        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">
-          <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
-          <span>{error}</span>
+        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p className="flex-1">{error}</p>
+          <button
+            type="button"
+            onClick={() => setError("")}
+            aria-label="Fermer"
+            className="rounded p-1 hover:bg-red-100"
+          >
+            <IconX className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      {warnings.map((w) => (
-        <div
-          key={w}
-          className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
-        >
-          <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
-          <span>{w}</span>
-        </div>
-      ))}
-
       {/* Résultats */}
       {result && (
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-bold text-navy">
-              {result.jobs.length} offres classées par compatibilité
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <h3 className="font-heading text-lg font-bold text-navy">
+              {result.jobs.length} offres triées par pertinence
             </h3>
-            <span className="text-xs font-medium text-slate-400">
+            <span className="text-xs text-slate-500">
               {result.totalKept} retenues sur {result.totalFound} trouvées
+            </span>
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                result.aiAvailable
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-amber-200 bg-amber-50 text-amber-700"
+              }`}
+            >
+              <IconSparkles className="h-3.5 w-3.5" />
+              {result.aiAvailable
+                ? "Offres scorées par l'IA"
+                : "Analyse IA partielle (repli mots-clés)"}
             </span>
           </div>
 
-          {result.jobs.length === 0 && (
-            <div className="rounded-2xl border border-slate-200 bg-white px-5 py-8 text-center text-sm text-slate-500">
-              Aucune offre à afficher pour l&apos;instant.
+          {result.warnings?.length ? (
+            <div className="space-y-1 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+              {result.warnings.map((w, i) => (
+                <p
+                  key={i}
+                  className="flex items-start gap-2 text-sm text-amber-800"
+                >
+                  <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{w}</span>
+                </p>
+              ))}
             </div>
-          )}
+          ) : null}
 
-          <ul className="space-y-3">
-            {result.jobs.map((job, index) => (
-              <li
-                key={job.id}
-                className="rounded-2xl border border-slate-200 bg-white p-4 transition-shadow hover:shadow-sm"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-extrabold text-slate-400">#{index + 1}</span>
-                      <h4 className="truncate text-sm font-bold text-navy">{job.title}</h4>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-                      <span className="inline-flex items-center gap-1">
-                        <IconBuilding className="size-3.5" />
-                        {job.company}
-                      </span>
-                      <span className="inline-flex items-center gap-1">
-                        <IconMapPin className="size-3.5" />
-                        {job.location}
-                      </span>
-                      <span
-                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                          job.source === "Remotive" ? "bg-navy text-white" : "bg-slate-200 text-slate-700"
-                        }`}
-                      >
-                        {job.source}
-                      </span>
-                      {job.aiScored && (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-600">
-                          <IconSparkles className="size-3" />
-                          Score IA
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-2 line-clamp-2 text-xs text-slate-500">{job.reason}</p>
-                  </div>
-                  <div className="flex flex-col items-end gap-2">
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-extrabold ${scoreStyle(job.score)}`}
-                    >
-                      {job.score}% — {scoreLabel(job.score)}
+          {result.jobs.map((job, index) => (
+            <article
+              key={`${job.url}-${index}`}
+              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-slate-400">
+                      #{index + 1}
                     </span>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => openInDossier(job)}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-navy px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-navy/90"
-                      >
-                        <IconFileText className="size-3.5" />
-                        Générer CV et lettre
-                      </button>
-                      <a
-                        href={job.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-600 transition-colors hover:border-slate-300 hover:text-navy"
-                      >
-                        <IconExternalLink className="size-3.5" />
-                        Voir l&apos;offre
-                      </a>
-                    </div>
+                    <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700">
+                      {job.source}
+                    </span>
+                    {job.aiScored && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                        <IconSparkles className="h-3 w-3" />
+                        Score IA
+                      </span>
+                    )}
+                    {!job.aiScored && (
+                      <span className="text-[11px] text-slate-400">
+                        score mots-clés
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="mt-1.5 font-heading text-base font-bold text-navy">
+                    {job.title}
+                  </h4>
+                  <p className="text-sm text-slate-500">
+                    {job.company}
+                    {job.location ? ` · ${job.location}` : ""}
+                  </p>
+                  {job.reason && (
+                    <p className="mt-2 text-xs text-slate-500">{job.reason}</p>
+                  )}
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openInDossier(job)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-gold px-3 py-2 text-sm font-bold text-navy transition hover:bg-gold-dark"
+                    >
+                      <IconFileText className="h-4 w-4" />
+                      Générer CV et lettre
+                    </button>
+                    <a
+                      href={job.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                    >
+                      Voir l'offre
+                      <IconExternalLink className="h-4 w-4" />
+                    </a>
                   </div>
                 </div>
-              </li>
-            ))}
-          </ul>
-        </section>
+                <div
+                  className={`flex flex-col items-center rounded-xl border px-4 py-3 ${scoreStyle(
+                    job.score
+                  )}`}
+                >
+                  <span className="text-xl font-bold">{job.score}%</span>
+                  <span className="text-[11px] font-semibold">
+                    {scoreLabel(job.score)}
+                  </span>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
       )}
     </div>
   );
