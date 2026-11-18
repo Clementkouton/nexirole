@@ -1,102 +1,155 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import type { DossierData, HistoryResponse, ScoredJob } from "@/lib/types";
-import { isTemplateId } from "@/lib/cv-templates";
+
+/**
+ * PARTIE 2 — Historique complet de l'utilisateur.
+ *
+ * GET  /api/history?type=applications|resumes&limit=50
+ * POST /api/history            → enregistre un dossier généré
+ * DELETE /api/history?type=...&id=... → supprime un élément
+ *
+ * Le POST est aussi appelé AUTOMATIQUEMENT par /api/generate-from-url :
+ * c'est ce qui corrige le bug « les dossiers générés ne sont pas stockés
+ * dans les historiques ».
+ */
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
 
-/** GET /api/history — les 30 derniers dossiers + 30 derniers scans de l'utilisateur. */
-export async function GET() {
+const saveSchema = z.object({
+  jobTitle: z.string().trim().min(1).max(200),
+  companyName: z.string().trim().min(1).max(200),
+  jobUrl: z.string().url().max(2000).optional().nullable(),
+  templateId: z.string().trim().max(40).optional(),
+  withPhoto: z.boolean().optional(),
+  cv: z.unknown(), // structure optimCvSchema (stocké en Json)
+  coverLetter: z.unknown(), // structure coverLetterSchema (sérialisée)
+  interviewKit: z.unknown().optional().nullable(),
+  candidate: z.unknown().optional().nullable(),
+  initialScore: z.number().int().min(0).max(100).optional().nullable(),
+  optimizedScore: z.number().int().min(0).max(100).optional().nullable(),
+});
+
+const APPLICATION_TYPES = new Set(["applications", "dossiers"]);
+const RESUME_TYPES = new Set(["resumes", "cv"]);
+
+async function requireUserId(): Promise<string | null> {
   const session = await auth();
-  const userId = session?.user?.id;
-
-  if (!userId) {
-    return NextResponse.json(
-      { error: "Connectez-vous pour consulter votre historique." },
-      { status: 401 }
-    );
-  }
-
-  try {
-    const [dossiers, scans] = await Promise.all([
-      prisma.generatedDossier.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-      }),
-      prisma.scanRun.findMany({
-        where: { userId },
-        orderBy: { createdAt: "desc" },
-        take: 30,
-      }),
-    ]);
-
-    const response: HistoryResponse = {
-      dossiers: dossiers.map((d) => ({
-        id: d.id,
-        offreTitre: d.offreTitre,
-        offreUrl: d.offreUrl,
-        offreEntreprise: d.offreEntreprise,
-        templateId: isTemplateId(d.templateId) ? d.templateId : "modern-accent",
-        data: d.data as unknown as DossierData,
-        createdAt: d.createdAt.toISOString(),
-      })),
-      scans: scans.map((s) => ({
-        id: s.id,
-        requete: s.requete,
-        region: s.region,
-        remoteOnly: s.remoteOnly,
-        motscles: (s.motscles as unknown as HistoryResponse["scans"][number]["motscles"]) ?? null,
-        nbOffres: s.nbOffres,
-        resultats: (s.resultats as unknown as ScoredJob[]) ?? [],
-        createdAt: s.createdAt.toISOString(),
-      })),
-    };
-
-    return NextResponse.json(response);
-  } catch (error) {
-    console.error("[history] lecture échouée :", error);
-    return NextResponse.json(
-      { error: "Impossible de charger l'historique pour le moment." },
-      { status: 500 }
-    );
-  }
+  return session?.user?.id ?? null;
 }
 
-/** DELETE /api/history?type=dossier|scan&id=... */
-export async function DELETE(request: NextRequest) {
-  const session = await auth();
-  const userId = session?.user?.id;
-
+export async function GET(request: NextRequest) {
+  const userId = await requireUserId();
   if (!userId) {
-    return NextResponse.json({ error: "Non autorisé." }, { status: 401 });
+    return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
   }
 
-  const { searchParams } = new URL(request.url);
-  const type = searchParams.get("type");
-  const id = searchParams.get("id");
+  const type = request.nextUrl.searchParams.get("type") ?? "applications";
+  const limitParam = Number(request.nextUrl.searchParams.get("limit") ?? "50");
+  const limit = Number.isFinite(limitParam)
+    ? Math.min(Math.max(Math.trunc(limitParam), 1), 100)
+    : 50;
 
-  if (!id || (type !== "dossier" && type !== "scan")) {
+  if (APPLICATION_TYPES.has(type)) {
+    const items = await prisma.generatedApplication.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    return NextResponse.json({ type: "applications", items });
+  }
+
+  if (RESUME_TYPES.has(type)) {
+    const items = await prisma.savedResume.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+    });
+    return NextResponse.json({ type: "resumes", items });
+  }
+
+  return NextResponse.json(
+    { error: "Type d'historique inconnu. Utilisez applications ou resumes." },
+    { status: 400 }
+  );
+}
+
+export async function POST(request: NextRequest) {
+  const userId = await requireUserId();
+  if (!userId) {
+    return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Corps de requête JSON invalide." }, { status: 400 });
+  }
+
+  const parsed = saveSchema.safeParse(body);
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: "Paramètres invalides (type=dossier|scan et id requis)." },
+      { error: parsed.error.issues[0]?.message ?? "Données du dossier invalides." },
       { status: 400 }
     );
   }
 
-  try {
-    if (type === "dossier") {
-      await prisma.generatedDossier.deleteMany({ where: { id, userId } });
-    } else {
-      await prisma.scanRun.deleteMany({ where: { id, userId } });
+  const data = parsed.data;
+  const item = await prisma.generatedApplication.create({
+    data: {
+      userId,
+      jobTitle: data.jobTitle,
+      companyName: data.companyName,
+      jobUrl: data.jobUrl ?? null,
+      templateId: data.templateId?.trim() || "moderne",
+      withPhoto: data.withPhoto ?? false,
+      cvJson: (data.cv ?? {}) as import("@/generated/prisma/client").Prisma.InputJsonValue,
+      coverLetter: JSON.stringify(data.coverLetter ?? {}),
+      interviewKitJson: (data.interviewKit ?? null) as
+        | import("@/generated/prisma/client").Prisma.InputJsonValue
+        | undefined,
+      candidateJson: (data.candidate ?? null) as
+        | import("@/generated/prisma/client").Prisma.InputJsonValue
+        | undefined,
+      initialScore: data.initialScore ?? null,
+      optimizedScore: data.optimizedScore ?? null,
+    },
+  });
+
+  return NextResponse.json({ ok: true, id: item.id }, { status: 201 });
+}
+
+export async function DELETE(request: NextRequest) {
+  const userId = await requireUserId();
+  if (!userId) {
+    return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  }
+
+  const id = request.nextUrl.searchParams.get("id");
+  const type = request.nextUrl.searchParams.get("type") ?? "applications";
+  if (!id) {
+    return NextResponse.json({ error: "Paramètre id manquant." }, { status: 400 });
+  }
+
+  if (APPLICATION_TYPES.has(type)) {
+    const deleted = await prisma.generatedApplication.deleteMany({
+      where: { id, userId }, // userId : jamais supprimer le dossier d'un autre
+    });
+    if (deleted.count === 0) {
+      return NextResponse.json({ error: "Dossier introuvable." }, { status: 404 });
     }
     return NextResponse.json({ ok: true });
-  } catch (error) {
-    console.error("[history] suppression échouée :", error);
-    return NextResponse.json(
-      { error: "Suppression impossible pour le moment." },
-      { status: 500 }
-    );
   }
+
+  if (RESUME_TYPES.has(type)) {
+    const deleted = await prisma.savedResume.deleteMany({ where: { id, userId } });
+    if (deleted.count === 0) {
+      return NextResponse.json({ error: "CV introuvable." }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true });
+  }
+
+  return NextResponse.json({ error: "Type d'historique inconnu." }, { status: 400 });
 }

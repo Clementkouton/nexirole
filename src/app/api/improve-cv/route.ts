@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { generateStructured, hasGroqKey } from "@/lib/ai";
+import { generateStructured } from "@/lib/ai";
+import { hasGroqKey } from "@/lib/ai-guard";
+import { auth } from "@/auth";
+import { guardRateLimit, getClientIp } from "@/lib/rate-limit";
 
 /**
  * Amélioration GLOBALE d'un CV par l'IA :
  * réécrit le résumé professionnel, reformule les réalisations de chaque
  * expérience, suggère des compétences et donne des conseils concrets.
  * N'invente jamais d'entreprise, de date ou de chiffre absent du CV.
+ * PARTIE 3 : anti-abus (5 requêtes/h/IP pour les anonymes, 20/h pour les
+ * utilisateurs connectés) afin de protéger le quota Groq.
  */
 
 export const maxDuration = 60;
@@ -53,6 +58,17 @@ function clamp(text: string, max: number): string {
 }
 
 export async function POST(request: NextRequest) {
+  /* PARTIE 3 — Garde anti-abus sur le quota Groq */
+  const session = await auth();
+  const ip = getClientIp(request);
+  const guard = guardRateLimit(request, {
+    route: "improve-cv",
+    clientId: session?.user?.id ?? "anon",
+    ip,
+    limitPerHour: session?.user?.id ? 20 : 5,
+  });
+  if (!guard.ok) return guard.response;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -87,7 +103,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!hasGroqKey) {
+  if (!hasGroqKey()) {
     return NextResponse.json(
       {
         error:

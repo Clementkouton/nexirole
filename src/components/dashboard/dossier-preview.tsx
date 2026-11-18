@@ -9,7 +9,42 @@
 import { useEffect, useState } from "react";
 import { cx } from "@/lib/ui-classes";
 import { getTemplate, type TemplateId } from "@/lib/cv-templates";
-import type { DossierData } from "@/lib/types";
+
+interface DossierData {
+  identite: {
+    nom_complet: string;
+    email?: string;
+    telephone?: string;
+    ville?: string;
+    linkedin?: string;
+  };
+  titre: string;
+  resume?: string;
+  experiences: Array<{
+    poste: string;
+    periode: string;
+    entreprise: string;
+    lieu: string;
+    missions: string[];
+  }>;
+  formations: Array<{ diplome: string; periode: string }>;
+  competences: string[];
+  langues: Array<{ nom: string; niveau: string }>;
+  lettre_motivation: {
+    paragraphes: string[];
+    objet?: string;
+    salutation?: string;
+    politesse?: string;
+  };
+  offre?: { entreprise?: string; titre: string; lieu?: string };
+  kit_entretien?: {
+    questions: Array<{ question: string; reponse_suggeree: string; astuce: string }>;
+    conseils: string[];
+    score?: number;
+    message_linkedin: string;
+    message_email: string;
+  };
+}
 
 interface DossierPreviewProps {
   data: DossierData;

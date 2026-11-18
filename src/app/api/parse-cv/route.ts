@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { generateStructured, hasGroqKey } from "@/lib/ai";
+import { auth } from "@/auth";
+import { generateStructured } from "@/lib/ai";
+import { hasGroqKey } from "@/lib/ai-guard";
 import { extractPdfText } from "@/lib/pdf-extract";
+import { prisma } from "@/lib/prisma";
+import { sanitizeExtractedText, validatePdfBuffer } from "@/lib/file-security";
+import { rateLimit, getClientIp } from "@/lib/rate-limit";
 
 /**
  * Lecture multi-formats du CV (côté serveur) :
@@ -11,12 +16,18 @@ import { extractPdfText } from "@/lib/pdf-extract";
  *  - TXT / MD : lecture directe
  * Puis extraction des mots-clés (métier, lieu, compétences) par l'IA,
  * avec repli local si l'IA est indisponible.
+ *
+ * PARTIE 2 : le CV analysé est sauvegardé AUTOMATIQUEMENT dans l'historique
+ * (modèle SavedResume) pour l'utilisateur connecté.
+ * PARTIE 3 : validation stricte des PDF (5 Mo, MIME, octets magiques %PDF-)
+ * + nettoyage anti-injection du texte extrait + limite 12 requêtes/h/IP.
  */
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const MAX_SIZE = 10 * 1024 * 1024;
+const MAX_SAVED_CHARS = 8000;
 
 const keywordsSchema = z.object({
   metier: z.string().max(120),
@@ -59,7 +70,7 @@ async function extractImageText(
   base64: string,
   mime: string
 ): Promise<string> {
-  if (!hasGroqKey) {
+  if (!hasGroqKey()) {
     throw new ParseError(
       "La lecture d'une image de CV nécessite la clé GROQ_API_KEY dans .env.local. En attendant, importez une version PDF de votre CV."
     );
@@ -125,7 +136,7 @@ async function extractDocxText(buffer: Buffer): Promise<string> {
   }
 }
 
-class ParseError extends Error { }
+class ParseError extends Error {}
 
 /* ------------------------------------------------------------------ */
 /*  Repli local : extraction de mots-clés sans IA                      */
@@ -175,10 +186,48 @@ function localKeywords(text: string): z.infer<typeof keywordsSchema> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Sauvegarde automatique de l'historique (PARTIE 2)                  */
+/* ------------------------------------------------------------------ */
+
+async function saveResumeHistory(
+  userId: string,
+  fileName: string,
+  text: string,
+  keywords: z.infer<typeof keywordsSchema>
+): Promise<void> {
+  try {
+    const lines = text.split("\n").filter((l) => l.trim().length > 3);
+    await prisma.savedResume.create({
+      data: {
+        userId,
+        fileName: fileName.slice(0, 120) || "cv-importe",
+        extractedText: clamp(text, MAX_SAVED_CHARS),
+        detectedSkills: keywords.competences.slice(0, 12),
+        profileSummary: clamp(lines.slice(0, 3).join(" — "), 240),
+      },
+    });
+  } catch (error) {
+    console.error("[parse-cv] sauvegarde de l'historique échouée :", error);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Handler                                                            */
 /* ------------------------------------------------------------------ */
 
 export async function POST(request: NextRequest) {
+  /* PARTIE 3 : 12 analyses de CV max par heure et par IP */
+  const rl = rateLimit(`parse-cv:${getClientIp(request)}`, 12, 60 * 60 * 1000);
+  if (!rl.success) {
+    return NextResponse.json(
+      {
+        error: `Trop d'analyses de CV. Réessayez dans ${Math.ceil(rl.retryAfterSec / 60)} minute(s).`,
+        code: "RATE_LIMITED",
+      },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } }
+    );
+  }
+
   let file: File;
   try {
     const formData = await request.formData();
@@ -237,6 +286,15 @@ export async function POST(request: NextRequest) {
   try {
     if (isPdf) {
       const buffer = Buffer.from(await file.arrayBuffer());
+      /* PARTIE 3 — Validation stricte : 5 Mo max + octets magiques %PDF-
+           avant d'appeler pdf-parse (bloque les fichiers déguisés).      */
+      const check = validatePdfBuffer(buffer, null);
+      if (!check.ok) {
+        return NextResponse.json(
+          { error: check.error, code: "PDF_REJECTED" },
+          { status: check.status }
+        );
+      }
       text = await extractPdfText(buffer);
     } else if (imageMime) {
       const buffer = Buffer.from(await file.arrayBuffer());
@@ -273,11 +331,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  /* PARTIE 3 — Nettoyage anti-injection de prompt du texte extrait */
+  text = sanitizeExtractedText(text, 12_000);
+
   /* Extraction des mots-clés */
   let keywords: z.infer<typeof keywordsSchema>;
-  if (hasGroqKey && text.trim().length >= 80) {
+  if (hasGroqKey() && text.trim().length >= 80) {
     try {
-      keywords = await generateStructured({
+      const result = await generateStructured({
         schema: keywordsSchema,
         system:
           "Tu extrais des mots-clés d'un CV en français. À partir du texte du CV : \"metier\" = intitulé du poste actuel ou visé (courte expression, sans phrase) ; \"lieu\" = ville/pays du candidat si identifiable, sinon chaîne vide ; \"competences\" = 6 à 10 compétences techniques ou métiers clés réellement présentes dans le CV, chacune en 1 à 4 mots. N'invente rien, réponds avec un JSON strict.",
@@ -285,6 +346,7 @@ export async function POST(request: NextRequest) {
         temperature: 0.1,
         maxOutputTokens: 800,
       });
+      keywords = result.data as z.infer<typeof keywordsSchema>;
       keywords.competences = keywords.competences
         .map((c) => c.trim())
         .filter(Boolean)
@@ -295,6 +357,13 @@ export async function POST(request: NextRequest) {
     }
   } else {
     keywords = localKeywords(text);
+  }
+
+  /* PARTIE 2 — Sauvegarde automatique pour l'utilisateur connecté */
+  const session = await auth();
+  const userId = session?.user?.id ?? null;
+  if (userId) {
+    await saveResumeHistory(userId, file.name, text, keywords);
   }
 
   return NextResponse.json({

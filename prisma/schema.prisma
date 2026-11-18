@@ -18,17 +18,28 @@ model User {
   email         String    @unique
   emailVerified DateTime?
   image         String?
-  passwordHash  String?   // Bcrypt coût 12 — null = compte Google uniquement
+  passwordHash  String? // Bcrypt coût 12 — null = compte Google uniquement
   role          String    @default("user")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  // ── Licence Chariow (PARTIE 1) ─────────────────────────────
+  plan             String    @default("FREE") // FREE | BOOST | PRO
+  licenseKey       String?   @unique // clé UUID générée par Chariow
+  licenseStatus    String    @default("INACTIVE") // INACTIVE | ACTIVE | REVOKED | EXPIRED
+  expiresAt        DateTime? // fin de validité (BOOST 30 j / PRO 90 j)
+  // Compteurs d'usage — remis à zéro à l'activation d'une licence.
+  // usagePeriodStart pilote la fenêtre glissante de 30 jours du plan FREE.
+  searchesUsed     Int       @default(0)
+  generationsUsed  Int       @default(0)
+  usagePeriodStart DateTime? @default(now())
+
+  savedResumes          SavedResume[]
+  generatedApplications GeneratedApplication[]
+  jobApplications       JobApplicationTracker[]
+
   accounts Account[]
   sessions Session[]
-
-  // Historique NexiRole
-  generatedDossiers GeneratedDossier[]
-  scanRuns          ScanRun[]
 
   @@map("users")
 }
@@ -90,35 +101,75 @@ model PasswordResetToken {
   @@map("password_reset_tokens")
 }
 
-// ── HISTORIQUE : dossiers générés (CV + lettre + kit entretien) ──
-model GeneratedDossier {
-  id         String   @id @default(cuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  offreTitre String   // Intitulé de l'offre ciblée (ou "CV générique")
-  offreUrl   String?
-  offreEntreprise String?
-  templateId String   @default("modern-accent")
-  data       Json     // Dossier complet : identite, experiences, lettre, kit...
-  createdAt  DateTime @default(now())
+// ── CV analysés (PARTIE 2) — sauvegarde automatique du parse-cv
+model SavedResume {
+  id             String   @id @default(cuid())
+  userId         String
+  fileName       String
+  extractedText  String // texte extrait, nettoyé et tronqué (anti-injection)
+  detectedSkills String[] // compétences extraites par l'IA
+  profileSummary String? // premiers lignes significatives du CV
+  createdAt      DateTime @default(now())
 
-  @@index([userId, createdAt])
-  @@map("generated_dossiers")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_resumes")
 }
 
-// ── HISTORIQUE : scans de l'Agent de recherche ───────────────
-model ScanRun {
-  id         String   @id @default(cuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  requete    String?  // Terme de recherche saisi (null = recherche intelligente)
-  region     String?
-  remoteOnly Boolean  @default(false)
-  motscles   Json?    // Mots-clés déduits du CV : { titre, motsCles[] }
-  resultats  Json     // Offres scorées (descriptions tronquées)
-  nbOffres   Int      @default(0)
-  createdAt  DateTime @default(now())
+// ── Dossiers générés (PARTIE 2) — historique complet
+model GeneratedApplication {
+  id               String   @id @default(cuid())
+  userId           String
+  jobTitle         String
+  companyName      String
+  jobUrl           String?
+  templateId       String   @default("moderne")
+  withPhoto        Boolean  @default(false)
+  cvJson           Json // CV optimisé (structure optimCvSchema)
+  coverLetter      String // lettre de motivation (JSON sérialisé)
+  interviewKitJson Json? // kit entretien (structure interviewKitSchema)
+  candidateJson    Json? // coordonnées extraites du CV
+  initialScore     Int?
+  optimizedScore   Int?
+  createdAt        DateTime @default(now())
 
-  @@index([userId, createdAt])
-  @@map("scan_runs")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("generated_applications")
+}
+
+// ── Suivi des candidatures (PARTIE 2) — tableau interactif
+model JobApplicationTracker {
+  id           String    @id @default(cuid())
+  userId       String
+  jobTitle     String
+  companyName  String
+  jobUrl       String?
+  status       String    @default("A_POSTULER") // A_POSTULER | ENVOYE | ENTRETIEN | REFUS | OFFRE
+  notes        String?
+  followUpDate DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("job_application_tracker")
+}
+
+// ── Journal des webhooks Chariow (PARTIE 1) — idempotence
+model ChariowEvent {
+  id            String   @id @default(cuid())
+  eventId       String   @unique // x-pulse-delivery-id (idempotence Chariow)
+  eventType     String // successful.sale | license.issued | license.revoked...
+  customerEmail String?
+  licenseKey    String?
+  payload       Json // payload brut complet (audit)
+  createdAt     DateTime @default(now())
+
+  @@index([customerEmail])
+  @@index([licenseKey])
+  @@map("chariow_events")
 }

@@ -9,6 +9,9 @@ import {
   JobScrapeError,
 } from "@/lib/job-apis";
 import { decodeBase64ToBuffer, extractPdfText } from "@/lib/pdf-extract";
+import { requireAiAccess } from "@/lib/ai-guard";
+import { sanitizeExtractedText, validatePdfBuffer } from "@/lib/file-security";
+import { prisma } from "@/lib/prisma";
 
 export const maxDuration = 120;
 
@@ -30,6 +33,12 @@ function clamp(text: string, max: number): string {
 }
 
 export async function POST(request: NextRequest) {
+  /* 0. Anti-abus + quotas de licence (PARTIE 3)
+        - visiteur anonyme : 5 requêtes/h par IP (429)
+        - plan Découverte : 2 dossiers/mois (403 QUOTA_EXCEEDED)            */
+  const access = await requireAiAccess(request, "generation", "generate-from-url");
+  if (!access.ok) return access.response;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -106,16 +115,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Nettoyage anti-injection de prompt + plafond de contexte (PARTIE 3)
+  offerText = sanitizeExtractedText(offerText, 6000);
+
   /* 2. Profil du candidat : CV PDF ou texte rapide ------------------- */
   let candidateText = "";
 
   if (cvPdfBase64) {
     try {
       const buffer = decodeBase64ToBuffer(cvPdfBase64);
-      if (buffer.length > 10 * 1024 * 1024) {
+      // Sécurité : 5 Mo max, MIME application/pdf, octets magiques %PDF-
+      const check = validatePdfBuffer(buffer, "application/pdf");
+      if (!check.ok) {
         return NextResponse.json(
-          { error: "Le CV PDF dépasse la taille maximale de 10 Mo." },
-          { status: 413 }
+          { error: check.error, code: "PDF_REJECTED" },
+          { status: check.status }
         );
       }
       candidateText = await extractPdfText(buffer);
@@ -134,6 +148,8 @@ export async function POST(request: NextRequest) {
   } else if (profileText?.trim()) {
     candidateText = profileText.trim();
   }
+
+  candidateText = sanitizeExtractedText(candidateText, 10_000);
 
   if (candidateText.length < 60) {
     return NextResponse.json(
@@ -167,12 +183,46 @@ export async function POST(request: NextRequest) {
       maxOutputTokens: 8000,
     });
 
+    /* 4. Historique : sauvegarde AUTOMATIQUE du dossier (PARTIE 2).
+          Correctif du bug « les dossiers générés ne sont pas stockés
+          dans les historiques ». La sauvegarde ne bloque jamais
+          l'affichage du dossier à l'utilisateur.                       */
+    let savedId: string | null = null;
+    if (access.ctx.userId) {
+      const pkgData = pkg as {
+        candidate?: unknown;
+        job?: { title?: string; company?: string };
+        cv?: unknown;
+        coverLetter?: unknown;
+        interviewKit?: unknown;
+      };
+      try {
+        const saved = await prisma.generatedApplication.create({
+          data: {
+            userId: access.ctx.userId,
+            jobTitle: pkgData.job?.title?.trim() || jobUrl || "Offre sans titre",
+            companyName: pkgData.job?.company?.trim() || "Non précisée",
+            jobUrl: jobUrl ?? null,
+            templateId: "moderne",
+            withPhoto: false,
+            cvJson: (pkgData.cv ?? {}) as import("@/generated/prisma/client").Prisma.InputJsonValue,
+            coverLetter: JSON.stringify(pkgData.coverLetter ?? {}),
+            interviewKitJson: (pkgData.interviewKit ?? null) as import("@/generated/prisma/client").Prisma.InputJsonValue,
+            candidateJson: (pkgData.candidate ?? null) as import("@/generated/prisma/client").Prisma.InputJsonValue,
+          },
+        });
+        savedId = saved.id;
+      } catch (error) {
+        console.error("[generate-from-url] sauvegarde historique échouée :", error);
+      }
+    }
+
     return NextResponse.json({
-      candidate: pkg.candidate,
-      job: pkg.job,
-      cv: pkg.cv,
-      coverLetter: pkg.coverLetter,
-      interviewKit: pkg.interviewKit,
+      candidate: (pkg as { candidate?: unknown }).candidate,
+      job: (pkg as { job?: unknown }).job,
+      cv: (pkg as { cv?: unknown }).cv,
+      coverLetter: (pkg as { coverLetter?: unknown }).coverLetter,
+      interviewKit: (pkg as { interviewKit?: unknown }).interviewKit,
       meta: {
         jobSource,
         engine: process.env.GROQ_API_KEY
@@ -180,6 +230,8 @@ export async function POST(request: NextRequest) {
           : "moteur-secours-local",
         generatedAt: new Date().toISOString(),
       },
+      savedId,
+      saved: Boolean(savedId),
     });
   } catch (error) {
     console.error("[generate-from-url]", error);

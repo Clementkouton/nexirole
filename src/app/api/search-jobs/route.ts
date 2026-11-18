@@ -11,6 +11,8 @@ import {
   type RawJob,
 } from "@/lib/job-apis";
 import { decodeBase64ToBuffer, extractPdfText } from "@/lib/pdf-extract";
+import { requireAiAccess } from "@/lib/ai-guard";
+import { sanitizeExtractedText, validatePdfBuffer } from "@/lib/file-security";
 
 export const maxDuration = 120;
 
@@ -26,14 +28,23 @@ Barème indicatif : adéquation des compétences techniques (50 %), séniorité/
 
 Points forts : 2 à 4 éléments précis du profil qui répondent aux besoins de l'offre (ne cite pas la compétence seule, donne le contexte, ex: "3 ans d'expérience React demandés par l'offre").
 Compétences manquantes : 1 à 4 exigences de l'annonce que le profil ne couvre pas clairement.
-Conseil : une seule phrase, concrète et immédiate (ex: "Mette en avant ton projet X avec GraphQL dans le résumé du CV").
+Conseil : une seule phrase, concrète et immédiate (ex: "Mettez en avant ton projet X avec GraphQL dans le résumé du CV").
 Réponds en français. Ne fabrique aucun élément absent du profil ou de l'offre.`;
+
+interface ScoreValue {
+  score: number;
+  strengths: string[];
+  missingSkills: string[];
+  advice: string;
+  scoreSource: "ia" | "mots-cles";
+}
 
 interface ScoredJob extends RawJob {
   score: number;
   strengths: string[];
   missingSkills: string[];
   advice: string;
+  scoreSource: "ia" | "mots-cles";
 }
 
 function clamp(text: string, max: number): string {
@@ -56,22 +67,6 @@ function matchesTitleFilter(job: RawJob, filter: string): boolean {
   if (tokens.length === 0) return true;
   const haystack = normalizeFilter(`${job.title} ${job.tags.join(" ")}`);
   return tokens.some((token) => haystack.includes(token));
-}
-
-interface ScoreValue {
-  score: number;
-  strengths: string[];
-  missingSkills: string[];
-  advice: string;
-  scoreSource: "ia" | "mots-cles";
-}
-
-interface ScoredJob extends RawJob {
-  score: number;
-  strengths: string[];
-  missingSkills: string[];
-  advice: string;
-  scoreSource: "ia" | "mots-cles";
 }
 
 const STOPWORDS = new Set([
@@ -144,7 +139,13 @@ async function scoreJobs(
   });
 
   const map = new Map<number, ScoreValue>();
-  for (const item of result.results) {
+  for (const item of result.results as Array<{
+    index: number;
+    score: number;
+    strengths: string[];
+    missingSkills: string[];
+    advice: string;
+  }>) {
     map.set(item.index, {
       score: Math.round(item.score),
       strengths: item.strengths,
@@ -157,6 +158,12 @@ async function scoreJobs(
 }
 
 export async function POST(request: NextRequest) {
+  /* 0. Anti-abus + quotas de licence (PARTIE 3)
+        - visiteur anonyme : 5 requêtes/h par IP (429)
+        - plan Découverte : 3 recherches/mois (403 QUOTA_EXCEEDED)          */
+  const access = await requireAiAccess(request, "search", "search-jobs");
+  if (!access.ok) return access.response;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -182,10 +189,12 @@ export async function POST(request: NextRequest) {
   if (cvPdfBase64) {
     try {
       const buffer = decodeBase64ToBuffer(cvPdfBase64);
-      if (buffer.length > 10 * 1024 * 1024) {
+      // Sécurité : 5 Mo max, MIME application/pdf, octets magiques %PDF-
+      const check = validatePdfBuffer(buffer, "application/pdf");
+      if (!check.ok) {
         return NextResponse.json(
-          { error: "Le CV PDF dépasse la taille maximale de 10 Mo." },
-          { status: 413 }
+          { error: check.error, code: "PDF_REJECTED" },
+          { status: check.status }
         );
       }
       candidateText = await extractPdfText(buffer);
@@ -202,6 +211,9 @@ export async function POST(request: NextRequest) {
   } else if (cvText?.trim()) {
     candidateText = cvText.trim();
   }
+
+  // Nettoyage anti-injection de prompt + plafond de contexte (PARTIE 3)
+  candidateText = sanitizeExtractedText(candidateText, 12_000);
 
   if (candidateText.length < 60) {
     return NextResponse.json(

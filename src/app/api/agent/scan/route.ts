@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { generateStructured, hasGroqKey } from "@/lib/ai";
+import { generateStructured } from "@/lib/ai";
 import { fetchArbeitnowJobs, fetchRemotiveJobs, type RawJob } from "@/lib/job-apis";
+import { hasGroqKey, requireAiAccess } from "@/lib/ai-guard";
 
 /**
  * Agent de recherche en direct :
@@ -9,6 +10,8 @@ import { fetchArbeitnowJobs, fetchRemotiveJobs, type RawJob } from "@/lib/job-ap
  * 2. Filtres métier / lieu, déduplication, plafond à 15 offres.
  * 3. Scoring IA en un seul appel (score 0-100 + raison + forces + lacunes),
  *    avec repli local par mots-clés si l'IA est indisponible.
+ * PARTIE 3 : quota plan Découverte (3 recherches/mois) + 5 requêtes/h/IP
+ * pour les visiteurs anonymes (403 QUOTA_EXCEEDED ou 429 RATE_LIMITED).
  */
 
 export const maxDuration = 120;
@@ -158,14 +161,20 @@ async function scoreJobs(
       "",
       "Évalue chaque offre et renvoie exactement un résultat par index fourni (" +
         jobList.map((b) => b.index).join(", ") +
-      "). Reste synthétique.",
+        "). Reste synthétique.",
     ].join("\n"),
     temperature: 0.2,
     maxOutputTokens: 4000,
   });
 
   const map = new Map<number, ScoreValue>();
-  for (const item of result.results) {
+  for (const item of (result.results ?? []) as Array<{
+    index: number;
+    score: number;
+    reason: string;
+    strengths: string[];
+    missingSkills: string[];
+  }>) {
     map.set(item.index, {
       score: Math.round(item.score),
       reason: item.reason,
@@ -181,6 +190,10 @@ async function scoreJobs(
 /* ------------------------------------------------------------------ */
 
 export async function POST(request: NextRequest) {
+  /* 0. Anti-abus + quotas de licence (PARTIE 3) */
+  const access = await requireAiAccess(request, "search", "agent-scan");
+  if (!access.ok) return access.response;
+
   let body: unknown;
   try {
     body = await request.json();
@@ -296,7 +309,7 @@ export async function POST(request: NextRequest) {
   let iaScores = new Map<number, ScoreValue>();
   let aiAvailable = false;
   try {
-    if (hasGroqKey) {
+    if (hasGroqKey()) {
       iaScores = await scoreJobs(indexedJobs, profileText);
       aiAvailable = iaScores.size > 0;
     }

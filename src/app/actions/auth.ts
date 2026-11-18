@@ -9,6 +9,7 @@ import { sendPasswordResetEmail } from "@/lib/mail";
 import { signIn } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { rateLimit } from "@/lib/rate-limit";
+import { applyPendingLicense } from "@/lib/license";
 import {
   registerSchema,
   loginSchema,
@@ -21,31 +22,6 @@ export type AuthState = { error?: string; success?: string } | null;
 // Message générique anti-énumération : identique que l'email existe ou non
 const GENERIC_RESET_MSG =
   "Si un compte existe avec cet email, un lien de réinitialisation vient d'être envoyé. Vérifiez votre boîte de réception et vos spams.";
-
-// Message DB injoignable (Neon suspendu, DATABASE_URL absente...)
-const DB_ERROR_MSG =
-  "Service momentanément indisponible : la base de données est injoignable. Réessayez dans quelques minutes.";
-
-function isDbDown(error: unknown): boolean {
-  const message =
-    error instanceof Error ? error.message : String(error ?? "");
-  return /can't reach database|p1001|p1008|etimedout|econnrefused|enotfound|ssl/i.test(
-    message
-  );
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return (error as { code?: string } | null)?.code === "P2002";
-}
-
-function getResetBaseUrl(): string {
-  return (
-    process.env.APP_URL ??
-    process.env.AUTH_URL ??
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined) ??
-    "http://localhost:3000"
-  );
-}
 
 async function getClientIp(): Promise<string> {
   const h = await headers();
@@ -78,27 +54,38 @@ export async function registerAction(
     };
   }
 
-  // 3-4. Email déjà utilisé + création — base protégée par try/catch :
-  // Neon suspendu ou DATABASE_URL absente ne fait plus planter la page.
-  try {
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) {
-      return {
-        error: "Un compte existe déjà avec cet email. Connectez-vous ou réinitialisez votre mot de passe.",
-      };
+  // 3. Email déjà utilisé ?
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) {
+    // PARTIE 1 : un achat Chariow peut avoir PRÉ-CRÉÉ le compte (pré-activé,
+    // sans mot de passe) — on « adopte » le compte au lieu de bloquer.
+    if (!existing.passwordHash) {
+      const passwordHash = await bcrypt.hash(password, 12);
+      await prisma.user.update({
+        where: { id: existing.id },
+        data: { name, passwordHash },
+      });
+      // Licence achetée avant l'inscription : activation automatique.
+      await applyPendingLicense(email);
+      redirect("/login?registered=1");
     }
-
-    // Hachage Bcrypt coût 12 — le mot de passe en clair n'est jamais stocké
-    const passwordHash = await bcrypt.hash(password, 12);
-    await prisma.user.create({ data: { name, email, passwordHash } });
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      // Course concurrente (double clic) : unicité de l'email violée
-      return { error: "Un compte existe déjà avec cet email." };
-    }
-    console.error("[register] Erreur base de données :", error);
-    return { error: DB_ERROR_MSG };
+    return {
+      error: "Un compte existe déjà avec cet email. Connectez-vous ou réinitialisez votre mot de passe.",
+    };
   }
+
+  // 4. Hachage Bcrypt coût 12 — le mot de passe en clair n'est jamais stocké
+  const passwordHash = await bcrypt.hash(password, 12);
+
+  try {
+    await prisma.user.create({ data: { name, email, passwordHash } });
+  } catch {
+    // Course concurrente (double clic) : unicité de l'email violée
+    return { error: "Un compte existe déjà avec cet email." };
+  }
+
+  // PARTIE 1 : licence achetée avant l'inscription → activation automatique.
+  await applyPendingLicense(email);
 
   // 5. Pas de session automatique après inscription : on passe par /login
   redirect("/login?registered=1");
@@ -138,10 +125,6 @@ export async function loginAction(
       // Message volontairement vague : aucun indice sur ce qui a échoué
       return { error: "Email ou mot de passe incorrect." };
     }
-    if (isDbDown(error)) {
-      console.error("[login] Base de données injoignable :", error);
-      return { error: DB_ERROR_MSG };
-    }
     throw error; // NEXT_REDIRECT et erreurs inattendues : on relance
   }
 
@@ -168,46 +151,39 @@ export async function forgotPasswordAction(
     return { success: GENERIC_RESET_MSG };
   }
 
-  try {
-    const user = await prisma.user.findUnique({
-      where: { email },
-      select: { id: true, passwordHash: true },
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true, passwordHash: true },
+  });
+
+  // Seuls les comptes avec mot de passe reçoivent un lien.
+  // Les comptes Google-only n'ont rien à réinitialiser, mais la
+  // réponse affichée reste identique.
+  if (user?.passwordHash) {
+    const rawToken = randomBytes(32).toString("hex"); // 256 bits d'entropie
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    const expires = new Date(Date.now() + 60 * 60 * 1000); // expiration : 1 heure
+
+    // Invalide les anciens tokens du même email
+    await prisma.passwordResetToken.deleteMany({ where: { email } });
+    await prisma.passwordResetToken.create({
+      data: { email, token: tokenHash, expires },
     });
 
-    // Seuls les comptes avec mot de passe reçoivent un lien.
-    // Les comptes Google-only n'ont rien à réinitialiser, mais la
-    // réponse affichée reste identique.
-    if (user?.passwordHash) {
-      const rawToken = randomBytes(32).toString("hex"); // 256 bits d'entropie
-      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
-      const expires = new Date(Date.now() + 60 * 60 * 1000); // expiration : 1 heure
+    const resetUrl = `${process.env.APP_URL ?? "http://localhost:3000"}/reset-password?token=${rawToken}`;
 
-      // Invalide les anciens tokens du même email
-      await prisma.passwordResetToken.deleteMany({ where: { email } });
-      await prisma.passwordResetToken.create({
-        data: { email, token: tokenHash, expires },
-      });
-
-      const resetUrl = `${getResetBaseUrl()}/reset-password?token=${rawToken}`;
-
-      // Envoi réel via Resend (template navy/gold dans src/lib/mail.ts).
-      // Le token brut n'est JAMAIS stocké en base : seul son SHA-256 l'est.
-      const sent = await sendPasswordResetEmail(email, resetUrl, 60);
-
-      if (!sent) {
-        if (process.env.NODE_ENV !== "production") {
-          console.log(`\n[DEV] Lien de réinitialisation :\n${resetUrl}\n`);
-        } else {
-          console.error(
-            `[forgot-password] Email non envoyé pour ${email} — vérifier RESEND_API_KEY et MAIL_FROM sur Vercel.`
-          );
-        }
-      }
+    // PRODUCTION : remplacer ce log par un vrai envoi d'email
+    // (Resend, Postmark, Nodemailer...). Le token brut n'est JAMAIS
+    // stocké en base : seul son SHA-256 l'est.
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `\n[DEV] Lien de réinitialisation :\n${resetUrl}\n`
+      );
+    } else {
+      console.log(
+        `[forgot-password] Lien généré pour ${email} (service d'email non encore configuré).`
+      );
     }
-  } catch (error) {
-    // Réponse identique (anti-énumération) : l'erreur reste dans les logs serveur
-    console.error("[forgot-password] Erreur base de données :", error);
-    return { success: GENERIC_RESET_MSG };
   }
 
   return { success: GENERIC_RESET_MSG };
@@ -226,30 +202,25 @@ export async function resetPasswordAction(
   const { token, password } = parsed.data;
   const tokenHash = createHash("sha256").update(token).digest("hex");
 
-  try {
-    const resetToken = await prisma.passwordResetToken.findUnique({
-      where: { token: tokenHash },
-    });
+  const resetToken = await prisma.passwordResetToken.findUnique({
+    where: { token: tokenHash },
+  });
 
-    if (!resetToken || resetToken.expires < new Date()) {
-      return { error: "Ce lien est invalide ou a expiré. Veuillez refaire une demande." };
-    }
-
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    await prisma.user.update({
-      where: { email: resetToken.email },
-      data: { passwordHash },
-    });
-
-    // Consomme le token : il ne peut plus être réutilisé
-    await prisma.passwordResetToken.deleteMany({
-      where: { email: resetToken.email },
-    });
-  } catch (error) {
-    console.error("[reset-password] Erreur base de données :", error);
-    return { error: DB_ERROR_MSG };
+  if (!resetToken || resetToken.expires < new Date()) {
+    return { error: "Ce lien est invalide ou a expiré. Veuillez refaire une demande." };
   }
+
+  const passwordHash = await bcrypt.hash(password, 12);
+
+  await prisma.user.update({
+    where: { email: resetToken.email },
+    data: { passwordHash },
+  });
+
+  // Consomme le token : il ne peut plus être réutilisé
+  await prisma.passwordResetToken.deleteMany({
+    where: { email: resetToken.email },
+  });
 
   redirect("/login?reset=1");
 }

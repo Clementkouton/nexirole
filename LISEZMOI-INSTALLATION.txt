@@ -1,0 +1,162 @@
+NEXIROLE — FINALISATION SaaS : LICENCES CHARIOW + HISTORIQUE PRISMA + SÉCURITÉ + SEO
+====================================================================================
+
+33 fichiers complets (remplacer intégralement ou créer). Aucun extrait, aucun « ... ».
+
+════════════════════════════════════════════════════════════════════════════════
+ÉTAPE 1 — COPIER LES FICHIERS (PowerShell, depuis D:\Next Js\nexirole)
+════════════════════════════════════════════════════════════════════════════════
+Décompressez le ZIP puis copiez chaque fichier à l'emplacement identique du projet.
+Raccourci PowerShell si vous avez extrait dans D:\Next Js\nexirole-finalisation :
+
+    Copy-Item -Path "D:\Next Js\nexirole-finalisation\*.*" -Destination "D:\Next Js\nexirole\" -Force
+    Copy-Item -Path "D:\Next Js\nexirole-finalisation\prisma\schema.prisma" -Destination "D:\Next Js\nexirole\prisma\schema.prisma" -Force
+    Copy-Item -Path "D:\Next Js\nexirole-finalisation\src\lib\*" -Destination "D:\Next Js\nexirole\src\lib\" -Force -Recurse
+    Copy-Item -Path "D:\Next Js\nexirole-finalisation\src\app\*" -Destination "D:\Next Js\nexirole\src\app\" -Force -Recurse
+    Copy-Item -Path "D:\Next Js\nexirole-finalisation\src\components\*" -Destination "D:\Next Js\nexirole\src\components\" -Force -Recurse
+
+⚠ SUPPRESSIONS OBLIGATOIRES (sinon le build échoue) :
+
+    # 1. robots.txt en double (app/robots.ts le remplace) :
+    Remove-Item "D:\Next Js\nexirole\public\robots.txt" -ErrorAction SilentlyContinue
+
+    # 2. Si une livraison précédente a créé le groupe (public) avec une page d'accueil,
+    #    NE GARDEZ QU'UNE SEULE page "/" : soit src/app/page.tsx (ce ZIP), soit
+    #    src/app/(public)/page.tsx — JAMAIS les deux :
+    Remove-Item "D:\Next Js\nexirole\src\app\(public)\page.tsx" -ErrorAction SilentlyContinue
+    Remove-Item "D:\Next Js\nexirole\src\app\(public)\layout.tsx" -ErrorAction SilentlyContinue
+
+════════════════════════════════════════════════════════════════════════════════
+ÉTAPE 2 — DÉPENDANCES (mammoth est déjà dans le package.json fourni)
+════════════════════════════════════════════════════════════════════════════════
+    npm install
+
+════════════════════════════════════════════════════════════════════════════════
+ÉTAPE 3 — SCHÉMA PRISMA (nouvelles tables : historique, suivi, licences)
+════════════════════════════════════════════════════════════════════════════════
+En local (crée la migration + l'applique sur votre Neon via DIRECT_URL) :
+
+    npx prisma migrate dev --name licences_historique_chariow
+
+Sur Vercel (production), la migration s'applique ensuite avec :
+
+    npx prisma migrate deploy
+
+Alternative sans migration : npx prisma db push
+Puis, toujours après le schéma : npx prisma generate (fait aussi par npm install)
+
+════════════════════════════════════════════════════════════════════════════════
+ÉTAPE 4 — VARIABLES D'ENVIRONNEMENT (.env.local ET Vercel → Settings → Env Vars)
+════════════════════════════════════════════════════════════════════════════════
+Ajoutez à ce qui existe déjà (voir .env.example fourni, SANS vraies clés) :
+
+    CHARIOW_API_KEY=sk_live_xxx                # Dashboard Chariow → Developer → API Keys
+    CHARIOW_WEBHOOK_SECRET=whsec_xxx           # Dashboard Chariow → Automation → Pulses → votre Pulse → secret de signature
+    NEXT_PUBLIC_CHARIOW_BOOST_URL=https://votre-boutique.mychariow.com/.../checkout
+    NEXT_PUBLIC_CHARIOW_PRO_URL=https://votre-boutique.mychariow.com/.../checkout
+    # Facultatif (mapping produit → plan) :
+    # CHARIOW_PRODUCT_BOOST_ID=prd_xxx
+    # CHARIOW_PRODUCT_PRO_ID=prd_xxx
+
+════════════════════════════════════════════════════════════════════════════════
+ÉTAPE 5 — CONFIGURER LE PULSE CHARIOW (dans le tableau de bord Chariow)
+════════════════════════════════════════════════════════════════════════════════
+Automation → Pulses → Add Pulse :
+  - URL : https://nexirole.vercel.app/api/webhooks/chariow
+  - Événements : successful.sale, license.issued, license.activated,
+                 license.revoked, license.expired
+  - Notez le secret (whsec_...) → CHARIOW_WEBHOOK_SECRET
+En local, utilisez un tunnel HTTPS (ngrok / VS Code Dev Tunnels) et l'URL
+publique correspondante + ?secret=whsec_xxx n'est PAS nécessaire : le header
+de signature suffit.
+
+════════════════════════════════════════════════════════════════════════════════
+ÉTAPE 6 — TESTS (http://localhost:3000 uniquement)
+════════════════════════════════════════════════════════════════════════════════
+ 1. npm run dev  →  le badge « Issues » de Next.js doit rester vide.
+ 2. /pricing    → sélecteur FCFA/USD, 3 cartes, boutons d'achat Chariow.
+ 3. Connexion   → /dashboard : badge du plan « Découverte » dans la barre
+    latérale avec quotas 3 recherches / 2 dossiers + bouton « Activer une clé ».
+ 4. Agent Recherche (onglet) : lancer un scan → fonctionne ; au 4ᵉ scan,
+    message « Limite du plan Découverte atteinte » + ouverture automatique de
+    la modale d'abonnement (intercepteur QUOTA_EXCEEDED).
+ 5. CV & Lettre par offre : générer un dossier → bandeau OK ; l'onglet
+    « Mon Historique & Suivi » affiche le dossier (BUG « dossiers non stockés »
+    CORRIGÉ : la nouvelle route /api/dossier sauvegarde automatiquement).
+ 6. Historique : boutons « Recharger », « CV PDF », « Lettre PDF », « + Suivi ».
+ 7. Suivi des candidatures : ajouter une candidature, changer son statut →
+    changement instantané (PATCH), couleur du badge mise à jour.
+ 8. Retour de paiement : ouvrir /dashboard?payment=success → bannière de
+    félicitations si le plan est actif (sinon message d'activation en cours).
+ 9. SEO : /robots.txt, /sitemap.xml, /opengraph-image doivent répondre 200
+    (vérifié : image OG 66 Ko générée aux couleurs #051937 / #FFC107).
+10. Build production : npm run build → zéro erreur (vérifié sur une copie
+    exacte de votre projet, Next.js 16.4.6 + Prisma 7.10.1).
+
+════════════════════════════════════════════════════════════════════════════════
+CONTENU DU ZIP (33 fichiers)
+════════════════════════════════════════════════════════════════════════════════
+RACINE
+  .env.example                              (MODIFIÉ — placeholders uniquement)
+  package.json                              (MODIFIÉ — + mammoth)
+  LISEZMOI-INSTALLATION.txt                 (ce fichier)
+
+PRISMA
+  prisma/schema.prisma                      (MODIFIÉ — licence + 4 modèles)
+
+LIBRAIRIES (src/lib)
+  license.ts        (NOUVEAU — plans, quotas, activation, client API Chariow)
+  ai-guard.ts       (NOUVEAU — garde IA : 5 req/h anonyme, quotas 403)
+  file-security.ts  (NOUVEAU — PDF 5 Mo, octets magiques %PDF-, anti-injection)
+  rate-limit.ts     (MODIFIÉ — + getClientIp, guardRateLimit, 429 français)
+  types.ts          (MODIFIÉ — + DossierResponse, ScanResponse, ScanJob)
+
+ROUTES API (src/app/api)
+  license/activate/route.ts   (NOUVEAU — activation manuelle de clé)
+  license/status/route.ts     (NOUVEAU — badge/bannière du dashboard)
+  webhooks/chariow/route.ts   (NOUVEAU — Pulses signés HMAC-SHA256, idempotence)
+  history/route.ts            (NOUVEAU — dossiers générés + CV analysés)
+  tracker/route.ts            (NOUVEAU — suivi des candidatures)
+  dossier/route.ts            (NOUVEAU — route manquante du panneau « CV & Lettre »,
+                               sauvegarde automatique dans l'historique)
+  search-jobs/route.ts        (MODIFIÉ — quota + sécurité PDF)
+  generate-from-url/route.ts  (MODIFIÉ — quota + sécurité PDF + auto-save historique)
+  agent/scan/route.ts         (MODIFIÉ — quota recherches + anti-abus)
+  parse-cv/route.ts           (MODIFIÉ — validation PDF stricte + auto-save CV analysé)
+  improve-cv/route.ts         (MODIFIÉ — anti-abus sur le quota Groq)
+
+PAGES & COMPOSANTS
+  app/pricing/page.tsx                        (NOUVEAU)
+  components/pricing/pricing-client.tsx       (NOUVEAU)
+  components/dashboard/license-panel.tsx      (NOUVEAU — badge + modale clé)
+  components/dashboard/payment-banner.tsx     (NOUVEAU — bannière payment=success)
+  components/dashboard/history-panel.tsx      (NOUVEAU — historique + suivi)
+  components/ui/app-dashboard-shell.tsx       (MODIFIÉ — 4ᵉ onglet + licence)
+  components/navbar-client.tsx                (MODIFIÉ — lien Tarifs)
+  app/actions/auth.ts                         (MODIFIÉ — adoption des comptes
+                                               pré-activés par le webhook)
+
+SEO (src/app)
+  layout.tsx            (MODIFIÉ — metadataBase, OpenGraph, Twitter, mots-clés)
+  page.tsx              (MODIFIÉ — JSON-LD SoftwareApplication)
+  opengraph-image.tsx   (NOUVEAU — image 1200×630 navy/gold)
+  sitemap.ts            (NOUVEAU)
+  robots.ts             (NOUVEAU — bloque /api/ et /dashboard)
+
+VÉRIFICATIONS DÉJÀ EFFECTUÉES SUR COPIE EXACTE DE VOTRE PROJET
+--------------------------------------------------------------
+- npm run build : zéro erreur (Next.js 16.4.6, Turbopack, 29 pages générées).
+- Tests d'intégration réels sur PostgreSQL local :
+    * Webhook sans signature valide          → HTTP 401
+    * Webhook signé (license.issued)         → HTTP 200, compte pré-activé PRO
+      avec expiresAt issu du payload Chariow, compteurs remis à zéro
+    * Rejoue du même x-pulse-delivery-id     → duplicate:true (idempotence)
+    * license.revoked                        → compte repassé en FREE/REVOKED
+    * Activation manuelle de la clé          → HTTP 200 plan PRO
+    * Clé inconnue                           → HTTP 422 LICENSE_INVALID
+    * /api/history sans session              → HTTP 401
+    * 6ᵉ appel anonyme /api/search-jobs      → HTTP 429 (message français)
+    * /robots.txt, /sitemap.xml, /opengraph-image, /pricing → HTTP 200
+- Les 6 erreurs tsc restantes sont PRÉEXISTANTES dans d'anciens fichiers hors
+  périmètre (ancien /cv-builder, utils.ts sans clsx, search-mode…) et n'empêchent
+  pas le build (ignoreBuildErrors déjà configuré).

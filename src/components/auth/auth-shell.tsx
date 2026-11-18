@@ -9,7 +9,7 @@ interface AuthShellProps {
 
 export function AuthShell({ title, subtitle, children }: AuthShellProps) {
   return (
-    <div className="min-h-screen bg-ice flex flex-col items-center justify-center px-4 py-10">
+    <div className="min-h-screen bg-ice  flex flex-col items-center justify-center px-4 py-10">
       <Link href="/" className="flex items-center gap-2 mb-8">
         <img src="/logo.png" alt="NexiRole" className="h-9 w-9 rounded-xl object-cover" />
         <span className="text-xl font-bold text-navy">NexiRole</span>
