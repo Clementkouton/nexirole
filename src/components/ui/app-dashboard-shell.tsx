@@ -194,7 +194,7 @@ export function AppDashboardShell({ userName, userEmail }: AppDashboardShellProp
           </Link>
         </header>
 
-        <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 lg:px-8">
+        <main className="mx-auto w-full flex-1 px-4 py-6 md:px-10 lg:px-18">
           {/* ── Vue d'ensemble ─────────────────────────────────────── */}
           <div className={active === "overview" ? "" : "hidden"}>
             <section className="rounded-2xl bg-navy p-6 text-white shadow-md">

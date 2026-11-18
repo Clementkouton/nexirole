@@ -42,7 +42,7 @@ const FOOTER_COLUMNS = [
 export function SiteFooter() {
   return (
     <footer className="mt-auto border-t border-slate-200 bg-white">
-      <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6 lg:px-8">
+      <div className="mx-auto px-4 sm:px-6 md:px-12 lg:px-18">
         <div className="grid gap-10 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
           <div>
             <Link href="/" className="inline-flex items-center" aria-label="NexiRole — Accueil">

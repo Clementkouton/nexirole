@@ -125,7 +125,7 @@ export function HeroDashboardPreview() {
   const active = DEMO_OFFERS.find((o) => o.id === activeId)!;
 
   return (
-    <div className="relative mx-auto mt-16 max-w-5xl px-4 sm:px-6">
+    <div className="relative mx-auto mt-16 px-10  sm:px-6 lg:px-18">
       {/* Lueur décorative */}
       <div className="pointer-events-none absolute -inset-x-8 top-10 h-64 bg-[radial-gradient(ellipse_at_top,rgba(255,193,7,0.16),transparent_65%)]" />
 

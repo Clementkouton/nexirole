@@ -45,7 +45,7 @@ export function NavbarClient({ user }: { user: NavbarUser | null }) {
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-slate-200 bg-white/90 backdrop-blur-md">
-      <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+      <nav className="mx-auto flex h-16 items-center justify-between px-4 sm:px-6 md:px-12 lg:px-18">
         <Link
           href="/"
           className="flex items-center gap-2.5"
