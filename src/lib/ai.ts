@@ -1,205 +1,312 @@
-import { generateObject } from "ai";
-import { createGroq } from "@ai-sdk/groq";
-import { z } from "zod";
-
 /**
- * Moteur IA de NexiRole.
+ * Moteur IA de NexiRole (Groq via le Vercel AI SDK).
  *
- * - Moteur principal : Groq via `process.env.GROQ_API_KEY` (Vercel AI SDK
- *   `generateObject` + validation Zod pour du JSON 100 % structuré).
- *   Modèle piloté par `GROQ_MODEL` (défaut : openai/gpt-oss-120b).
- *   Clé GRATUITE sur https://console.groq.com — à mettre dans `.env.local`.
- * - Moteur de secours (optionnel) : SDK compatible OpenAI disponible uniquement
- *   dans certains environnements préconfigurés. Import dynamique protégé :
- *   si le paquet n'existe pas sur votre machine, il est simplement ignoré.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CAUSE DU BUG « Moteur IA temporairement saturé » (log du 18/11/2026) :
+ * l'ancienne version utilisait `generateObject`, qui envoie le schéma Zod à
+ * Groq en `response_format: json_schema` STRICT. Groq refuse tout champ
+ * optionnel : il exige que `required` contienne TOUTES les propriétés.
+ * Notre schéma déclarait `kit_entretien.score` comme optionnel → erreur 400 :
+ *   "invalid JSON schema ... /properties/kit_entretien/required: `required`
+ *    is required ... The following properties must be listed in `required`: score"
+ * → la route /api/dossier renvoyait 502 → le panneau affichait « saturé ».
+ *
+ * NOUVELLE STRATÉGIE (immunisée contre ce problème) :
+ *   1. `generateText` SANS json_schema côté serveur Groq ;
+ *   2. consigne stricte « réponds UNIQUEMENT l'objet JSON » ;
+ *   3. extraction robuste du JSON (tolère <think>, ```json, texte parasite) ;
+ *   4. validation LOCALE avec le schéma Zod (inchangé, champs optionnels OK) ;
+ *   5. relance automatique avec consigne renforcée si non conforme ;
+ *   6. repli de modèles si saturation/indisponibilité :
+ *      openai/gpt-oss-120b → openai/gpt-oss-20b → qwen/qwen3.8-27b.
+ *
+ * Le contrat d'appel des routes ne change pas :
+ *   const dossier = await generateStructured({ schema, system, prompt });
+ *   (le résultat est l'objet validé, avec `.object` disponible en plus,
+ *    pour rester compatible avec les deux styles d'usage historiques)
+ *
+ * Modèles valides en novembre 2026 — source : https://console.groq.com/docs/deprecations
+ * (llama-3.3-70b-versatile et llama-3.1-8b-instant sont DÉCOMMISSIONNÉS depuis
+ *  le 16/08/2026 : ne jamais les remettre dans la chaîne.)
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
-export const GROQ_MODEL_ID =
-  process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
+import { createGroq } from "@ai-sdk/groq";
+import { generateText } from "ai";
+import type { z } from "zod";
 
+/* ------------------------------------------------------------------ */
+/* Modèles                                                             */
+/* ------------------------------------------------------------------ */
+
+/** Modèle principal (surchargeable via GROQ_MODEL dans .env.local). */
+export const GROQ_MODEL_ID: string =
+  process.env.GROQ_MODEL?.trim() || "openai/gpt-oss-120b";
+
+/** Alias de compatibilité. */
+export const GROQ_MODEL = GROQ_MODEL_ID;
+
+/** Modèles de repli officiels (page dépréciations Groq — novembre 2026). */
+export const GROQ_FALLBACK_MODELS: readonly string[] = [
+  "openai/gpt-oss-20b",
+  "qwen/qwen3.8-27b",
+];
+
+/** Indique si une clé Groq utilisable est présente dans l'environnement. */
 export function hasGroqKey(): boolean {
-  return Boolean(process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.length > 10);
+  return Boolean(process.env.GROQ_API_KEY?.trim());
 }
 
-function extractJson(raw: string): unknown | null {
-  let text = raw.trim();
-  // Retire les balises markdown ```json ... ``` éventuelles
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) text = fence[1].trim();
-  // Récupère l'objet JSON le plus externe
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return null;
-  }
+/* ------------------------------------------------------------------ */
+/* Extraction JSON robuste                                             */
+/* ------------------------------------------------------------------ */
+
+function stripThinkingBlocks(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, "");
 }
 
-interface StructuredOptions<T> {
-  schema: z.ZodType<T>;
-  system: string;
-  prompt: string;
-  temperature?: number;
-  maxOutputTokens?: number;
+function stripCodeFences(text: string): string {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  return (fenced?.[1] ?? text).trim();
 }
 
-/** Construit un squelette d'exemple remplissable à partir du schéma Zod sérialisé. */
-function skeletonFromSchema(schema: unknown): unknown {
-  if (!schema || typeof schema !== "object") return "«…»";
-  const s = schema as {
-    type?: string;
-    properties?: Record<string, unknown>;
-    items?: unknown;
-    description?: string;
-    enum?: unknown[];
-  };
-  if (s.enum && Array.isArray(s.enum) && s.enum.length > 0) {
-    return `«${String(s.enum[0])}»`;
-  }
-  if (s.type === "object" && s.properties) {
-    const out: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(s.properties)) {
-      out[key] = skeletonFromSchema(child);
+/** Extrait le premier objet ou tableau JSON équilibré d'un texte. */
+function extractBalancedJson(text: string): string | null {
+  const start = text.search(/[{[]/);
+  if (start < 0) return null;
+  const opener = text.charAt(start);
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const char = text.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
     }
-    return out;
+    if (char === '"') inString = true;
+    else if (char === opener) depth += 1;
+    else if (char === closer) {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
   }
-  if (s.type === "array") {
-    return [skeletonFromSchema(s.items)];
-  }
-  if (s.type === "number" || s.type === "integer") return 0;
-  if (s.type === "boolean") return true;
-  return s.description
-    ? `«${s.description.split(".")[0].slice(0, 80)}»`
-    : "«…»";
+  return null;
 }
 
 /**
- * Moteur de secours optionnel : chat JSON strict + parse Zod, avec 4 tentatives.
- * Le SDK est importé dynamiquement avec webpackIgnore/turbopackIgnore : il n'est
- * JAMAIS résolu à la compilation — absent de votre machine, il est ignoré.
+ * Parse du JSON « souple » : tolère les blocs <think> (qwen thinking), les
+ * balises markdown et le texte parasite autour de l'objet.
  */
-async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
-  type FallbackClient = {
-    chat: {
-      completions: {
-        create: (args: Record<string, unknown>) => Promise<{
-          choices?: Array<{ message?: { content?: string } }>;
-        }>;
-      };
-    };
-  };
+export function parseJsonLoose(raw: string): unknown {
+  const cleaned = stripCodeFences(stripThinkingBlocks(raw));
+  const candidates = [cleaned, extractBalancedJson(cleaned) ?? ""];
 
-  let client: FallbackClient | null = null;
-
-  try {
-    const mod: unknown = await import(
-      // @ts-expect-error -- package facultatif, chargé uniquement au démarrage du moteur de secours
-      /* webpackIgnore: true */ /* turbopackIgnore: true */ "z-ai-web-dev-sdk"
-    );
-    const factory =
-      typeof mod === "function"
-        ? mod
-        : ((mod as { default?: unknown }).default as unknown) ?? mod;
-    const create = (factory as { create?: () => Promise<unknown> }).create;
-    if (typeof create !== "function") throw new Error("SDK incompatible");
-    client = (await create()) as FallbackClient;
-  } catch {
-    client = null;
-  }
-
-  if (!client) {
-    throw new Error(
-      "Aucun moteur IA disponible. Ajoutez votre clé GROQ_API_KEY (gratuite sur console.groq.com) dans le fichier .env.local, puis redémarrez le serveur."
-    );
-  }
-
-  const zai = client;
-  const jsonSchema = z.toJSONSchema(opts.schema, { target: "draft-7" });
-  const skeleton = skeletonFromSchema(jsonSchema);
-
-  const messages = [
-    {
-      role: "system" as const,
-      content: [
-        opts.system,
-        "",
-        "RÈGLES DE SORTIE (absolues) :",
-        "- Réponds UNIQUEMENT avec un objet JSON valide : aucun texte avant ou après, aucune balise markdown.",
-        "- Ne renvoie JAMAIS un schéma JSON, des meta-données (comme \"$schema\") ni la structure vide : remplis chaque champ avec les vraies données calculées.",
-        "- La structure exacte attendue est donnée ci-dessous. Les valeurs entre « » sont des indications à remplacer par tes données ; remplace aussi les 0 / true par les vraies valeurs quand pertinent.",
-        JSON.stringify(skeleton, null, 1),
-        "- Respecte scrupuleusement les clés et leurs niveaux d'imbrication.",
-      ].join("\n"),
-    },
-    { role: "user" as const, content: opts.prompt },
-  ];
-
-  let lastError = "réponse vide";
-
-  for (let attempt = 0; attempt < 4; attempt++) {
-    // Backoff exponentiel : atténue les réponses 429 du service IA.
-    if (attempt > 0) {
-      const delayMs = attempt === 1 ? 1500 : attempt === 2 ? 4000 : 8000;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
+  for (const candidate of candidates) {
+    if (!candidate.trim()) continue;
     try {
-      const completion = await zai.chat.completions.create({
-        messages,
-        temperature: opts.temperature ?? 0.4,
-        max_tokens: opts.maxOutputTokens ?? 6000,
-        thinking: { type: "disabled" },
-      });
-      const content: string =
-        completion?.choices?.[0]?.message?.content ?? "";
-      if (!content) {
-        lastError = "réponse vide du modèle";
-        continue;
-      }
-      const json = extractJson(content);
-      if (json === null) {
-        lastError = "aucun JSON détecté dans la réponse";
-        console.error(
-          "[ai-fallback] réponse non exploitable (extrait):",
-          content.slice(0, 240)
-        );
-        continue;
-      }
-      const parsed = opts.schema.safeParse(json);
-      if (parsed.success) return parsed.data;
-      lastError = `validation Zod échouée: ${parsed.error.issues
-        .slice(0, 3)
-        .map((i) => `${i.path.join(".")}: ${i.message}`)
-        .join("; ")}`;
-      console.error(
-        `[ai-fallback] tentative ${attempt + 1} — ${lastError} | extrait réponse:`,
-        content.slice(0, 240)
-      );
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      return JSON.parse(candidate) as unknown;
+    } catch {
+      // essai suivant
     }
   }
 
-  throw new Error(`Génération IA impossible (${lastError})`);
+  throw new Error(
+    `La réponse de l'IA n'est pas un JSON exploitable (${cleaned.slice(0, 120)}...)`,
+  );
 }
 
-/**
- * Génère un objet typé strictement conforme au schéma Zod fourni.
- * Utilise Groq si GROQ_API_KEY est défini, sinon le moteur de secours.
- */
-export async function generateStructured<T>(opts: StructuredOptions<T>): Promise<T> {
-  if (hasGroqKey()) {
-    const groq = createGroq({ apiKey: process.env.GROQ_API_KEY! });
-    const result = await generateObject({
-      model: groq(GROQ_MODEL_ID),
-      schema: opts.schema,
-      system: opts.system,
-      prompt: opts.prompt,
-      temperature: opts.temperature ?? 0.4,
-      maxOutputTokens: opts.maxOutputTokens ?? 8000,
-    });
-    return result.object as T;
+/* ------------------------------------------------------------------ */
+/* generateStructured — réponse structurée garantie                    */
+/* ------------------------------------------------------------------ */
+
+interface StructuredMessage {
+  role: string;
+  content: string;
+}
+
+interface StructuredOptions<Schema extends z.ZodType> {
+  /** Schéma Zod de validation locale (peut contenir des champs optionnels). */
+  schema: Schema;
+  /** Consigne système (rôle, format attendu...). */
+  system?: string;
+  /** Prompt utilisateur principal. */
+  prompt?: string;
+  /** Alternative à `prompt` : liste de messages système/user/assistant. */
+  messages?: readonly StructuredMessage[];
+  temperature?: number;
+  /** Ancien nom (compatibilité) — correspond à maxOutputTokens du SDK. */
+  maxTokens?: number;
+  /** Nom du paramètre dans le AI SDK v5+. */
+  maxOutputTokens?: number;
+  /** Force un modèle précis (replis conservés derrière). */
+  model?: string;
+  /** Acceptés pour compatibilité avec l'ancienne API generateObject. */
+  schemaName?: string;
+  schemaDescription?: string;
+  mode?: string;
+  /** Signal d'annulation externe. */
+  signal?: AbortSignal;
+  abortSignal?: AbortSignal;
+}
+
+const JSON_GUARD =
+  "RÈGLES DE SORTIE (obligatoires) : réponds UNIQUEMENT avec l'objet JSON valide demandé. " +
+  "Aucun texte avant ou après, aucune balise markdown, aucun bloc <think>, aucune explication.";
+
+const JSON_REMINDER =
+  "IMPORTANT : ta réponse précédente n'était pas un JSON exploitable ou ne respectait pas le format demandé. " +
+  "Renvoie cette fois UNIQUEMENT l'objet JSON complet, sans aucun autre texte.";
+
+function buildPromptParts(
+  systemBase: string,
+  optsPrompt: string | undefined,
+  optsMessages: readonly StructuredMessage[] | undefined,
+): { system: string; prompt: string } {
+  let system = [systemBase.trim(), JSON_GUARD]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+
+  let prompt = optsPrompt?.trim() ?? "";
+
+  if (!prompt && optsMessages?.length) {
+    const sysFromMessages = optsMessages
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n\n");
+    if (sysFromMessages.trim()) {
+      system = [sysFromMessages.trim(), systemBase.trim(), JSON_GUARD]
+        .filter((part) => part.length > 0)
+        .join("\n\n");
+    }
+    prompt = optsMessages
+      .filter((m) => m.role !== "system")
+      .map((m) =>
+        m.role === "user" ? m.content : `[réponse précédente] ${m.content}`,
+      )
+      .join("\n\n")
+      .trim();
   }
-  return fallbackStructured(opts);
+
+  if (!prompt) prompt = "Renvoie l'objet JSON demandé.";
+  return { system, prompt };
+}
+
+function withTimeout(
+  external: AbortSignal | undefined,
+  ms: number,
+): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(ms);
+  if (external && typeof AbortSignal.any === "function") {
+    return AbortSignal.any([timeoutSignal, external]);
+  }
+  return timeoutSignal;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const TIMEOUT_MS = 55_000; // compatible Vercel Hobby (60 s max par fonction)
+
+export async function generateStructured<Schema extends z.ZodType>(
+  opts: StructuredOptions<Schema>,
+): Promise<z.infer<Schema> & { object: z.infer<Schema> }> {
+  if (!hasGroqKey()) {
+    throw new Error(
+      "GROQ_API_KEY absente : ajoute-la dans .env.local puis redémarre le serveur.",
+    );
+  }
+
+  const { system, prompt } = buildPromptParts(
+    opts.system ?? "",
+    opts.prompt,
+    opts.messages,
+  );
+
+  const chain = Array.from(
+    new Set(
+      [opts.model?.trim() || GROQ_MODEL_ID, ...GROQ_FALLBACK_MODELS].filter(
+        (m) => m.length > 0,
+      ),
+    ),
+  );
+
+  const temperature = opts.temperature ?? 0.4;
+  const baseTokens =
+    opts.maxOutputTokens ?? opts.maxTokens ?? 8000;
+  const externalSignal = opts.abortSignal ?? opts.signal;
+
+  const groq = createGroq({ apiKey: process.env.GROQ_API_KEY ?? "" });
+
+  let lastError: Error | null = null;
+
+  for (const modelId of chain) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const currentPrompt =
+        attempt === 1 ? prompt : `${prompt}\n\n${JSON_REMINDER}`;
+
+      try {
+        const { text } = await generateText({
+          model: groq(modelId),
+          system,
+          prompt: currentPrompt,
+          temperature,
+          maxOutputTokens: Math.min(baseTokens + (attempt > 1 ? 1000 : 0), 12000),
+          abortSignal: withTimeout(externalSignal, TIMEOUT_MS),
+          maxRetries: 1,
+        });
+
+        const json = parseJsonLoose(text);
+        const validated = opts.schema.safeParse(json);
+
+        if (!validated.success) {
+          const issues = validated.error.issues
+            .map(
+              (issue) =>
+                `${issue.path.join(".") || "(racine)"}: ${issue.message}`,
+            )
+            .join(" ; ")
+            .slice(0, 300);
+          console.warn(
+            `[ai] ${modelId} — tentative ${attempt}/2 — JSON non conforme au schéma : ${issues}`,
+          );
+          lastError = new Error(
+            `La réponse de l'IA ne respecte pas le format attendu (${issues}).`,
+          );
+          continue; // relance avec consigne renforcée
+        }
+
+        console.info(
+          `[ai] réponse structurée via ${modelId}${attempt > 1 ? ` (tentative ${attempt})` : ""}`,
+        );
+        const data = validated.data as z.infer<Schema>;
+        return {
+          ...(data as Record<string, unknown>),
+          object: data,
+        } as z.infer<Schema> & { object: z.infer<Schema> };
+      } catch (error) {
+        lastError =
+          error instanceof Error ? error : new Error(String(error));
+        const status = (error as { statusCode?: number }).statusCode;
+        console.warn(
+          `[ai] ${modelId} — tentative ${attempt}/2 — échec${status ? ` (HTTP ${status})` : ""} : ${lastError.message.slice(0, 220)}`,
+        );
+        await sleep(1000 * attempt);
+      }
+    }
+  }
+
+  throw (
+    lastError ??
+    new Error(
+      `Aucun modèle IA n'a pu répondre (chaîne essayée : ${chain.join(", ")}).`,
+    )
+  );
 }
