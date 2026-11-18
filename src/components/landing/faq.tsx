@@ -90,7 +90,7 @@ export function Faq() {
                   )}
                 >
                   <div className="overflow-hidden">
-                    <p className="pb-5 text-sm leading-relaxed text-slate-600">
+                    <p className="pb-5 text-sm leading-relaxed text-slate-800">
                       {item.answer}
                     </p>
                   </div>

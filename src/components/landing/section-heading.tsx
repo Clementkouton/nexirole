@@ -6,7 +6,7 @@ interface SectionHeadingProps {
 
 export function SectionHeading({ badge, title, subtitle }: SectionHeadingProps) {
   return (
-    <div className="mx-auto max-w-2xl text-center">
+    <div className="mx-auto max-w-3xl text-center">
       <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold uppercase tracking-wider text-navy shadow-sm">
         {badge}
       </span>
@@ -14,7 +14,7 @@ export function SectionHeading({ badge, title, subtitle }: SectionHeadingProps) 
         {title}
       </h2>
       {subtitle ? (
-        <p className="mt-4 text-base leading-relaxed text-slate-600">{subtitle}</p>
+        <p className="mt-4 text-base leading-relaxed text-slate-800">{subtitle}</p>
       ) : null}
     </div>
   );

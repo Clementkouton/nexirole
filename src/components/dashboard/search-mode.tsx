@@ -45,7 +45,7 @@ function scoreStyle(score: number): { pill: string; bar: string; label: string }
     };
   if (score >= 40)
     return {
-      pill: "bg-slate-100 text-slate-600",
+      pill: "bg-slate-100 text-slate-800",
       bar: "bg-slate-400",
       label: "Pertinence partielle",
     };
@@ -144,7 +144,7 @@ function JobCard({
             </p>
             <ul className="mt-2 space-y-1">
               {job.strengths.map((s) => (
-                <li key={s} className="flex gap-1.5 text-xs leading-relaxed text-slate-600">
+                <li key={s} className="flex gap-1.5 text-xs leading-relaxed text-slate-800">
                   <span className="mt-1.5 size-1 shrink-0 rounded-full bg-gold-dark" />
                   {s}
                 </li>
@@ -310,7 +310,7 @@ export function SearchMode({
               Filtres optionnels
             </p>
             <div>
-              <Label htmlFor="filter-title" className="text-xs text-slate-600">
+              <Label htmlFor="filter-title" className="text-xs text-slate-800">
                 Poste recherché
               </Label>
               <div className="relative mt-1">
@@ -325,7 +325,7 @@ export function SearchMode({
               </div>
             </div>
             <div>
-              <Label htmlFor="filter-location" className="text-xs text-slate-600">
+              <Label htmlFor="filter-location" className="text-xs text-slate-800">
                 Localisation
               </Label>
               <div className="relative mt-1">

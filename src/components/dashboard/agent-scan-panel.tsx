@@ -34,7 +34,7 @@ const OPEN_EVENT = "nexirole:open-dossier";
 function scoreStyle(score: number): string {
   if (score >= 80) return "bg-gold text-navy";
   if (score >= 60) return "bg-sky-100 text-sky-700";
-  if (score >= 40) return "bg-slate-100 text-slate-600";
+  if (score >= 40) return "bg-slate-100 text-slate-800";
   return "bg-red-50 text-red-600";
 }
 
@@ -274,7 +274,7 @@ export function AgentScanPanel() {
                   : "ta recherche"}
             </span>
           </p>
-          <p className="mb-2.5 text-xs text-slate-600">
+          <p className="mb-2.5 text-xs text-slate-800">
             Métier détecté : <span className="font-bold text-navy">{keywords.titre}</span> — clique
             sur un badge pour relancer ou affiner le scan en un clic.
           </p>
@@ -300,7 +300,7 @@ export function AgentScanPanel() {
 
       {/* ── État / message ────────────────────────────────────────── */}
       {loading && (
-        <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm">
+        <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 shadow-sm">
           <IconLoader2 className="size-4 animate-spin text-navy" />
           Analyse de ton profil, interrogation de Remotive et Arbeitnow, scoring IA…
         </div>

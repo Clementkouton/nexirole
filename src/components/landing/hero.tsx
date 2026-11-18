@@ -14,8 +14,8 @@ export function Hero() {
       {/* Fond grille légère */}
       <div className="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_at_top,black_30%,transparent_75%)]" />
 
-      <div className="relative mx-auto   pb-8 pt-16  sm:pt-24 px-4 sm:px-6 md:px-12 lg:px-18">
-        <div className="mx-auto max-w-3xl text-center">
+      <div className="relative mx-auto max-w-7xl   pb-8 pt-16  sm:pt-24 px-4 sm:px-6 md:px-12 lg:px-18">
+        <div className="mx-auto max-w-4xl text-center">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-navy shadow-sm">
             <IconSparkles className="size-3.5 text-gold-dark" />
             Assistant carrière IA — propulsé par Llama 3.3 (Groq)
@@ -30,7 +30,7 @@ export function Hero() {
             , en 2 minutes.
           </h1>
 
-          <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-slate-600 sm:text-lg">
+          <p className="mx-auto mt-6 max-w-5xl text-base leading-relaxed text-slate-800 sm:text-lg">
             NexiRole scanne les offres en direct sur Remotive et Arbeitnow,
             note la compatibilité de votre CV, puis génère CV optimisé, lettre
             de motivation sur mesure et kit d&apos;entretien — prêts à envoyer.

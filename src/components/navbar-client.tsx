@@ -66,7 +66,7 @@ export function NavbarClient({ user }: { user: NavbarUser | null }) {
             <Link
               key={link.href}
               href={link.href}
-              className="rounded-full px-4 py-2 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-navy"
+              className="rounded-full px-4 py-2 text-sm font-medium text-slate-800 transition-colors hover:bg-slate-100 hover:text-navy"
             >
               {link.label}
             </Link>
@@ -102,7 +102,7 @@ export function NavbarClient({ user }: { user: NavbarUser | null }) {
               <button
                 type="button"
                 onClick={() => signOut({ redirectTo: "/" })}
-                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-800 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-700"
                 aria-label="Se déconnecter"
               >
                 <IconLogout className="size-4" />
@@ -169,7 +169,7 @@ export function NavbarClient({ user }: { user: NavbarUser | null }) {
                       close();
                       signOut({ redirectTo: "/" });
                     }}
-                    className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                    className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-800 hover:border-red-200 hover:bg-red-50 hover:text-red-700"
                   >
                     <IconLogout className="size-4" />
                     Déconnexion

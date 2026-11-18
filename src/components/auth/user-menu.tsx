@@ -55,7 +55,7 @@ export function UserMenu({ mobile = false }: { mobile?: boolean }) {
         type="button"
                 onClick={() => signOut({ redirectTo: "/" })}
         className={cx(
-          "inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-600 shadow-sm transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-700",
+          "inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-800 shadow-sm transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-700",
           mobile && "flex-1 justify-center"
         )}
         aria-label="Se déconnecter"

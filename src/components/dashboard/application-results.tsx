@@ -50,7 +50,7 @@ function CvPreview({ data }: { data: ApplicationResponse }) {
       </div>
 
       {/* Métadonnées de l'offre */}
-      <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg bg-ice px-3 py-2 text-xs text-slate-600">
+      <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg bg-ice px-3 py-2 text-xs text-slate-800">
         <IconBriefcase className="size-3.5 text-gold-dark" />
         <span>
           Optimisé pour :{" "}
@@ -128,7 +128,7 @@ function CvPreview({ data }: { data: ApplicationResponse }) {
               <div key={`${edu.degree}-${i}`} className="flex flex-wrap items-baseline justify-between gap-1">
                 <div>
                   <p className="text-sm font-bold text-navy">{edu.degree}</p>
-                  <p className="text-xs text-slate-600">{edu.school}</p>
+                  <p className="text-xs text-slate-800">{edu.school}</p>
                 </div>
                 <span className="text-xs font-medium text-slate-500">{edu.period}</span>
               </div>
@@ -194,7 +194,7 @@ function LetterPreview({ data }: { data: ApplicationResponse }) {
   ].join("\n");
 
   return (
-    <div className="mx-auto max-w-2xl">
+    <div className="mx-auto max-w-5xl">
       <div className="rounded-xl border border-slate-200 bg-white p-6 sm:p-10">
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4">
           <div>

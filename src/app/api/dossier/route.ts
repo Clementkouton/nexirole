@@ -6,12 +6,16 @@ import {
   dossierSchema,
   extractKeywordsSchema,
 } from "@/lib/schemas";
-import { generateStructured, hasGroqKey, GROQ_MODEL_ID } from "@/lib/ai";
+import { generateStructured, GROQ_MODEL_ID } from "@/lib/ai";
 import type { DossierData } from "@/lib/types";
 import { extractKeywordsLocally } from "@/lib/dossier-fallback";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+
+function hasGroqKey(): boolean {
+  return Boolean(process.env.GROQ_API_KEY?.trim());
+}
 
 const DOSSIER_SYSTEM_PROMPT = `Tu es NexiRole, cabinet de recrutement et rédacteur de dossiers de candidature d'exception.
 
@@ -91,7 +95,10 @@ export async function POST(request: NextRequest) {
       temperature: 0.2,
       maxOutputTokens: 400,
     });
-    keywordsHint = `Métier détecté : ${extracted.titre_poste}. Compétences fortes : ${extracted.mots_cles.join(", ")}.`;
+    const motsCles = Array.isArray(extracted.mots_cles)
+      ? extracted.mots_cles.filter((mot): mot is string => typeof mot === "string")
+      : [];
+    keywordsHint = `Métier détecté : ${extracted.titre_poste}. Compétences fortes : ${motsCles.join(", ")}.`;
   } catch {
     const local = extractKeywordsLocally(candidateText);
     keywordsHint = `Métier probable : ${local.titre}. Compétences probables : ${local.motsCles.join(", ")}.`;
@@ -122,7 +129,7 @@ export async function POST(request: NextRequest) {
         .join("\n"),
       temperature: 0.4,
       maxOutputTokens: 8000,
-    })) as DossierData;
+    })) as unknown as DossierData;
   } catch (error) {
     console.error("[dossier] génération IA échouée :", error);
     return NextResponse.json(

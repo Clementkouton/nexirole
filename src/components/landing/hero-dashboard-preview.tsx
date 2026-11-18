@@ -125,7 +125,7 @@ export function HeroDashboardPreview() {
   const active = DEMO_OFFERS.find((o) => o.id === activeId)!;
 
   return (
-    <div className="relative mx-auto mt-16 px-10  sm:px-6 lg:px-18">
+    <div className="relative mx-auto max-w-7xl mt-16 px-10  sm:px-6 lg:px-18">
       {/* Lueur décorative */}
       <div className="pointer-events-none absolute -inset-x-8 top-10 h-64 bg-[radial-gradient(ellipse_at_top,rgba(255,193,7,0.16),transparent_65%)]" />
 
@@ -224,7 +224,7 @@ export function HeroDashboardPreview() {
                 </p>
                 <ul className="space-y-1.5">
                   {active.strengths.map((s) => (
-                    <li key={s} className="flex gap-1.5 text-xs text-slate-600">
+                    <li key={s} className="flex gap-1.5 text-xs text-slate-800">
                       <IconChevronDown className="size-3.5 shrink-0 rotate-[-90deg] text-gold-dark" />
                       <span>{s}</span>
                     </li>

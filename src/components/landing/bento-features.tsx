@@ -140,7 +140,7 @@ function PdfPreview() {
 export function BentoFeatures() {
   return (
     <section id="fonctionnalites" className="bg-ice py-20 sm:py-24">
-      <div className="mx-auto px-4 sm:px-6 md:px-12 lg:px-18">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 md:px-12 lg:px-18">
         <SectionHeading
           badge="Fonctionnalités"
           title={
@@ -166,7 +166,7 @@ export function BentoFeatures() {
                 Candidature Express par Lien d&apos;Offre
               </h3>
             </div>
-            <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-600">
+            <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-800">
               Collez simplement l&apos;URL de l&apos;annonce qui vous intéresse.
               NexiRole lit l&apos;offre, extrait ses mots-clés et produit votre CV
               réécrit, votre lettre de motivation et vos 3 questions
@@ -186,7 +186,7 @@ export function BentoFeatures() {
                 Agent de Recherche en Direct
               </h3>
             </div>
-            <p className="mt-3 text-sm leading-relaxed text-slate-600">
+            <p className="mt-3 text-sm leading-relaxed text-slate-800">
               Scan permanent des API officielles Remotive et Arbeitnow — aucune
               clé payante, aucune arnaque d&apos;agrégateur.
             </p>
@@ -206,7 +206,7 @@ export function BentoFeatures() {
                 Scoring ATS &amp; Analyse des Lacunes
               </h3>
             </div>
-            <p className="mt-3 text-sm leading-relaxed text-slate-600">
+            <p className="mt-3 text-sm leading-relaxed text-slate-800">
               Chaque offre reçoit une note sur 100, vos points forts et les
               mots-clés manquants, avec un conseil d&apos;adaptation immédiat.
             </p>
@@ -223,7 +223,7 @@ export function BentoFeatures() {
                 Export PDF Haute Précision
               </h3>
             </div>
-            <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-600">
+            <p className="mt-3 max-w-xl text-sm leading-relaxed text-slate-800">
               Modèles sobres et professionnels, lisibles par les robots ATS comme
               par les recruteurs : texte sélectionnable, hiérarchie claire,
               mise en page courrier française pour la lettre. Téléchargez,

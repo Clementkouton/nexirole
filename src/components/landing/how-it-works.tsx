@@ -36,7 +36,7 @@ const STEPS = [
 export function HowItWorks() {
   return (
     <section id="comment-ca-marche" className="bg-white py-20 sm:py-24">
-      <div className="mx-auto px-4 sm:px-6 md:px-12 lg:px-18">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 md:px-12 lg:px-18">
         <SectionHeading
           badge="Comment ça marche"
           title={
@@ -70,7 +70,7 @@ export function HowItWorks() {
               <h3 className="mt-5 font-heading text-lg font-bold text-navy">
                 {step.title}
               </h3>
-              <p className="mt-2 text-sm leading-relaxed text-slate-600">
+              <p className="mt-2 text-sm leading-relaxed text-slate-800">
                 {step.description}
               </p>
             </div>

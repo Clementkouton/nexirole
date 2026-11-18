@@ -62,7 +62,7 @@ export function CvLivePreview({ data }: { data: CvBuilderData }) {
                   <h3 className="text-[10px] font-bold uppercase tracking-[0.14em] text-navy">
                     Profil professionnel
                   </h3>
-                  <p className="mt-1.5 text-[11.5px] leading-relaxed text-slate-600">
+                    <p className="mt-1.5 text-[11.5px] leading-relaxed text-slate-800">
                     {summary}
                   </p>
                 </section>
@@ -119,7 +119,7 @@ export function CvLivePreview({ data }: { data: CvBuilderData }) {
                             .map((a, i) => (
                               <li
                                 key={i}
-                                className="flex gap-1.5 text-[11px] leading-relaxed text-slate-600"
+                                className="flex gap-1.5 text-[11px] leading-relaxed text-slate-800"
                               >
                                 <span className="text-navy">•</span>
                                 {a}
@@ -149,7 +149,7 @@ export function CvLivePreview({ data }: { data: CvBuilderData }) {
                             {edu.period}
                           </p>
                         </div>
-                        <p className="text-[10.5px] text-slate-600">
+                        <p className="text-[10.5px] text-slate-800">
                           {edu.school || "Établissement"}
                         </p>
                       </div>

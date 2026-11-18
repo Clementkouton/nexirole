@@ -54,7 +54,7 @@ export function SiteFooter() {
                 className="h-10 w-auto"
               />
             </Link>
-            <p className="mt-4 max-w-sm text-sm leading-relaxed text-slate-600">
+            <p className="mt-4 max-w-sm text-sm leading-relaxed text-slate-800">
               NexiRole est l&apos;assistant carrière qui analyse les offres en
               direct, score votre CV et génère vos candidatures sur mesure — CV,
               lettre de motivation et kit d&apos;entretien — grâce à l&apos;IA.
@@ -90,7 +90,7 @@ export function SiteFooter() {
                   <li key={link.label}>
                     <Link
                       href={link.href}
-                      className="text-sm text-slate-600 transition-colors hover:text-navy"
+                      className="text-sm text-slate-800 transition-colors hover:text-navy"
                     >
                       {link.label}
                     </Link>

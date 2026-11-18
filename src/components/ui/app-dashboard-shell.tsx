@@ -142,7 +142,7 @@ export function AppDashboardShell({ userName, userEmail }: AppDashboardShellProp
         <button
           type="button"
           onClick={() => signOut({ redirectTo: "/" })}
-          className="flex w-full items-center gap-2 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-red-50 hover:text-red-700"
+          className="flex w-full items-center gap-2 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-red-50 hover:text-red-700"
         >
           <IconLogout className="size-4.5" />
           Déconnexion

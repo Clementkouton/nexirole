@@ -301,7 +301,7 @@ export function DossierPreview({ data, templateId, photo }: DossierPreviewProps)
         </div>
 
         {kit.score !== undefined && (
-          <p className="mb-3 text-[11px] leading-relaxed text-slate-600">
+          <p className="mb-3 text-[11px] leading-relaxed text-slate-800">
             {kit.score >= 80
               ? "Profil très aligné : candidatez immédiatement."
               : kit.score >= 60
@@ -387,7 +387,7 @@ export function DossierPreview({ data, templateId, photo }: DossierPreviewProps)
         </span>
       </div>
 
-      <div className="mx-auto max-w-md overflow-hidden rounded-xl border border-slate-200 bg-white shadow-inner">
+      <div className="mx-auto max-w-5xl overflow-hidden rounded-xl border border-slate-200 bg-white shadow-inner">
         <Header />
         {tab === "cv" && <CvView />}
         {tab === "letter" && <LetterView />}
