@@ -1,160 +1,166 @@
-// src/app/api/dossier/route.ts
-import { NextResponse } from "next/server";
-import { groqChat, groqJSON, GroqError } from "@/lib/groq";
-import { clampScore, stripHtml } from "@/lib/text";
-import type { DossierResponse } from "@/lib/types";
+import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/auth";
+import { prisma } from "@/lib/prisma";
+import {
+  dossierRequestSchema,
+  dossierSchema,
+  extractKeywordsSchema,
+} from "@/lib/schemas";
+import { generateStructured, hasGroqKey, GROQ_MODEL_ID } from "@/lib/ai";
+import type { DossierData } from "@/lib/types";
+import { extractKeywordsLocally } from "@/lib/dossier-fallback";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
-const CV_SYSTEM =
-  "Tu es un expert de la rédaction de CV et du recrutement francophone. Tu réécris un CV existant pour viser une offre précise. Tu réponds UNIQUEMENT avec le contenu du CV en Markdown, sans commentaire avant ou après. Tu n'inventes JAMAIS d'expérience, de diplôme, de certification, de date ou de chiffre absent du CV fourni. Tu réponds en français.";
+const DOSSIER_SYSTEM_PROMPT = `Tu es NexiRole, cabinet de recrutement et rédacteur de dossiers de candidature d'exception.
 
-const LETTRE_SYSTEM =
-  "Tu es un expert des lettres de motivation percutantes et naturelles. Tu réponds UNIQUEMENT avec le texte de la lettre, en français, sans balise Markdown et sans titre. Tu n'inventes aucune expérience absente du CV. Si une information manque (nom du recruteur, adresse), rédige naturellement sans la mentionner et sans utiliser de crochets.";
+À partir du CV du candidat et de l'offre d'emploi cible, tu produis un dossier COMPLET et structuré :
+- "identite" : coordonnées EXTRAITES du CV — ne JAMAIS inventer une information absente (chaîne vide si absente).
+- "titre" : titre professionnel aligné sur l'intitulé exact de l'offre.
+- "resume" : 3 à 4 phrases percutantes intégrant les mots-clés majeurs de l'annonce.
+- "experiences" : les expériences RÉELLES du CV, reformulées avec les mots-clés de l'offre (missions : 3 à 5 réalisations orientées résultats, sans inventer de fausses expériences ni de chiffres imaginaires).
+- "formations" : celles du CV, reformulées si utile.
+- "competences" : 10 à 14 compétences triées par pertinence pour l'offre.
+- "langues" : celles du CV (niveau précis). Tableau vide si aucune.
+- "lettre_motivation" : objet court, salutation, 3 à 4 paragraphes persuadifs (accroche liée à l'offre, adéquation du profil, valeur apportée à l'entreprise avec une preuve concrète du CV, conclusion engageante), formule de politesse professionnelle.
+- "kit_entretien" : score de compatibilité 0-100 honnête, 3 à 5 conseils d'adaptation concrets, un message d'approche LinkedIn (600 caractères max) et un message email (600 caractères max) adressés au recruteur, 3 questions d'entretien probables avec réponse suggérée structurée (méthode STAR quand pertinent) et astuce.
 
-const SCORE_SYSTEM =
-  "Tu es un expert RH francophone. Tu réponds STRICTEMENT en JSON valide, sans aucun texte autour.";
+TON : professionnel, positif, précis. RÉPONDS ENTIÈREMENT EN FRANÇAIS. N'invente JAMAIS d'expérience, de diplôme, de chiffre ou de contact absent du CV.`;
 
-type DossierBody = {
-  offerUrl?: string;
-  offerTitle?: string;
-  offerDescription?: string;
-  cvText?: string;
-};
-
-async function fetchOfferText(url: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "NexiRole/1.0 (+https://nexirole.vercel.app)",
-        Accept: "text/html,application/xhtml+xml",
-      },
-      signal: AbortSignal.timeout(15_000),
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-    return stripHtml(html).slice(0, 8000);
-  } catch {
-    return null;
-  }
+function clamp(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text;
 }
 
-export async function POST(req: Request) {
-  let body: DossierBody;
+export async function POST(request: NextRequest) {
+  let body: unknown;
   try {
-    body = (await req.json()) as DossierBody;
+    body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Requête invalide." }, { status: 400 });
-  }
-
-  const offerTitle = (body.offerTitle ?? "").trim();
-  const offerUrl = (body.offerUrl ?? "").trim();
-  const cvText = (body.cvText ?? "").trim();
-
-  if (!offerTitle) {
-    return NextResponse.json({ error: "Indique le titre de l'offre visée." }, { status: 400 });
-  }
-  if (cvText.length < 80) {
     return NextResponse.json(
-      { error: "Ton profil est trop court — importe ton CV (PDF) ou rédige une présentation de quelques lignes." },
+      { error: "Corps de requête JSON invalide." },
       { status: 400 }
     );
   }
 
-  const warnings: string[] = [];
-
-  // 1) Texte de l'offre : description fournie, sinon lecture de l'URL, sinon avertissement
-  let offerText = (body.offerDescription ?? "").trim();
-  if (offerText) {
-    offerText = stripHtml(offerText).slice(0, 8000);
-  } else if (offerUrl) {
-    const fetched = await fetchOfferText(offerUrl);
-    if (fetched && fetched.length > 200) {
-      offerText = fetched;
-    } else {
-      warnings.push(
-        "Impossible de lire l'annonce en ligne (site protégé ou indisponible) — la génération s'appuie sur le titre et ton profil. Colle le texte de l'offre pour un résultat plus précis."
-      );
-    }
-  } else {
-    warnings.push("Aucune description d'offre fournie — la génération s'appuie sur le titre de l'offre et ton profil.");
+  const parsed = dossierRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Paramètres de génération invalides." },
+      { status: 400 }
+    );
   }
 
-  const offerBlock = [
-    "Offre visée :",
-    `Titre : ${offerTitle}`,
-    offerUrl ? `Lien : ${offerUrl}` : "",
-    offerText ? `Description :\n"""${offerText.slice(0, 6000)}"""` : "(description non disponible)",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const { offerTitle, offerUrl, offerDescription, cvText } = parsed.data;
+  const candidateText = cvText.trim();
 
-  const cvPrompt = [
-    "Voici mon CV actuel :",
-    `"""${cvText.slice(0, 8000)}"""`,
-    "",
-    offerBlock,
-    "",
-    "Réécris et optimise ce CV pour viser exactement cette offre :",
-    "- Titre professionnel aligné avec l'intitulé de l'offre ;",
-    "- Résumé percutant (3-4 lignes) reprenant les mots-clés essentiels de l'offre ;",
-    "- Expériences reformulées pour mettre en avant ce qui correspond à l'offre, sans rien inventer ;",
-    "- Compétences réorganisées par pertinence pour l'offre ;",
-    "- Une section finale « Atouts pour cette offre ».",
-    "",
-    "Structure Markdown attendue :",
-    "# Prénom NOM",
-    "## Titre professionnel",
-    "### Profil",
-    "### Expériences professionnelles",
-    "### Compétences",
-    "### Formation",
-    "### Atouts pour cette offre",
-  ].join("\n");
+  if (candidateText.length < 60) {
+    return NextResponse.json(
+      {
+        error:
+          "Importez d'abord votre CV (PDF lisible ou texte) pour activer la génération.",
+        code: "NO_CANDIDATE_CONTENT",
+      },
+      { status: 400 }
+    );
+  }
 
-  const lettrePrompt = [
-    "Voici mon CV :",
-    `"""${cvText.slice(0, 5000)}"""`,
-    "",
-    offerBlock,
-    "",
-    "Rédige ma lettre de motivation pour cette offre : 250 à 350 mots,",
-    "- Accroche liée à l'offre et à l'entreprise ;",
-    "- Un paragraphe sur l'adéquation de mes compétences avec les besoins, avec des exemples tirés de mon CV ;",
-    "- Un paragraphe sur ma motivation pour ce rôle précis ;",
-    "- Conclusion avec demande d'entretien ;",
-    "- Signature avec le nom présent dans le CV si disponible.",
-  ].join("\n");
+  if (!hasGroqKey()) {
+    return NextResponse.json(
+      {
+        error:
+          "Aucune clé GROQ_API_KEY configurée. Ajoutez-la dans .env.local ou sur Vercel puis redéployez.",
+        code: "GROQ_NO_KEY",
+      },
+      { status: 503 }
+    );
+  }
 
-  // 2) Génération CV + lettre en parallèle, puis score et conseils (optionnels)
+  /* Session pour l'historique ----------------------------------------- */
+  const session = await auth();
+  const userId = session?.user?.id ?? null;
+
+  /* Mots-clés du CV (pour enrichir le prompt sans coût supplémentaire) -- */
+  let keywordsHint = "";
   try {
-    const [cv, lettre] = await Promise.all([
-      groqChat({ system: CV_SYSTEM, user: cvPrompt, maxTokens: 4000, temperature: 0.5 }),
-      groqChat({ system: LETTRE_SYSTEM, user: lettrePrompt, maxTokens: 2000, temperature: 0.6 }),
-    ]);
-
-    let score: number | null = null;
-    let conseils: string[] = [];
-    try {
-      const r = await groqJSON<{ score: number; conseils: string[] }>({
-        system: SCORE_SYSTEM,
-        user: `CV du candidat :\n"""${cvText.slice(0, 5000)}"""\n\n${offerBlock}\n\nÉvalue la compatibilité et renvoie UNIQUEMENT ce JSON : {"score": <nombre entre 0 et 100>, "conseils": ["<conseil 1>", "<conseil 2>", "<conseil 3>"]}`,
-        maxTokens: 300,
-        temperature: 0.2,
-      });
-      score = clampScore(r.score);
-      conseils = Array.isArray(r.conseils) ? r.conseils.slice(0, 3) : [];
-    } catch {
-      // Le score est un plus : ne fait jamais échouer la génération
-    }
-
-    const response: DossierResponse = { cv, lettre, score, conseils, warnings };
-    return NextResponse.json(response);
-  } catch (err) {
-    const code = err instanceof GroqError ? err.code : "UNKNOWN";
-    const message = err instanceof Error ? err.message : "La génération n'a pas abouti";
-    return NextResponse.json({ error: message, code }, { status: 502 });
+    const extracted = await generateStructured({
+      schema: extractKeywordsSchema,
+      system:
+        "Déduis du CV : 1) titre_poste = titre de poste principal ; 2) mots_cles = les 3 compétences techniques les plus fortes. Rien d'autre.",
+      prompt: clamp(candidateText, 6000),
+      temperature: 0.2,
+      maxOutputTokens: 400,
+    });
+    keywordsHint = `Métier détecté : ${extracted.titre_poste}. Compétences fortes : ${extracted.mots_cles.join(", ")}.`;
+  } catch {
+    const local = extractKeywordsLocally(candidateText);
+    keywordsHint = `Métier probable : ${local.titre}. Compétences probables : ${local.motsCles.join(", ")}.`;
   }
+
+  /* Génération du dossier structuré ------------------------------------ */
+  let data: DossierData;
+  try {
+    data = (await generateStructured({
+      schema: dossierSchema,
+      system: DOSSIER_SYSTEM_PROMPT,
+      prompt: [
+        "## OFFRE D'EMPLOI CIBLE",
+        offerTitle ? `Intitulé : ${offerTitle}` : "Aucune offre précise — produire un CV générique de qualité et un kit d'entretien générique (score 70 environ).",
+        offerUrl ? `Lien : ${offerUrl}` : "",
+        offerDescription ? `Contenu de l'offre :\n${clamp(offerDescription, 6000)}` : "",
+        "",
+        "## CV DU CANDIDAT",
+        clamp(candidateText, 7000),
+        "",
+        keywordsHint,
+        "",
+        "Produis maintenant le dossier complet (identite, titre, resume, experiences, formations, competences, langues, lettre_motivation, kit_entretien" +
+          (offerTitle ? ", offre" : "") +
+          ") en respectant EXACTEMENT la structure demandée.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      temperature: 0.4,
+      maxOutputTokens: 8000,
+    })) as DossierData;
+  } catch (error) {
+    console.error("[dossier] génération IA échouée :", error);
+    return NextResponse.json(
+      {
+        error:
+          "La génération n'a pas abouti : le moteur IA est momentanément saturé. Réessayez dans quelques instants.",
+        code: "AI_UNAVAILABLE",
+      },
+      { status: 502 }
+    );
+  }
+
+  /* Sauvegarde de l'historique (non bloquante) -------------------------- */
+  let saved = false;
+  let id: string | undefined;
+  if (userId) {
+    try {
+      const created = await prisma.generatedDossier.create({
+        data: {
+          userId,
+          offreTitre: (offerTitle?.trim() || data.titre || "CV générique").slice(0, 180),
+          offreUrl: offerUrl?.trim() || null,
+          offreEntreprise: data.offre?.entreprise ?? null,
+          templateId: "modern-accent",
+          data: JSON.parse(JSON.stringify(data)) as never,
+        },
+      });
+      saved = true;
+      id = created.id;
+    } catch (error) {
+      console.error("[dossier] sauvegarde de l'historique échouée :", error);
+    }
+  }
+
+  return NextResponse.json({
+    data,
+    id,
+    saved,
+    engine: `groq/${GROQ_MODEL_ID}`,
+  });
 }

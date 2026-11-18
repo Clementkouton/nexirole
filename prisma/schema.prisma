@@ -26,6 +26,10 @@ model User {
   accounts Account[]
   sessions Session[]
 
+  // Historique NexiRole
+  generatedDossiers GeneratedDossier[]
+  scanRuns          ScanRun[]
+
   @@map("users")
 }
 
@@ -84,4 +88,37 @@ model PasswordResetToken {
 
   @@index([email])
   @@map("password_reset_tokens")
+}
+
+// ── HISTORIQUE : dossiers générés (CV + lettre + kit entretien) ──
+model GeneratedDossier {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  offreTitre String   // Intitulé de l'offre ciblée (ou "CV générique")
+  offreUrl   String?
+  offreEntreprise String?
+  templateId String   @default("modern-accent")
+  data       Json     // Dossier complet : identite, experiences, lettre, kit...
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("generated_dossiers")
+}
+
+// ── HISTORIQUE : scans de l'Agent de recherche ───────────────
+model ScanRun {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requete    String?  // Terme de recherche saisi (null = recherche intelligente)
+  region     String?
+  remoteOnly Boolean  @default(false)
+  motscles   Json?    // Mots-clés déduits du CV : { titre, motsCles[] }
+  resultats  Json     // Offres scorées (descriptions tronquées)
+  nbOffres   Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("scan_runs")
 }

@@ -5,15 +5,17 @@ import { z } from "zod";
 /**
  * Moteur IA de NexiRole.
  *
- * - Moteur principal : Groq `llama-3.3-70b-versatile` via `process.env.GROQ_API_KEY`
- *   (Vercel AI SDK `generateObject` + validation Zod pour du JSON 100 % structuré).
+ * - Moteur principal : Groq via `process.env.GROQ_API_KEY` (Vercel AI SDK
+ *   `generateObject` + validation Zod pour du JSON 100 % structuré).
+ *   Modèle piloté par `GROQ_MODEL` (défaut : openai/gpt-oss-120b).
  *   Clé GRATUITE sur https://console.groq.com — à mettre dans `.env.local`.
  * - Moteur de secours (optionnel) : SDK compatible OpenAI disponible uniquement
  *   dans certains environnements préconfigurés. Import dynamique protégé :
  *   si le paquet n'existe pas sur votre machine, il est simplement ignoré.
  */
 
-const GROQ_MODEL_ID = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
+export const GROQ_MODEL_ID =
+  process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
 
 export function hasGroqKey(): boolean {
   return Boolean(process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.length > 10);
@@ -79,7 +81,7 @@ function skeletonFromSchema(schema: unknown): unknown {
  * JAMAIS résolu à la compilation — absent de votre machine, il est ignoré.
  */
 async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
-  type OpenAICompatibleClient = {
+  type FallbackClient = {
     chat: {
       completions: {
         create: (args: Record<string, unknown>) => Promise<{
@@ -89,19 +91,20 @@ async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
     };
   };
 
-  let client: OpenAICompatibleClient | null = null;
+  let client: FallbackClient | null = null;
 
   try {
-    // Une variable empêche TypeScript de résoudre ce paquet optionnel à la compilation.
-    const optionalSdkModule = "@ai-sdk/sdk";
-    const mod: unknown = await import(optionalSdkModule);
+    const mod: unknown = await import(
+      // @ts-expect-error -- package facultatif, chargé uniquement au démarrage du moteur de secours
+      /* webpackIgnore: true */ /* turbopackIgnore: true */ "z-ai-web-dev-sdk"
+    );
     const factory =
       typeof mod === "function"
         ? mod
         : ((mod as { default?: unknown }).default as unknown) ?? mod;
     const create = (factory as { create?: () => Promise<unknown> }).create;
     if (typeof create !== "function") throw new Error("SDK incompatible");
-    client = (await create()) as typeof client;
+    client = (await create()) as FallbackClient;
   } catch {
     client = null;
   }
@@ -112,7 +115,7 @@ async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
     );
   }
 
-  const zai: OpenAICompatibleClient = client;
+  const zai = client;
   const jsonSchema = z.toJSONSchema(opts.schema, { target: "draft-7" });
   const skeleton = skeletonFromSchema(jsonSchema);
 
@@ -183,7 +186,7 @@ async function fallbackStructured<T>(opts: StructuredOptions<T>): Promise<T> {
 
 /**
  * Génère un objet typé strictement conforme au schéma Zod fourni.
- * Utilise Groq/llama-3.3-70b-versatile si GROQ_API_KEY est défini, sinon le moteur de secours.
+ * Utilise Groq si GROQ_API_KEY est défini, sinon le moteur de secours.
  */
 export async function generateStructured<T>(opts: StructuredOptions<T>): Promise<T> {
   if (hasGroqKey()) {

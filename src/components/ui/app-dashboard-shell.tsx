@@ -1,314 +1,279 @@
 "use client";
 
-import { useEffect, useState, type ComponentType } from "react";
-import Image from "next/image";
-import { signOut } from "next-auth/react";
+/**
+ * Coquille du Dashboard NexiRole :
+ *  - sidebar rétractable (desktop fixe + drawer mobile),
+ *  - 4 panneaux TOUJOURS MONTÉS (masqués en CSS) : overview / agent /
+ *    dossier / historique — l'état et les écouteurs d'événements survivent
+ *    à tous les changements d'onglet,
+ *  - entrée « Créateur de CV » ACTIVE (redirige vers /cv-builder, badge
+ *    BIENTÔT supprimé),
+ *  - bascule automatique vers le Dossier quand l'Agent transmet une offre
+ *    ou quand l'Historique restaure un dossier.
+ */
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   IconArrowRight,
-  IconFileText,
+  IconFilePencil,
+  IconHistory,
   IconLayoutDashboard,
   IconLogout,
   IconMenu2,
   IconRadar,
-  IconSparkles,
+  IconSearch,
+  IconTargetArrow,
+  IconWand,
   IconX,
 } from "@tabler/icons-react";
+import { signOut } from "next-auth/react";
+import { cx } from "@/lib/ui-classes";
 import { AgentScanPanel } from "@/components/dashboard/agent-scan-panel";
 import { DossierPanel } from "@/components/dashboard/dossier-panel";
+import { HistoryPanel } from "@/components/dashboard/history-panel";
 
-type SectionId = "overview" | "dossier" | "agent";
+type SectionId = "overview" | "agent" | "dossier" | "historique";
 
-type IconType = ComponentType<{ className?: string }>;
+const OPEN_EVENT = "nexirole:open-dossier";
+const RESTORE_EVENT = "nexirole:restore-dossier";
 
-type NavItem = {
-  id: SectionId;
-  label: string;
-  icon: IconType;
-};
+interface AppDashboardShellProps {
+  userName: string | null;
+  userEmail: string | null;
+}
 
-const NAV_ITEMS: NavItem[] = [
-  { id: "overview", label: "Vue d'ensemble & Scores", icon: IconLayoutDashboard },
-  { id: "dossier", label: "CV & Lettre par offre", icon: IconFileText },
-  { id: "agent", label: "Agent Recherche en Direct", icon: IconRadar },
-];
-
-const STEPS = [
-  {
-    title: "1. Charge ton CV",
-    text: "PDF ou texte : il sert de base à toutes les générations NexiRole.",
-  },
-  {
-    title: "2. Scanne le marché",
-    text: "L'Agent interroge Remotive et Arbeitnow, puis score chaque offre avec l'IA.",
-  },
-  {
-    title: "3. Génère ton dossier",
-    text: "Un CV et une lettre taillés pour l'offre choisie, prêts à envoyer.",
-  },
-];
-
-export function AppDashboardShell({
-  userName,
-  userEmail,
-}: {
-  userName?: string | null;
-  userEmail?: string | null;
-}) {
+export function AppDashboardShell({ userName, userEmail }: AppDashboardShellProps) {
   const [active, setActive] = useState<SectionId>("overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Quand l'Agent transmet une offre, bascule automatiquement sur « CV & Lettre par offre ».
+  /* Bascule automatique : Agent → Dossier, Historique → Dossier */
   useEffect(() => {
     const handler = () => {
       setActive("dossier");
       setSidebarOpen(false);
       window.scrollTo({ top: 0, behavior: "smooth" });
     };
-    window.addEventListener("nexirole:open-dossier", handler);
-    return () => window.removeEventListener("nexirole:open-dossier", handler);
+    window.addEventListener(OPEN_EVENT, handler);
+    window.addEventListener(RESTORE_EVENT, handler);
+    return () => {
+      window.removeEventListener(OPEN_EVENT, handler);
+      window.removeEventListener(RESTORE_EVENT, handler);
+    };
   }, []);
 
-  const displayName =
-    userName?.trim() || userEmail?.split("@")[0] || "Utilisateur";
-  const initials =
-    displayName
-      .split(/[\s._-]+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase() ?? "")
-      .join("") || "U";
-
-  const openSection = (id: SectionId) => {
-    setActive(id);
+  function go(section: SectionId) {
+    setActive(section);
     setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
-  };
+  }
 
-  const renderNav = () => (
-    <nav className="space-y-1 px-3">
-      {NAV_ITEMS.map((item) => {
-        const Icon = item.icon;
-        const isActive = active === item.id;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => openSection(item.id)}
-            className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-semibold transition ${
-              isActive
-                ? "bg-navy text-white shadow-md"
-                : "text-slate-600 hover:bg-navy-50 hover:text-navy"
-            }`}
-          >
-            <Icon
-              className={`h-5 w-5 shrink-0 ${
-                isActive ? "text-gold" : "text-slate-400 group-hover:text-navy"
-              }`}
-            />
-            <span className="flex-1">{item.label}</span>
-            {isActive && <span className="h-1.5 w-1.5 rounded-full bg-gold" />}
-          </button>
-        );
-      })}
-    </nav>
-  );
+  const initial = (userName ?? userEmail ?? "U").trim().charAt(0).toUpperCase();
 
-  const renderUserCard = () => (
-    <div className="border-t border-slate-200 p-4">
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-navy text-sm font-bold text-gold">
-          {initials}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-navy">{displayName}</p>
-          {userEmail ? (
-            <p className="truncate text-xs text-slate-500">{userEmail}</p>
-          ) : null}
+  const navItems: Array<{
+    id: SectionId | "cv-builder";
+    label: string;
+    icon: React.ReactNode;
+  }> = [
+    { id: "overview", label: "Vue d'ensemble", icon: <IconLayoutDashboard className="size-4.5" /> },
+    { id: "agent", label: "Agent de Recherche", icon: <IconRadar className="size-4.5" /> },
+    { id: "dossier", label: "Dossier & Documents", icon: <IconTargetArrow className="size-4.5" /> },
+    { id: "historique", label: "Historique", icon: <IconHistory className="size-4.5" /> },
+    {
+      id: "cv-builder",
+      label: "Créateur de CV",
+      icon: <IconFilePencil className="size-4.5" />,
+    },
+  ];
+
+  const sidebar = (
+    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-slate-200 bg-white">
+      <div className="flex h-16 items-center gap-2.5 border-b border-slate-200 px-5">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/logo.png" alt="NexiRole" className="h-8 w-auto" />
+      </div>
+
+      <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
+        {navItems.map((item) =>
+          item.id === "cv-builder" ? (
+            <Link
+              key={item.id}
+              href="/cv-builder"
+              onClick={() => setSidebarOpen(false)}
+              className="flex w-full items-center gap-2.5 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-navy transition-colors hover:bg-gold-soft"
+            >
+              {item.icon}
+              {item.label}
+              <IconArrowRight className="ml-auto size-3.5 text-slate-300" />
+            </Link>
+          ) : (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                if (item.id !== "cv-builder") go(item.id);
+              }}
+              className={cx(
+                "flex w-full items-center gap-2.5 rounded-xl px-3.5 py-2.5 text-sm font-semibold transition-colors",
+                active === item.id
+                  ? "bg-navy text-white shadow-sm"
+                  : "text-navy hover:bg-slate-100"
+              )}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          )
+        )}
+      </nav>
+
+      <div className="border-t border-slate-200 p-3">
+        <div className="mb-2 flex items-center gap-2.5 rounded-xl bg-slate-50 px-3 py-2.5">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-navy text-sm font-bold text-white">
+            {initial}
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-bold text-navy">
+              {userName ?? "Utilisateur"}
+            </span>
+            <span className="block truncate text-xs text-slate-500">{userEmail}</span>
+          </span>
         </div>
         <button
           type="button"
           onClick={() => signOut({ redirectTo: "/" })}
-          title="Se déconnecter"
-          className="rounded-lg p-2 text-slate-500 transition hover:bg-red-50 hover:text-red-600"
+          className="flex w-full items-center gap-2 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-red-50 hover:text-red-700"
         >
-          <IconLogout className="h-5 w-5" />
+          <IconLogout className="size-4.5" />
+          Déconnexion
         </button>
       </div>
-    </div>
-  );
-
-  const renderLogo = () => (
-    <div className="flex items-center gap-2.5 px-5 py-5">
-      <Image
-        src="/logo.png"
-        alt="Logo NexiRole"
-        width={32}
-        height={32}
-        className="rounded-lg"
-      />
-      <span className="font-heading text-lg font-bold text-navy">NexiRole</span>
-    </div>
+    </aside>
   );
 
   return (
-    <div className="min-h-screen bg-ice">
-      {/* Barre supérieure (mobile) */}
-      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 lg:hidden">
-        <div className="flex items-center gap-2">
-          <Image
-            src="/logo.png"
-            alt="Logo NexiRole"
-            width={28}
-            height={28}
-            className="rounded-lg"
-          />
-          <span className="font-heading text-base font-bold text-navy">NexiRole</span>
-        </div>
-        <button
-          type="button"
-          onClick={() => setSidebarOpen(true)}
-          aria-label="Ouvrir le menu"
-          className="rounded-lg p-2 text-slate-600 hover:bg-slate-100"
-        >
-          <IconMenu2 className="h-5 w-5" />
-        </button>
-      </header>
+    <div className="flex min-h-screen bg-ice">
+      {/* Sidebar desktop */}
+      <div className="sticky top-0 hidden h-screen lg:block">{sidebar}</div>
 
-      {/* Sidebar (desktop) */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-72 flex-col border-r border-slate-200 bg-white lg:flex">
-        {renderLogo()}
-        {renderNav()}
-        <div className="mt-6 px-3">
-          <p className="px-3 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-            Outils
-          </p>
-          <button
-            type="button"
-            disabled
-            className="mt-1 flex w-full cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-semibold text-slate-400"
-          >
-            <IconFileText className="h-5 w-5 shrink-0" />
-            <span className="flex-1">Créateur de CV PDF</span>
-            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-400">
-              Bientôt
-            </span>
-          </button>
-        </div>
-        <div className="mt-auto">{renderUserCard()}</div>
-      </aside>
-
-      {/* Sidebar (mobile, drawer) */}
+      {/* Drawer mobile */}
       {sidebarOpen && (
-        <div className="fixed inset-0 z-40 lg:hidden">
+        <div className="fixed inset-0 z-50 lg:hidden">
           <div
-            className="absolute inset-0 bg-slate-900/60"
+            className="absolute inset-0 bg-navy/50 backdrop-blur-sm"
             onClick={() => setSidebarOpen(false)}
           />
-          <aside className="absolute inset-y-0 left-0 flex w-72 flex-col bg-white shadow-2xl">
-            <div className="flex items-center justify-between pr-3">
-              {renderLogo()}
-              <button
-                type="button"
-                onClick={() => setSidebarOpen(false)}
-                aria-label="Fermer le menu"
-                className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
-              >
-                <IconX className="h-5 w-5" />
-              </button>
-            </div>
-            {renderNav()}
-            <div className="mt-auto">{renderUserCard()}</div>
-          </aside>
+          <div className="absolute inset-y-0 left-0 h-full shadow-2xl">{sidebar}</div>
         </div>
       )}
 
-      {/* Contenu : les 3 panneaux restent montés en permanence (masqués en CSS) pour ne
-          perdre ni les résultats du scan ni l'écouteur de nexirole:open-dossier. */}
-      <main className="lg:pl-72">
-        <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-          <div className={active === "overview" ? "space-y-6" : "hidden"}>
-            <section className="rounded-2xl bg-navy p-6 text-white shadow-lg sm:p-8">
-              <div className="flex items-center gap-2 text-gold">
-                <IconSparkles className="h-5 w-5" />
-                <span className="text-xs font-semibold uppercase tracking-wider">
-                  Espace carrière NexiRole
-                </span>
-              </div>
-              <h1 className="mt-3 font-heading text-2xl font-bold sm:text-3xl">
-                Bonjour {displayName}
-              </h1>
-              <p className="mt-2 max-w-2xl text-sm text-slate-300 sm:text-base">
-                Trouve les offres qui te correspondent, puis génère en un clic un CV et une
-                lettre de motivation taillés pour chaque offre.
+      {/* Contenu */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-slate-200 bg-white/90 px-4 backdrop-blur-md lg:px-8">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              className="inline-flex size-9 items-center justify-center rounded-full text-navy transition hover:bg-slate-100 lg:hidden"
+              aria-label="Ouvrir le menu"
+            >
+              <IconMenu2 className="size-5" />
+            </button>
+            <h1 className="truncate text-base font-extrabold text-navy">
+              {active === "overview" && "Vue d'ensemble"}
+              {active === "agent" && "Agent de recherche en direct"}
+              {active === "dossier" && "Dossier & documents"}
+              {active === "historique" && "Historique"}
+            </h1>
+          </div>
+          <Link
+            href="/"
+            className="hidden items-center gap-1.5 rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-navy transition hover:bg-slate-50 sm:inline-flex"
+          >
+            Retour au site
+          </Link>
+        </header>
+
+        <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 lg:px-8">
+          {/* ── Vue d'ensemble ─────────────────────────────────────── */}
+          <div className={active === "overview" ? "" : "hidden"}>
+            <section className="rounded-2xl bg-navy p-6 text-white shadow-md">
+              <p className="text-xs font-bold uppercase tracking-widest text-gold">
+                Espace NexiRole
+              </p>
+              <h2 className="mt-1 text-2xl font-extrabold">
+                Bonjour {userName ?? "!"}
+              </h2>
+              <p className="mt-1.5 max-w-xl text-sm text-slate-300">
+                Ton assistant carrière : scanne les offres en direct, génère un
+                dossier complet (CV, lettre, kit d&apos;entretien) avec 4 templates
+                ATS, et retrouve tout dans ton historique.
               </p>
             </section>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => openSection("dossier")}
-                className="group rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
-              >
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-navy text-gold">
-                  <IconFileText className="h-6 w-6" />
-                </div>
-                <h2 className="mt-4 font-heading text-base font-bold text-navy">
-                  CV & Lettre par offre
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Colle le lien d'une offre (ou importe-la depuis l'Agent) et génère ton
-                  dossier complet.
-                </p>
-                <span className="mt-4 inline-flex items-center gap-1 text-sm font-semibold text-navy">
-                  Ouvrir
-                  <IconArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => openSection("agent")}
-                className="group rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
-              >
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-navy text-gold">
-                  <IconRadar className="h-6 w-6" />
-                </div>
-                <h2 className="mt-4 font-heading text-base font-bold text-navy">
-                  Agent Recherche en Direct
-                </h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Scan en direct de Remotive et Arbeitnow, avec scoring IA de chaque offre
-                  selon ton CV.
-                </p>
-                <span className="mt-4 inline-flex items-center gap-1 text-sm font-semibold text-navy">
-                  Lancer un scan
-                  <IconArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
-                </span>
-              </button>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-3">
-              {STEPS.map((step) => (
-                <div
-                  key={step.title}
-                  className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {(
+                [
+                  {
+                    id: "agent" as SectionId,
+                    title: "Agent de recherche",
+                    desc: "Scan intelligent des offres Remotive & Arbeitnow à partir de ton CV.",
+                    icon: <IconSearch className="size-5 text-gold" />,
+                  },
+                  {
+                    id: "dossier" as SectionId,
+                    title: "Dossier & documents",
+                    desc: "CV + lettre + kit d'entretien en PDF ATS, 4 templates avec ou sans photo.",
+                    icon: <IconWand className="size-5 text-gold" />,
+                  },
+                  {
+                    id: "historique" as SectionId,
+                    title: "Historique",
+                    desc: "Retrouve et retélécharge tous tes dossiers et scans enregistrés.",
+                    icon: <IconHistory className="size-5 text-gold" />,
+                  },
+                ] as const
+              ).map((card) => (
+                <button
+                  key={card.id}
+                  type="button"
+                  onClick={() => go(card.id)}
+                  className="rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-navy/40 hover:shadow-md"
                 >
-                  <p className="text-sm font-bold text-navy">{step.title}</p>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-500">{step.text}</p>
-                </div>
+                  <span className="mb-2 inline-flex size-10 items-center justify-center rounded-xl bg-gold-soft">
+                    {card.icon}
+                  </span>
+                  <p className="text-sm font-bold text-navy">{card.title}</p>
+                  <p className="mt-0.5 text-xs leading-relaxed text-slate-500">{card.desc}</p>
+                </button>
               ))}
+              <Link
+                href="/cv-builder"
+                className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:border-navy/40 hover:shadow-md"
+              >
+                <span className="mb-2 inline-flex size-10 items-center justify-center rounded-xl bg-gold-soft">
+                  <IconFilePencil className="size-5 text-gold" />
+                </span>
+                <p className="text-sm font-bold text-navy">Créateur de CV</p>
+                <p className="mt-0.5 text-xs leading-relaxed text-slate-500">
+                  Rédige chaque champ manuellement, choisis un template et exporte en PDF.
+                </p>
+              </Link>
             </div>
           </div>
 
-          <div className={active === "dossier" ? "" : "hidden"}>
-            <DossierPanel />
-          </div>
-
+          {/* ── Panneaux TOUJOURS MONTÉS (masqués en CSS) ──────────── */}
           <div className={active === "agent" ? "" : "hidden"}>
             <AgentScanPanel />
           </div>
-        </div>
-      </main>
+          <div className={active === "dossier" ? "" : "hidden"}>
+            <DossierPanel />
+          </div>
+          <div className={active === "historique" ? "" : "hidden"}>
+            <HistoryPanel />
+          </div>
+        </main>
+      </div>
     </div>
   );
 }

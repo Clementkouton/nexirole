@@ -152,6 +152,121 @@ export type JobScoreBatch = z.infer<typeof jobScoreBatchSchema>;
 export type JobScore = JobScoreBatch["results"][number];
 
 /* ------------------------------------------------------------------ */
+/*  NOUVEAU — Recherche intelligente : extraction depuis le CV          */
+/* ------------------------------------------------------------------ */
+
+export const extractKeywordsSchema = z.object({
+  titre_poste: z
+    .string()
+    .describe("Titre de poste principal du candidat, ex: 'Full Stack Developer', 'Data Analyst'"),
+  mots_cles: z
+    .array(z.string())
+    .max(3)
+    .describe("Les 3 compétences / mots-clés techniques les plus forts du profil"),
+});
+
+export type ExtractedKeywords = z.infer<typeof extractKeywordsSchema>;
+
+export const scanRequestSchema = z.object({
+  cvText: z.string().optional(),
+  query: z.string().optional(),
+  region: z.string().optional(),
+  remoteOnly: z.boolean().optional(),
+});
+
+/* ------------------------------------------------------------------ */
+/*  NOUVEAU — Dossier complet structuré (CV + lettre + kit)            */
+/*  Clés exactes : identite, titre, resume, experiences, formations,   */
+/*  competences, langues, lettre_motivation, kit_entretien             */
+/* ------------------------------------------------------------------ */
+
+export const dossierSchema = z.object({
+  identite: z.object({
+    nom_complet: z.string().describe("Nom complet du candidat"),
+    email: z.string().describe("Email, chaîne vide si absent du CV"),
+    telephone: z.string().describe("Téléphone, chaîne vide si absent"),
+    ville: z.string().describe("Ville / pays, chaîne vide si absent"),
+    linkedin: z.string().describe("LinkedIn, chaîne vide si absent"),
+  }),
+  titre: z.string().describe("Titre professionnel aligné sur l'offre"),
+  resume: z
+    .string()
+    .describe("Résumé professionnel de 3 à 4 phrases, adapté à l'offre"),
+  experiences: z
+    .array(
+      z.object({
+        poste: z.string(),
+        entreprise: z.string(),
+        periode: z.string().describe("ex: 2022 — Aujourd'hui"),
+        lieu: z.string().describe("Ville ou Remote"),
+        missions: z
+          .array(z.string())
+          .describe("3 à 5 réalisations avec les mots-clés de l'offre, sans rien inventer"),
+      })
+    )
+    .describe("Expériences professionnelles reformulées pour l'offre"),
+  formations: z
+    .array(z.object({ diplome: z.string(), etablissement: z.string(), periode: z.string() }))
+    .describe("Formations"),
+  competences: z
+    .array(z.string())
+    .describe("10 à 14 compétences triées par pertinence pour l'offre"),
+  langues: z
+    .array(z.object({ nom: z.string(), niveau: z.string() }))
+    .describe("Langues avec niveau"),
+  lettre_motivation: z.object({
+    objet: z.string(),
+    salutation: z.string().describe("ex: Madame, Monsieur,"),
+    paragraphes: z
+      .array(z.string())
+      .min(2)
+      .max(6)
+      .describe("Accroche, adéquation au poste, valeur apportée, conclusion"),
+    politesse: z.string(),
+  }),
+  kit_entretien: z
+    .object({
+      score: z
+        .number()
+        .min(0)
+        .max(100)
+        .optional()
+        .describe("Score de compatibilité CV ↔ offre (0-100), null si aucune offre"),
+      conseils: z.array(z.string()).describe("3 à 5 conseils d'adaptation concrets"),
+      message_linkedin: z.string().describe("Message d'approche LinkedIn au recruteur, 600 chars max"),
+      message_email: z.string().describe("Message d'approche email au recruteur, 600 chars max"),
+      questions: z
+        .array(
+          z.object({
+            question: z.string(),
+            reponse_suggeree: z.string(),
+            astuce: z.string(),
+          })
+        )
+        .describe("3 à 5 questions probables avec réponses structurées"),
+    })
+    .optional()
+    .describe("Kit d'entretien — généré quand une offre est ciblée"),
+  offre: z
+    .object({
+      titre: z.string(),
+      entreprise: z.string(),
+      lieu: z.string(),
+    })
+    .optional()
+    .describe("Offre ciblée, si fournie"),
+});
+
+export type DossierSchema = z.infer<typeof dossierSchema>;
+
+export const dossierRequestSchema = z.object({
+  offerTitle: z.string().optional(),
+  offerUrl: z.string().optional(),
+  offerDescription: z.string().optional(),
+  cvText: z.string().min(1),
+});
+
+/* ------------------------------------------------------------------ */
 /*  Amélioration de texte (CV Builder)                                 */
 /* ------------------------------------------------------------------ */
 
