@@ -1,19 +1,18 @@
-// =============================================================
-// NEXIROLE — Historique : dossiers générés + CV analysés.
-// Réponse TOUJOURS en JSON (jamais de corps vide).
+﻿// =============================================================
+// NEXIROLE â€” Historique : dossiers gÃ©nÃ©rÃ©s + CV analysÃ©s.
+// RÃ©ponse TOUJOURS en JSON (jamais de corps vide).
 // =============================================================
 
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
-import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { auth } from "@/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const session = await getServerSession(authOptions);
+  const session = await auth();
   if (!session?.user?.email) {
-    return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+    return NextResponse.json({ error: "Non authentifiÃ©." }, { status: 401 });
   }
 
   try {
@@ -42,7 +41,7 @@ export async function GET() {
   } catch (error) {
     console.error("[HISTORY] Erreur :", error);
     return NextResponse.json(
-      { error: "Impossible de charger l'historique. Vérifiez que la base est à jour (npx prisma db push)." },
+      { error: "Impossible de charger l'historique. VÃ©rifiez que la base est Ã  jour (npx prisma db push)." },
       { status: 500 },
     );
   }

@@ -1,14 +1,14 @@
-// =============================================================
-// NEXIROLE — Activation manuelle d'une clé de licence Chariow
-// Source de vérité = journal des événements Chariow (ChariowEvent),
-// alimenté par le webhook /api/webhooks/chariow.
+﻿// =============================================================
+// NEXIROLE â€” Activation manuelle d'une clÃ© de licence Chariow
+// Source de vÃ©ritÃ© = journal des Ã©vÃ©nements Chariow (ChariowEvent),
+// alimentÃ© par le webhook /api/webhooks/chariow.
 // =============================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+
 import { prisma } from "@/lib/prisma";
 import { LICENSE_KEYS, PLAN_DURATION_DAYS, deepFind, detectPlan, type PayablePlan } from "@/lib/chariow";
+import { auth } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -17,17 +17,17 @@ const LICENSE_KEY_REGEX = /^[A-Za-z0-9][A-Za-z0-9\-_]{5,80}$/;
 
 export async function POST(request: NextRequest) {
   // 1) Authentification
-  const session = await getServerSession(authOptions);
+  const session = await auth();
   if (!session?.user?.email) {
-    return NextResponse.json({ error: "Vous devez être connecté pour activer une licence." }, { status: 401 });
+    return NextResponse.json({ error: "Vous devez Ãªtre connectÃ© pour activer une licence." }, { status: 401 });
   }
 
-  // 2) Corps de la requête
+  // 2) Corps de la requÃªte
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Requête invalide." }, { status: 400 });
+    return NextResponse.json({ error: "RequÃªte invalide." }, { status: 400 });
   }
 
   const rawKey =
@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
       : "";
 
   if (!LICENSE_KEY_REGEX.test(rawKey)) {
-    return NextResponse.json({ error: "Format de clé de licence invalide." }, { status: 400 });
+    return NextResponse.json({ error: "Format de clÃ© de licence invalide." }, { status: 400 });
   }
 
   try {
@@ -45,13 +45,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Utilisateur introuvable." }, { status: 401 });
     }
 
-    // 3) Clé déjà utilisée par un AUTRE compte ?
+    // 3) ClÃ© dÃ©jÃ  utilisÃ©e par un AUTRE compte ?
     const taken = await prisma.user.findFirst({ where: { licenseKey: rawKey, id: { not: user.id } } });
     if (taken) {
-      return NextResponse.json({ error: "Cette clé est déjà utilisée par un autre compte." }, { status: 403 });
+      return NextResponse.json({ error: "Cette clÃ© est dÃ©jÃ  utilisÃ©e par un autre compte." }, { status: 403 });
     }
 
-    // 4) Clé déjà rattachée à CE compte (activée par le webhook) ?
+    // 4) ClÃ© dÃ©jÃ  rattachÃ©e Ã  CE compte (activÃ©e par le webhook) ?
     if (user.licenseKey === rawKey) {
       const stillValid =
         user.plan !== "FREE" &&
@@ -67,12 +67,12 @@ export async function POST(request: NextRequest) {
         });
       }
       return NextResponse.json(
-        { error: "Cette licence a expiré. Effectuez un nouvel achat pour la renouveler." },
+        { error: "Cette licence a expirÃ©. Effectuez un nouvel achat pour la renouveler." },
         { status: 410 },
       );
     }
 
-    // 5) Recherche de la clé dans le journal Chariow (licences émises)
+    // 5) Recherche de la clÃ© dans le journal Chariow (licences Ã©mises)
     const events = await prisma.chariowEvent.findMany({
       where: { eventType: { contains: "license" }, processed: true },
       orderBy: { createdAt: "desc" },
@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
 
     if (!plan) {
       return NextResponse.json(
-        { error: "Clé de licence inconnue. Vérifiez la clé reçue après votre achat." },
+        { error: "ClÃ© de licence inconnue. VÃ©rifiez la clÃ© reÃ§ue aprÃ¨s votre achat." },
         { status: 404 },
       );
     }
@@ -112,7 +112,7 @@ export async function POST(request: NextRequest) {
         plan: "FREE",
         licenseStatus: "EXPIRED",
         expiresAt,
-        message: "Cette licence était déjà expirée.",
+        message: "Cette licence Ã©tait dÃ©jÃ  expirÃ©e.",
       });
     }
 
@@ -130,7 +130,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("[LICENSE-ACTIVATE] Erreur :", error);
     return NextResponse.json(
-      { error: "Erreur serveur. Vérifiez que la base est à jour (npx prisma db push)." },
+      { error: "Erreur serveur. VÃ©rifiez que la base est Ã  jour (npx prisma db push)." },
       { status: 500 },
     );
   }

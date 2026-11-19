@@ -1,13 +1,12 @@
-// =============================================================
-// NEXIROLE — Suivi des candidatures (JobApplicationTracker)
-// Réponse TOUJOURS en JSON (jamais de corps vide).
+﻿// =============================================================
+// NEXIROLE â€” Suivi des candidatures (JobApplicationTracker)
+// RÃ©ponse TOUJOURS en JSON (jamais de corps vide).
 // =============================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth/next";
 import { z } from "zod";
-import { authOptions } from "@/lib/authOptions";
 import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,7 +15,7 @@ const TRACKER_STATUSES = ["A_POSTULER", "ENVOYE", "ENTRETIEN", "REFUS", "OFFRE"]
 
 const createSchema = z.object({
   jobTitle: z.string().trim().min(1, "Le poste est obligatoire.").max(200),
-  company: z.string().trim().max(200).optional(),
+  companyName: z.string().trim().max(200).optional(),
   jobUrl: z.string().trim().url("Lien de l'offre invalide.").max(500).optional(),
   status: z.enum(TRACKER_STATUSES).default("A_POSTULER"),
   followUpAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date de suivi invalide.").optional(),
@@ -36,16 +35,16 @@ function parseFollowUp(value?: string): Date | null | undefined {
 }
 
 async function getAuthenticatedUserId(): Promise<string | null> {
-  const session = await getServerSession(authOptions);
+  const session = await auth();
   if (!session?.user?.email) return null;
   const user = await prisma.user.findUnique({ where: { email: session.user.email }, select: { id: true } });
   return user?.id ?? null;
 }
 
-// GET — liste des candidatures suivies
+// GET â€” liste des candidatures suivies
 export async function GET() {
   const userId = await getAuthenticatedUserId();
-  if (!userId) return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "Non authentifiÃ©." }, { status: 401 });
 
   try {
     const candidatures = await prisma.jobApplicationTracker.findMany({
@@ -57,27 +56,27 @@ export async function GET() {
   } catch (error) {
     console.error("[TRACKER][GET] Erreur :", error);
     return NextResponse.json(
-      { error: "Suivi indisponible. Vérifiez que la base est à jour (npx prisma db push)." },
+      { error: "Suivi indisponible. VÃ©rifiez que la base est Ã  jour (npx prisma db push)." },
       { status: 500 },
     );
   }
 }
 
-// POST — ajouter une candidature
+// POST â€” ajouter une candidature
 export async function POST(request: NextRequest) {
   const userId = await getAuthenticatedUserId();
-  if (!userId) return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "Non authentifiÃ©." }, { status: 401 });
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Corps de requête invalide." }, { status: 400 });
+    return NextResponse.json({ error: "Corps de requÃªte invalide." }, { status: 400 });
   }
 
   const parsed = createSchema.safeParse(body);
   if (!parsed.success) {
-    const message = parsed.error.issues[0]?.message ?? "Données invalides.";
+    const message = parsed.error.issues[0]?.message ?? "DonnÃ©es invalides.";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 
@@ -86,7 +85,7 @@ export async function POST(request: NextRequest) {
       data: {
         userId,
         jobTitle: parsed.data.jobTitle,
-        company: parsed.data.company || null,
+        companyName: parsed.data.companyName ?? "",
         jobUrl: parsed.data.jobUrl || null,
         status: parsed.data.status,
         followUpAt: parseFollowUp(parsed.data.followUpAt) ?? null,
@@ -96,27 +95,27 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("[TRACKER][POST] Erreur :", error);
     return NextResponse.json(
-      { error: "Enregistrement impossible. Vérifiez que la base est à jour (npx prisma db push)." },
+      { error: "Enregistrement impossible. VÃ©rifiez que la base est Ã  jour (npx prisma db push)." },
       { status: 500 },
     );
   }
 }
 
-// PATCH — mettre à jour le statut / la date de suivi
+// PATCH â€” mettre Ã  jour le statut / la date de suivi
 export async function PATCH(request: NextRequest) {
   const userId = await getAuthenticatedUserId();
-  if (!userId) return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "Non authentifiÃ©." }, { status: 401 });
 
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Corps de requête invalide." }, { status: 400 });
+    return NextResponse.json({ error: "Corps de requÃªte invalide." }, { status: 400 });
   }
 
   const parsed = updateSchema.safeParse(body);
   if (!parsed.success) {
-    const message = parsed.error.issues[0]?.message ?? "Données invalides.";
+    const message = parsed.error.issues[0]?.message ?? "DonnÃ©es invalides.";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 
@@ -137,14 +136,14 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ ok: true, candidature: updated });
   } catch (error) {
     console.error("[TRACKER][PATCH] Erreur :", error);
-    return NextResponse.json({ error: "Mise à jour impossible." }, { status: 500 });
+    return NextResponse.json({ error: "Mise Ã  jour impossible." }, { status: 500 });
   }
 }
 
-// DELETE — supprimer une candidature (?id=…)
+// DELETE â€” supprimer une candidature (?id=â€¦)
 export async function DELETE(request: NextRequest) {
   const userId = await getAuthenticatedUserId();
-  if (!userId) return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "Non authentifiÃ©." }, { status: 401 });
 
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return NextResponse.json({ error: "Identifiant manquant." }, { status: 400 });
