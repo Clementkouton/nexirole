@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter, Plus_Jakarta_Sans } from "next/font/google";
 import { Toaster } from "sonner";
 import { SiteNavbar } from "@/components/site-navbar";
+import HideOnDashboard from "@/components/HideOnDashboard"; 6
 import { SessionProvider } from "next-auth/react";
 import "./globals.css";
 
@@ -96,11 +97,11 @@ export default function RootLayout({
         suppressHydrationWarning
         className={`${inter.variable} ${jakarta.variable} font-sans antialiased bg-ice min-h-screen flex flex-col`}
       >
-        <SessionProvider>
+        <HideOnDashboard>
           <SiteNavbar />
           <main className="flex-1 flex flex-col">{children}</main>
           <Toaster position="top-center" richColors />
-        </SessionProvider>
+        </HideOnDashboard>
       </body>
     </html>
   );

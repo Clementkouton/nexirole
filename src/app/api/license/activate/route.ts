@@ -1,103 +1,142 @@
+// =============================================================
+// NEXIROLE — Activation manuelle d'une clé de licence Chariow
+// Source de vérité = journal des événements Chariow (ChariowEvent),
+// alimenté par le webhook /api/webhooks/chariow.
+// =============================================================
+
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
+import getServerSession from "next-auth";
+import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { guardRateLimit, getClientIp } from "@/lib/rate-limit";
-import { activateUserLicense, validateLicenseKey } from "@/lib/license";
+import { LICENSE_KEYS, PLAN_DURATION_DAYS, deepFind, detectPlan, type PayablePlan } from "@/lib/chariow";
 
-/**
- * PARTIE 1 — Activation manuelle d'une clé de licence Chariow (modale de secours).
- *
- * POST { licenseKey, email }
- *  1. Rate limit 10 requêtes/h par IP,
- *  2. Validation de la clé auprès de l'API officielle Chariow
- *     (GET https://api.chariow.com/v1/licenses/{key}, Bearer CHARIOW_API_KEY),
- *     avec repli sur le journal local ChariowEvent rempli par le webhook,
- *  3. Détermination du plan (BOOST = 30 jours, PRO = 90 jours),
- *  4. Mise à jour Prisma : plan, licenseKey, licenseStatus ACTIVE, expiresAt,
- *     compteurs d'usage remis à zéro.
- */
-
+export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const bodySchema = z.object({
-  licenseKey: z
-    .string()
-    .trim()
-    .min(8, "La clé de licence est trop courte.")
-    .max(64, "La clé de licence est trop longue."),
-  email: z.string().trim().toLowerCase().email("Adresse email invalide."),
-});
+const LICENSE_KEY_REGEX = /^[A-Za-z0-9][A-Za-z0-9\-_]{5,80}$/;
 
 export async function POST(request: NextRequest) {
-  /* 1. Anti-abus : 10 activations/h par IP */
-  const ip = getClientIp(request);
-  const guard = guardRateLimit(request, {
-    route: "license-activate",
-    clientId: ip,
-    ip,
-    limitPerHour: 10,
-  });
-  if (!guard.ok) return guard.response;
+  // 1) Authentification
+  const session = await getServerSession(authOptions);
+  if (!session?.user?.email) {
+    return NextResponse.json({ error: "Vous devez être connecté pour activer une licence." }, { status: 401 });
+  }
 
-  /* 2. Validation du corps */
+  // 2) Corps de la requête
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json(
-      { error: "Corps de requête JSON invalide." },
-      { status: 400 }
-    );
-  }
-  const parsed = bodySchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: parsed.error.issues[0]?.message ?? "Données invalides." },
-      { status: 400 }
-    );
-  }
-  const { licenseKey, email } = parsed.data;
-
-  /* 3. Le compte doit exister (l'utilisateur est connecté sur le dashboard) */
-  const user = await prisma.user.findUnique({
-    where: { email },
-    select: { id: true, email: true },
-  });
-  if (!user) {
-    return NextResponse.json(
-      {
-        error:
-          "Aucun compte NexiRole n'existe avec cet email. Connectez-vous d'abord, puis réessayez.",
-        code: "USER_NOT_FOUND",
-      },
-      { status: 404 }
-    );
+    return NextResponse.json({ error: "Requête invalide." }, { status: 400 });
   }
 
-  /* 4. Validation de la clé (API Chariow + repli journal webhook) */
-  const check = await validateLicenseKey(licenseKey, email);
-  if (!check.valid) {
-    return NextResponse.json(
-      {
-        error: check.expired
-          ? "Cette clé de licence a expiré. Renouvelez votre abonnement sur la page Tarifs."
-          : "Clé de licence invalide ou introuvable chez Chariow. Vérifiez la saisie (aucun espace) ou contactez le support.",
-        code: check.expired ? "LICENSE_EXPIRED" : "LICENSE_INVALID",
-      },
-      { status: 422 }
-    );
+  const rawKey =
+    typeof (body as { licenseKey?: unknown })?.licenseKey === "string"
+      ? (body as { licenseKey: string }).licenseKey.trim()
+      : "";
+
+  if (!LICENSE_KEY_REGEX.test(rawKey)) {
+    return NextResponse.json({ error: "Format de clé de licence invalide." }, { status: 400 });
   }
 
-  const plan = check.plan === "PRO" ? "PRO" : "BOOST";
+  try {
+    const user = await prisma.user.findUnique({ where: { email: session.user.email } });
+    if (!user) {
+      return NextResponse.json({ error: "Utilisateur introuvable." }, { status: 401 });
+    }
 
-  /* 5. Activation : compteurs remis à zéro, plan actif */
-  const result = await activateUserLicense(user.id, plan, licenseKey, check.expiresAt);
+    // 3) Clé déjà utilisée par un AUTRE compte ?
+    const taken = await prisma.user.findFirst({ where: { licenseKey: rawKey, id: { not: user.id } } });
+    if (taken) {
+      return NextResponse.json({ error: "Cette clé est déjà utilisée par un autre compte." }, { status: 403 });
+    }
 
-  return NextResponse.json({
-    ok: true,
-    plan: result.plan,
-    licenseStatus: result.licenseStatus,
-    expiresAt: result.expiresAt.toISOString(),
-    message: `Licence ${plan === "PRO" ? "Carrière Pro" : "Pass Boost"} activée avec succès. Bon courage pour vos candidatures !`,
-  });
+    // 4) Clé déjà rattachée à CE compte (activée par le webhook) ?
+    if (user.licenseKey === rawKey) {
+      const stillValid =
+        user.plan !== "FREE" &&
+        user.licenseStatus === "ACTIVE" &&
+        user.expiresAt !== null &&
+        user.expiresAt.getTime() > Date.now();
+      if (stillValid) {
+        return NextResponse.json({
+          ok: true,
+          plan: user.plan,
+          licenseStatus: user.licenseStatus,
+          expiresAt: user.expiresAt,
+        });
+      }
+      return NextResponse.json(
+        { error: "Cette licence a expiré. Effectuez un nouvel achat pour la renouveler." },
+        { status: 410 },
+      );
+    }
+
+    // 5) Recherche de la clé dans le journal Chariow (licences émises)
+    const events = await prisma.chariowEvent.findMany({
+      where: { eventType: { contains: "license" }, processed: true },
+      orderBy: { createdAt: "desc" },
+      take: 300,
+    });
+
+    let plan: PayablePlan | null = null;
+    let issuedAt: Date | null = null;
+
+    for (const event of events) {
+      let parsedPayload: unknown;
+      try {
+        parsedPayload = JSON.parse(event.payload);
+      } catch {
+        continue;
+      }
+      const candidate = deepFind(parsedPayload, LICENSE_KEYS);
+      if (typeof candidate === "string" && candidate.trim() === rawKey) {
+        plan = detectPlan(parsedPayload);
+        issuedAt = event.createdAt;
+        break;
+      }
+    }
+
+    if (!plan) {
+      return NextResponse.json(
+        { error: "Clé de licence inconnue. Vérifiez la clé reçue après votre achat." },
+        { status: 404 },
+      );
+    }
+
+    const durationDays = PLAN_DURATION_DAYS[plan];
+    const expiresAt = new Date((issuedAt ?? new Date()).getTime() + durationDays * 86_400_000);
+
+    if (expiresAt.getTime() <= Date.now()) {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { plan: "FREE", licenseKey: rawKey, licenseStatus: "EXPIRED", expiresAt },
+      });
+      return NextResponse.json({
+        ok: true,
+        plan: "FREE",
+        licenseStatus: "EXPIRED",
+        expiresAt,
+        message: "Cette licence était déjà expirée.",
+      });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: { plan, licenseKey: rawKey, licenseStatus: "ACTIVE", expiresAt },
+    });
+
+    return NextResponse.json({
+      ok: true,
+      plan: updated.plan,
+      licenseStatus: updated.licenseStatus,
+      expiresAt: updated.expiresAt,
+    });
+  } catch (error) {
+    console.error("[LICENSE-ACTIVATE] Erreur :", error);
+    return NextResponse.json(
+      { error: "Erreur serveur. Vérifiez que la base est à jour (npx prisma db push)." },
+      { status: 500 },
+    );
+  }
 }
