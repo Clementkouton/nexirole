@@ -1,522 +1,505 @@
 "use client";
 
-/**
- * Panneau Dossier : import d'offre (manuel ou depuis l'Agent), CV, génération
- * du dossier structuré (CV + lettre + kit), sélection de template + photo,
- * prévisualisation en direct et téléchargements PDF haute qualité.
- * Les événements :
- *  - "nexirole:open-dossier"    : une offre arrive depuis l'Agent de recherche ;
- *  - "nexirole:restore-dossier" : un dossier est restauré depuis l'Historique.
- * Ce panneau est TOUJOURS monté (masqué par CSS par le shell) : ses
- * écouteurs restent vivants quel que soit l'onglet actif.
- */
-
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  IconAlertCircle,
+  IconAlertTriangle,
   IconCheck,
-  IconCircleCheck,
   IconCopy,
-  IconFileDescription,
+  IconDownload,
   IconFileText,
   IconLoader2,
-  IconMessageChatbot,
-  IconPhoto,
-  IconRefresh,
   IconSparkles,
   IconUpload,
-  IconWand,
+  IconX,
 } from "@tabler/icons-react";
-import { toast } from "sonner";
-import { cx } from "@/lib/ui-classes";
-import type { DossierData, DossierResponse } from "@/lib/types";
-import {
-  recommendTemplateForJob,
-  type TemplateId,
-} from "@/lib/cv-templates";
-import {
-  downloadCvPdf,
-  downloadKitPdf,
-  downloadLetterPdf,
-} from "@/lib/pdf-client";
-import { TemplateSelector } from "@/components/dashboard/template-selector";
-import { DossierPreview } from "@/components/dashboard/dossier-preview";
+import type { DossierResponse } from "@/lib/types";
 
-const OFFER_STORAGE_KEY = "nexirole:dossier-offer";
-const RESTORE_STORAGE_KEY = "nexirole:restore-dossier";
-const OPEN_EVENT = "nexirole:open-dossier";
-const RESTORE_EVENT = "nexirole:restore-dossier";
+const STORAGE_KEY = "nexirole:dossier-offer";
+const EVENT_NAME = "nexirole:open-dossier";
+const FRESH_MS = 120000; // on ne reprend une offre importée que si elle a moins de 2 min
 
-interface OfferInput {
-  offerTitle: string;
-  offerUrl: string;
-  offerDescription: string;
+type ImportedOffer = {
+  offerUrl?: string;
+  offerTitle?: string;
+  offerDescription?: string;
+  createdAt?: number;
+};
+
+function readStoredOffer(): ImportedOffer | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as ImportedOffer;
+  } catch {
+    return null;
+  }
 }
 
-interface PickedOffer {
-  offerTitle: string;
-  offerUrl: string;
-  offerDescription: string;
-  createdAt: number;
+type ResultCardProps = {
+  title: string;
+  filename: string;
+  content: string;
+  copied: boolean;
+  onCopy: () => void;
+  onDownload: () => void;
+};
+
+function ResultCard({
+  title,
+  filename,
+  content,
+  copied,
+  onCopy,
+  onDownload,
+}: ResultCardProps) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="font-heading text-base font-bold text-navy">{title}</h3>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onCopy}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+          >
+            {copied ? (
+              <IconCheck className="h-4 w-4 text-emerald-600" />
+            ) : (
+              <IconCopy className="h-4 w-4" />
+            )}
+            {copied ? "Copié" : "Copier"}
+          </button>
+          <button
+            type="button"
+            onClick={onDownload}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+          >
+            <IconDownload className="h-4 w-4" />
+            {filename}
+          </button>
+        </div>
+      </div>
+      <pre className="nice-scrollbar mt-4 max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-xs leading-relaxed text-slate-700">
+        {content}
+      </pre>
+    </div>
+  );
 }
 
 export function DossierPanel() {
-  /* ── Offre ─────────────────────────────────────────────────────── */
-  const [offer, setOffer] = useState<OfferInput>({
-    offerTitle: "",
-    offerUrl: "",
-    offerDescription: "",
-  });
-  const [importBanner, setImportBanner] = useState<string | null>(null);
-
-  /* ── CV ────────────────────────────────────────────────────────── */
-  const [cvText, setCvText] = useState("");
-  const [cvFileName, setCvFileName] = useState<string | null>(null);
-  const [cvLoading, setCvLoading] = useState(false);
+  const [offerUrl, setOfferUrl] = useState("");
+  const [offerTitle, setOfferTitle] = useState("");
+  const [offerDescription, setOfferDescription] = useState("");
+  const [imported, setImported] = useState(false);
   const [mode, setMode] = useState<"pdf" | "texte">("pdf");
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  /* ── Génération + résultat ─────────────────────────────────────── */
+  const [cvName, setCvName] = useState("");
+  const [cvText, setCvText] = useState("");
+  const [introText, setIntroText] = useState("");
+  const [parsing, setParsing] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<DossierData | null>(null);
-  const [savedId, setSavedId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<DossierResponse | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
-  /* ── Template + photo ──────────────────────────────────────────── */
-  const [templateId, setTemplateId] = useState<TemplateId>("modern-accent");
-  const [photoEnabled, setPhotoEnabled] = useState(false);
-  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState<"cv" | "letter" | "kit" | null>(null);
+  const applyOffer = (offer: ImportedOffer) => {
+    if (offer.offerTitle) setOfferTitle(offer.offerTitle);
+    if (offer.offerUrl) setOfferUrl(offer.offerUrl);
+    if (offer.offerDescription)
+      setOfferDescription(offer.offerDescription.slice(0, 6000));
+  };
 
-  /* ── Écouteurs permanents (panneau toujours monté) ─────────────── */
+  // 1) Au montage : reprise d'une offre fraîchement importée depuis l'Agent
+  //    (filet de sécurité si l'événement a été émis avant le montage du panneau).
   useEffect(() => {
-    function handleOpen() {
-      try {
-        const raw = window.localStorage.getItem(OFFER_STORAGE_KEY);
-        if (!raw) return;
-        const offer = JSON.parse(raw) as PickedOffer;
-        setOffer({
-          offerTitle: offer.offerTitle ?? "",
-          offerUrl: offer.offerUrl ?? "",
-          offerDescription: offer.offerDescription ?? "",
-        });
-        setImportBanner(
-          "Offre importée depuis l'Agent — complète avec ton CV puis génère ton dossier."
-        );
-        window.scrollTo({ top: 0, behavior: "smooth" });
-      } catch {
-        /* stockage corrompu : on ignore */
-      }
-    }
-
-    function handleRestore() {
-      try {
-        const raw = window.localStorage.getItem(RESTORE_STORAGE_KEY);
-        if (!raw) return;
-        const payload = JSON.parse(raw) as { data: DossierData };
-        if (!payload?.data) return;
-        setResult(payload.data);
-        setSavedId(null);
-        setImportBanner(null);
-        const detected = payload.data.offre?.titre ?? payload.data.titre;
-        setTemplateId(recommendTemplateForJob(detected));
-        toast.success("Dossier restauré depuis votre historique");
-      } catch {
-        /* stockage corrompu : on ignore */
-      }
-    }
-
-    window.addEventListener(OPEN_EVENT, handleOpen);
-    window.addEventListener(RESTORE_EVENT, handleRestore);
-    // Reprise d'une offre fraîche transmise juste avant le montage
-    handleOpen();
-    return () => {
-      window.removeEventListener(OPEN_EVENT, handleOpen);
-      window.removeEventListener(RESTORE_EVENT, handleRestore);
-    };
+    const offer = readStoredOffer();
+    if (!offer) return;
+    const fresh =
+      typeof offer.createdAt !== "number" ||
+      Date.now() - offer.createdAt < FRESH_MS;
+    if (!fresh) return;
+    applyOffer(offer);
+    setImported(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const cvReady = cvText.trim().length >= 60;
-  const canGenerate =
-    offer.offerTitle.trim().length > 2 && cvReady && !loading;
+  // 2) Pendant toute la vie du dashboard (panneau monté, même masqué) :
+  //    écoute de l'événement émis par l'Agent Recherche en Direct.
+  useEffect(() => {
+    const handler = () => {
+      const offer = readStoredOffer();
+      if (!offer) return;
+      applyOffer(offer);
+      setImported(true);
+    };
+    window.addEventListener(EVENT_NAME, handler);
+    return () => window.removeEventListener(EVENT_NAME, handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const missing: string[] = [];
-  if (offer.offerTitle.trim().length <= 2) missing.push("le titre de l'offre");
-  if (!cvReady) missing.push("un CV (PDF ou texte)");
-
-  /* ── Import du CV ──────────────────────────────────────────────── */
-  async function handleCvFile(file: File) {
-    setCvLoading(true);
-    setError(null);
+  const handleFile = async (file: File) => {
+    setError("");
+    setParsing(true);
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch("/api/parse-cv", {
-        method: "POST",
-        body: formData,
-      });
-      const json = (await res.json().catch(() => null)) as
-        | { text?: string; error?: string }
-        | null;
-      if (!res.ok || !json?.text) {
-        throw new Error(json?.error ?? "Lecture du CV impossible.");
+      const res = await fetch("/api/parse-cv", { method: "POST", body: formData });
+      const data = (await res.json().catch(() => null)) as {
+        text?: string;
+        name?: string;
+        error?: string;
+      } | null;
+      if (!res.ok || !data?.text) {
+        setError(data?.error ?? "Impossible de lire ce fichier.");
+        return;
       }
-      setCvText(json.text);
-      setCvFileName(file.name);
-      toast.success("CV analysé avec succès");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Lecture du CV impossible.");
+      setCvText(data.text);
+      setCvName(data.name ?? file.name);
+    } catch {
+      setError("Réseau indisponible : réessaie dans un instant.");
     } finally {
-      setCvLoading(false);
+      setParsing(false);
     }
-  }
+  };
 
-  /* ── Génération du dossier ─────────────────────────────────────── */
-  async function handleGenerate() {
-    if (!canGenerate) return;
+  const cvReady =
+    mode === "pdf" ? cvText.trim().length >= 80 : introText.trim().length >= 80;
+  const canGenerate = offerTitle.trim().length > 2 && cvReady && !loading;
+
+  const missing: string[] = [];
+  if (offerTitle.trim().length <= 2) missing.push("le titre de l'offre");
+  if (!cvReady)
+    missing.push(
+      mode === "pdf"
+        ? "un CV chargé (PDF lisible)"
+        : "le texte de ton CV (80 caractères minimum)"
+    );
+
+  const handleSubmit = async () => {
     setLoading(true);
-    setError(null);
+    setError("");
+    setResult(null);
     try {
       const res = await fetch("/api/dossier", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          offerTitle: offer.offerTitle.trim(),
-          offerUrl: offer.offerUrl.trim() || undefined,
-          offerDescription: offer.offerDescription.trim() || undefined,
-          cvText: cvText.trim(),
+          offerUrl: offerUrl.trim(),
+          offerTitle: offerTitle.trim(),
+          offerDescription: offerDescription.trim(),
+          cvText: (mode === "pdf" ? cvText : introText).trim(),
         }),
       });
-      const json = (await res.json().catch(() => null)) as
+      const data = (await res.json().catch(() => null)) as
         | (DossierResponse & { error?: string })
         | null;
-      if (!res.ok || !json?.data) {
-        throw new Error(json?.error ?? "La génération n'a pas abouti.");
+      if (!res.ok || !data || data.error) {
+        setError(
+          data?.error ?? "La génération a échoué. Réessaie dans un instant."
+        );
+        return;
       }
-      setResult(json.data);
-      setSavedId(json.id ?? null);
-      const detected = json.data.offre?.titre ?? json.data.titre;
-      setTemplateId(recommendTemplateForJob(detected));
-      if (json.saved) {
-        toast.success("Dossier généré et enregistré dans votre historique");
-      } else {
-        toast.success("Dossier généré");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "La génération n'a pas abouti.");
-      toast.error("La génération n'a pas abouti. Réessayez dans quelques instants.");
+      setResult(data);
+    } catch {
+      setError("Réseau indisponible : réessaie dans un instant.");
     } finally {
       setLoading(false);
     }
-  }
+  };
 
-  /* ── Téléchargements PDF (client pur) ──────────────────────────── */
-  async function handleDownload(kind: "cv" | "letter" | "kit") {
-    if (!result) return;
-    setDownloading(kind);
+  const copyText = async (id: string, content: string) => {
     try {
-      if (kind === "cv") {
-        await downloadCvPdf(result, templateId, photoEnabled ? photoUrl : null);
-      } else if (kind === "letter") {
-        await downloadLetterPdf(result, templateId);
-      } else {
-        await downloadKitPdf(result, templateId);
-      }
-      toast.success("PDF téléchargé");
+      await navigator.clipboard.writeText(content);
+      setCopied(id);
+      window.setTimeout(() => setCopied(null), 2000);
     } catch {
-      toast.error("La génération du PDF a échoué. Réessayez.");
-    } finally {
-      setDownloading(null);
+      setError("Presse-papiers indisponible dans ce navigateur.");
     }
-  }
+  };
 
-  function copyText(text: string, label: string) {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => toast.success(`${label} copié`))
-      .catch(() => toast.error("Copie impossible"));
-  }
+  const downloadText = (filename: string, content: string) => {
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
-  function reset() {
-    setResult(null);
-    setSavedId(null);
-    setError(null);
-  }
-
-  /* ════════════════════════ VUE RÉSULTAT ══════════════════════════ */
-  if (result) {
-    const kit = result.kit_entretien;
-    const detected = result.offre?.titre ?? result.titre;
-
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="flex items-center gap-2 text-lg font-extrabold text-navy">
-              <IconCircleCheck className="size-5 text-emerald-500" />
-              Dossier prêt — {result.identite.nom_complet}
-            </h2>
-            <p className="text-sm text-slate-500">
-              {result.titre}
-              {result.offre ? ` — cible : ${result.offre.titre} @ ${result.offre.entreprise}` : ""}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {savedId && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
-                <IconCheck className="size-3.5" />
-                Enregistré dans l&apos;historique
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={reset}
-              className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-navy transition hover:bg-slate-50"
-            >
-              <IconRefresh className="size-4" />
-              Nouveau dossier
-            </button>
-          </div>
-        </div>
-
-        <TemplateSelector
-          selected={templateId}
-          onSelect={setTemplateId}
-          photoEnabled={photoEnabled}
-          onPhotoToggle={setPhotoEnabled}
-          photoUrl={photoUrl}
-          onPhotoChange={setPhotoUrl}
-          detectedJobTitle={detected}
-        />
-
-        <DossierPreview data={result} templateId={templateId} photo={photoEnabled ? photoUrl : null} />
-
-        {/* Téléchargements PDF */}
-        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <p className="mr-auto flex items-center gap-1.5 text-sm font-bold text-navy">
-            <IconFileDescription className="size-4.5 text-gold" />
-            Téléchargements PDF haute qualité (A4, texte sélectionnable)
-          </p>
-          <button
-            type="button"
-            onClick={() => handleDownload("cv")}
-            disabled={downloading !== null}
-            className="inline-flex items-center gap-1.5 rounded-full bg-navy px-4 py-2 text-sm font-semibold text-white transition hover:bg-navy/90 disabled:opacity-60"
-          >
-            {downloading === "cv" ? <IconLoader2 className="size-4 animate-spin" /> : <IconFileText className="size-4" />}
-            CV PDF
-          </button>
-          <button
-            type="button"
-            onClick={() => handleDownload("letter")}
-            disabled={downloading !== null}
-            className="inline-flex items-center gap-1.5 rounded-full bg-navy px-4 py-2 text-sm font-semibold text-white transition hover:bg-navy/90 disabled:opacity-60"
-          >
-            {downloading === "letter" ? <IconLoader2 className="size-4 animate-spin" /> : <IconFileText className="size-4" />}
-            Lettre PDF
-          </button>
-          {kit && (
-            <button
-              type="button"
-              onClick={() => handleDownload("kit")}
-              disabled={downloading !== null}
-              className="inline-flex items-center gap-1.5 rounded-full bg-gold px-4 py-2 text-sm font-bold text-navy transition hover:brightness-105 disabled:opacity-60"
-            >
-              {downloading === "kit" ? <IconLoader2 className="size-4 animate-spin" /> : <IconSparkles className="size-4" />}
-              Kit Entretien PDF
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => copyText(`${result.resume}\n\n${result.competences.join(", ")}`, "Contenu CV")}
-            className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-navy transition hover:bg-slate-50"
-          >
-            <IconCopy className="size-4" />
-            Copier le texte
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  /* ════════════════════════ VUE FORMULAIRE ════════════════════════ */
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-extrabold text-navy">Générateur de dossier</h2>
-        <p className="text-sm text-slate-500">
-          Cible une offre, importe ton CV : NexiRole produit un CV, une lettre de
-          motivation et un kit d&apos;entretien structurés, exportables en PDF ATS.
+        <h2 className="font-heading text-xl font-bold text-navy">
+          CV & Lettre par offre
+        </h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Colle le lien d'une offre, vérifie le titre et la description, puis génère un
+          CV et une lettre de motivation sur mesure.
         </p>
       </div>
 
-      {importBanner && (
-        <div className="flex items-start gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-          <IconCircleCheck className="mt-0.5 size-4 shrink-0" />
-          {importBanner}
+      {imported && (
+        <div className="flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          <IconCheck className="mt-0.5 h-4 w-4 shrink-0" />
+          <p className="flex-1">
+            Offre importée depuis l'Agent de recherche — vérifie les champs ci-dessous
+            puis lance la génération.
+          </p>
+          <button
+            type="button"
+            onClick={() => setImported(false)}
+            aria-label="Masquer le message"
+            className="rounded p-1 hover:bg-emerald-100"
+          >
+            <IconX className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      {/* ── Offre ─────────────────────────────────────────────────── */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h3 className="mb-3 flex items-center gap-2 text-sm font-bold text-navy">
-          <IconBriefcaseIcon />
-          1. L&apos;offre visée
+      {/* Étape 1 : l'offre visée */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+          1. L'offre visée
         </h3>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block sm:col-span-2">
-            <span className="mb-1 block text-xs font-semibold text-navy">Titre de l&apos;offre *</span>
+        <div className="mt-4 space-y-4">
+          <div>
+            <label
+              htmlFor="offer-url"
+              className="text-xs font-semibold text-slate-600"
+            >
+              Lien de l'offre (optionnel)
+            </label>
             <input
-              value={offer.offerTitle}
-              onChange={(e) => setOffer((p) => ({ ...p, offerTitle: e.target.value }))}
-              placeholder="ex : Développeur Full Stack — Remote"
-              className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-navy outline-none transition focus:border-navy/40 focus:ring-2 focus:ring-navy/10"
+              id="offer-url"
+              type="url"
+              value={offerUrl}
+              onChange={(e) => setOfferUrl(e.target.value)}
+              placeholder="https://remotive.com/remote-jobs/..."
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-navy focus:ring-2 focus:ring-navy/10"
             />
-          </label>
-          <label className="block sm:col-span-2">
-            <span className="mb-1 block text-xs font-semibold text-navy">Lien de l&apos;offre (optionnel)</span>
+          </div>
+          <div>
+            <label
+              htmlFor="offer-title"
+              className="text-xs font-semibold text-slate-600"
+            >
+              Titre de l'offre (obligatoire)
+            </label>
             <input
-              value={offer.offerUrl}
-              onChange={(e) => setOffer((p) => ({ ...p, offerUrl: e.target.value }))}
-              placeholder="https://…"
-              className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-navy outline-none transition focus:border-navy/40 focus:ring-2 focus:ring-navy/10"
+              id="offer-title"
+              type="text"
+              value={offerTitle}
+              onChange={(e) => setOfferTitle(e.target.value)}
+              placeholder="Ex. Senior React Developer — Lemon.io"
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-navy focus:ring-2 focus:ring-navy/10"
             />
-          </label>
-          <label className="block sm:col-span-2">
-            <span className="mb-1 block text-xs font-semibold text-navy">
-              Texte de l&apos;offre (optionnel mais recommandé)
-            </span>
+          </div>
+          <div>
+            <label
+              htmlFor="offer-description"
+              className="text-xs font-semibold text-slate-600"
+            >
+              Description de l'offre
+            </label>
             <textarea
-              value={offer.offerDescription}
-              onChange={(e) => setOffer((p) => ({ ...p, offerDescription: e.target.value }))}
+              id="offer-description"
               rows={6}
-              placeholder="Collez ici l'annonce complète (missions, compétences demandées…)"
-              className="w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-navy outline-none transition focus:border-navy/40 focus:ring-2 focus:ring-navy/10"
+              value={offerDescription}
+              onChange={(e) => setOfferDescription(e.target.value)}
+              placeholder="Colle ici le texte complet de l'offre (missions, profil recherché, compétences)..."
+              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-navy focus:ring-2 focus:ring-navy/10"
             />
-          </label>
+            <p className="mt-1 text-[11px] text-slate-400">
+              {offerDescription.length} caractères — plus l'offre est détaillée, plus
+              le dossier est pertinent.
+            </p>
+          </div>
         </div>
       </section>
 
-      {/* ── CV ────────────────────────────────────────────────────── */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="flex items-center gap-2 text-sm font-bold text-navy">
-            <IconUpload className="size-4.5 text-gold" />
-            2. Ton CV
+      {/* Étape 2 : la base CV */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400">
+            2. Ta base CV
           </h3>
-          <div className="flex gap-1.5">
-            {(["pdf", "texte"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={cx(
-                  "rounded-full px-3 py-1 text-xs font-semibold capitalize transition-colors",
-                  mode === m
-                    ? "bg-navy text-white"
-                    : "border border-slate-200 bg-white text-navy hover:bg-slate-50"
-                )}
-              >
-                {m === "pdf" ? "Fichier PDF" : "Texte"}
-              </button>
-            ))}
+          <div className="flex rounded-xl border border-slate-200 p-1">
+            <button
+              type="button"
+              onClick={() => setMode("pdf")}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                mode === "pdf"
+                  ? "bg-navy text-white"
+                  : "text-slate-500 hover:text-navy"
+              }`}
+            >
+              Fichier PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("texte")}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                mode === "texte"
+                  ? "bg-navy text-white"
+                  : "text-slate-500 hover:text-navy"
+              }`}
+            >
+              Texte collé
+            </button>
           </div>
         </div>
 
         {mode === "pdf" ? (
-          <div>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".pdf,.txt,.md"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleCvFile(file);
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              disabled={cvLoading}
-              className="flex w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-sm font-semibold text-navy transition hover:border-navy/40 hover:bg-white disabled:opacity-60"
-            >
-              {cvLoading ? (
-                <>
-                  <IconLoader2 className="size-6 animate-spin text-navy" />
-                  Analyse du CV en cours…
-                </>
-              ) : (
-                <>
-                  <IconUpload className="size-6 text-navy" />
-                  {cvFileName ? `CV chargé : ${cvFileName}` : "Clique pour importer ton CV (PDF, TXT, MD — 10 Mo max)"}
-                </>
-              )}
-            </button>
+          <div className="mt-4">
+            <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-200 px-4 py-6 text-sm font-semibold text-slate-500 transition hover:border-navy hover:text-navy">
+              <IconUpload className="h-5 w-5" />
+              {parsing ? "Lecture du fichier..." : "Clique pour choisir ton CV (PDF)"}
+              <input
+                type="file"
+                accept=".pdf,.txt,.md"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void handleFile(file);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            {cvName && (
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                <IconFileText className="h-4 w-4 shrink-0" />
+                <span className="flex-1 truncate font-semibold">
+                  CV chargé : {cvName}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCvName("");
+                    setCvText("");
+                  }}
+                  aria-label="Retirer le CV"
+                  className="rounded p-1 hover:bg-emerald-100"
+                >
+                  <IconX className="h-4 w-4" />
+                </button>
+              </div>
+            )}
           </div>
         ) : (
-          <textarea
-            value={cvText}
-            onChange={(e) => setCvText(e.target.value)}
-            rows={8}
-            placeholder="Colle ici le texte de ton CV (expériences, formations, compétences…)"
-            className="w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-navy outline-none transition focus:border-navy/40 focus:ring-2 focus:ring-navy/10"
-          />
-        )}
-        {cvReady && (
-          <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-emerald-600">
-            <IconCheck className="size-3.5" />
-            CV prêt ({cvText.trim().length.toLocaleString("fr-FR")} caractères analysés)
-          </p>
+          <div className="mt-4">
+            <textarea
+              rows={8}
+              value={introText}
+              onChange={(e) => setIntroText(e.target.value)}
+              placeholder="Colle ici le texte de ton CV (expériences, compétences, formation)..."
+              className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-navy focus:ring-2 focus:ring-navy/10"
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              {introText.trim().length} / 80 caractères minimum
+            </p>
+          </div>
         )}
       </section>
 
-      {/* ── Génération ────────────────────────────────────────────── */}
       {error && (
-        <div className="flex items-start gap-2 rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-600">
-          <IconAlertCircle className="mt-0.5 size-4 shrink-0" />
-          {error}
+        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p className="flex-1">{error}</p>
+          <button
+            type="button"
+            onClick={() => setError("")}
+            aria-label="Fermer"
+            className="rounded p-1 hover:bg-red-100"
+          >
+            <IconX className="h-4 w-4" />
+          </button>
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={handleGenerate}
-        disabled={!canGenerate}
-        className={cx(
-          "flex w-full items-center justify-center gap-2 rounded-full px-4 py-3.5 text-sm font-bold transition",
-          canGenerate
-            ? "bg-navy text-white hover:bg-navy/90"
-            : "cursor-not-allowed bg-slate-200 text-slate-400"
+      {/* Génération */}
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <button
+          type="button"
+          onClick={handleSubmit}
+          disabled={!canGenerate}
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-navy px-5 py-3.5 text-sm font-bold text-white shadow-md transition hover:bg-navy/90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+        >
+          {loading ? (
+            <IconLoader2 className="h-5 w-5 animate-spin" />
+          ) : (
+            <IconSparkles className="h-5 w-5 text-gold" />
+          )}
+          {loading
+            ? "Génération en cours (CV, lettre, score)..."
+            : "Générer CV et lettre"}
+        </button>
+        {!canGenerate && !loading && missing.length > 0 && (
+          <p className="mt-3 text-xs text-slate-400">
+            Pour lancer la génération, il manque : {missing.join(" et ")}.
+          </p>
         )}
-      >
-        {loading ? (
-          <>
-            <IconLoader2 className="size-5 animate-spin" />
-            Génération du dossier en cours (CV + lettre + kit)…
-          </>
-        ) : (
-          <>
-            <IconWand className="size-5" />
-            Générer CV, lettre et kit d&apos;entretien
-          </>
-        )}
-      </button>
-      {!canGenerate && missing.length > 0 && (
-        <p className="text-center text-xs text-slate-500">
-          Pour générer ton dossier, il manque : {missing.join(" et ")}.
+        <p className="mt-2 text-[11px] text-slate-400">
+          Compte 20 à 60 secondes : le CV, la lettre et le score de compatibilité sont
+          produits par l'IA.
         </p>
+      </div>
+
+      {/* Résultats */}
+      {result && (
+        <div className="space-y-4">
+          {result.warnings?.length ? (
+            <div className="space-y-1 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+              {result.warnings.map((w, i) => (
+                <p
+                  key={i}
+                  className="flex items-start gap-2 text-sm text-amber-800"
+                >
+                  <IconAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{w}</span>
+                </p>
+              ))}
+            </div>
+          ) : null}
+
+          {typeof result.score === "number" && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5">
+              <div className="flex items-center gap-2 text-amber-800">
+                <IconSparkles className="h-5 w-5" />
+                <p className="font-heading text-lg font-bold">
+                  {result.score}% de compatibilité avec cette offre
+                </p>
+              </div>
+              {result.conseils?.length ? (
+                <ul className="mt-3 space-y-2 text-sm text-amber-900">
+                  {result.conseils.map((conseil, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="font-bold">•</span>
+                      <span>{conseil}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          )}
+
+          <ResultCard
+            title="CV adapté à l'offre"
+            filename="CV_NexiRole.md"
+            content={result.cv}
+            copied={copied === "cv"}
+            onCopy={() => void copyText("cv", result.cv)}
+            onDownload={() => downloadText("CV_NexiRole.md", result.cv)}
+          />
+          <ResultCard
+            title="Lettre de motivation"
+            filename="Lettre_NexiRole.md"
+            content={result.lettre}
+            copied={copied === "lettre"}
+            onCopy={() => void copyText("lettre", result.lettre)}
+            onDownload={() => downloadText("Lettre_NexiRole.md", result.lettre)}
+          />
+        </div>
       )}
-      <p className="flex items-center justify-center gap-1.5 text-center text-[11px] text-slate-400">
-        <IconMessageChatbot className="size-3.5" />
-        Propulsé par Groq — le dossier est enregistré dans ton historique.
-      </p>
     </div>
   );
-}
-
-/* Petite icône interne (évite un import supplémentaire) */
-function IconBriefcaseIcon() {
-  return <IconPhoto className="size-4.5 text-gold" aria-hidden />;
 }

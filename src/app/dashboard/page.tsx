@@ -11,6 +11,9 @@ import {
   IconTarget,
 } from "@tabler/icons-react";
 import { fetchHistory, formatDateFr, type HistoryData } from "@/lib/dashboard-client";
+import { Suspense } from "react";
+import { PaymentSuccessBanner, LicenseOverviewCard } from "@/components/dashboard/payment-banner";
+
 
 type Activite = {
   kind: "dossier" | "scan";
@@ -72,6 +75,8 @@ export default function VueEnsemblePage() {
 
   return (
     <div className="space-y-8">
+      <Suspense fallback={null}><PaymentSuccessBanner /></Suspense>
+      <LicenseOverviewCard />
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-extrabold tracking-tight text-[#051937] md:text-3xl">Vue d&apos;ensemble</h1>
