@@ -5,7 +5,7 @@
 // =============================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import getServerSession from "next-auth";
+import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { LICENSE_KEYS, PLAN_DURATION_DAYS, deepFind, detectPlan, type PayablePlan } from "@/lib/chariow";
@@ -83,12 +83,7 @@ export async function POST(request: NextRequest) {
     let issuedAt: Date | null = null;
 
     for (const event of events) {
-      let parsedPayload: unknown;
-      try {
-        parsedPayload = JSON.parse(event.payload);
-      } catch {
-        continue;
-      }
+      const parsedPayload: unknown = event.payload;
       const candidate = deepFind(parsedPayload, LICENSE_KEYS);
       if (typeof candidate === "string" && candidate.trim() === rawKey) {
         plan = detectPlan(parsedPayload);
