@@ -1,33 +1,50 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { getFreshLicenseState } from "@/lib/license";
+﻿import { NextResponse } from "next/server";
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 
-/**
- * PARTIE 1 — Statut de licence de l'utilisateur connecté.
- * Utilisé par le dashboard : badge de plan, bannière « payment=success »,
- * modale d'activation et affichage des quotas restants.
- */
-
-export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const session = await auth();
-  const userId = session?.user?.id;
-  if (!userId) {
-    return NextResponse.json({ error: "Non authentifié." }, { status: 401 });
+  try {
+    const session = await auth();
+    const email = session?.user?.email;
+
+    if (!email) {
+      return NextResponse.json(
+        {
+          plan: "free",
+          licenseStatus: "inactive",
+          expiresAt: null,
+          searchesUsed: 0,
+          generationsUsed: 0,
+        },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: email.toLowerCase().trim(), mode: "insensitive" } },
+      select: {
+        plan: true,
+        licenseStatus: true,
+        expiresAt: true,
+        searchesUsed: true,
+        generationsUsed: true,
+      },
+    });
+
+    return NextResponse.json(
+      {
+        plan: user?.plan ?? "free",
+        licenseStatus: user?.licenseStatus ?? "inactive",
+        expiresAt: user?.expiresAt ?? null,
+        searchesUsed: user?.searchesUsed ?? 0,
+        generationsUsed: user?.generationsUsed ?? 0,
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (error) {
+    console.error("[license/status] Erreur :", error);
+    return NextResponse.json({ error: "Erreur serveur" }, { status: 500 });
   }
-
-  const state = await getFreshLicenseState(userId);
-
-  return NextResponse.json({
-    plan: state.plan,
-    licenseStatus: state.licenseStatus,
-    licenseKey: state.licenseKey,
-    expiresAt: state.expiresAt,
-    isActive: state.isActive,
-    daysRemaining: state.daysRemaining,
-    searchesUsed: state.searchesUsed,
-    generationsUsed: state.generationsUsed,
-    limits: state.limits,
-  });
 }

@@ -1,177 +1,150 @@
-// =============================================================
-// NEXIROLE — Webhook Chariow Pulse
-// -------------------------------------------------------------
-// Endpoint   : https://nexirole.vercel.app/api/webhooks/chariow
-// Secret     : variable d'environnement CHARIOW_WEBHOOK_SECRET
-//              (identique côté Chariow Pulse et côté Vercel)
-// Événements : license.issued, successful.sale, refund.*, license.revoked…
-//
-// Garanties professionnelles :
-//   - réponse TOUJOURS en JSON (jamais de corps vide) ;
-//   - aucune exception non maîtrisée (payload quelconque accepté) ;
-//   - idempotence via ChariowEvent.eventId unique ;
-//   - journalisation complète dans les logs Vercel.
-// =============================================================
-
-import { NextRequest, NextResponse } from "next/server";
+﻿import { createHmac, timingSafeEqual } from "node:crypto";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import {
-  EMAIL_KEYS,
-  LICENSE_KEYS,
-  PLAN_DURATION_DAYS,
-  deepFind,
-  detectPlan,
-  extractEventId,
-  extractEventType,
-  isTerminationEvent,
-  normalizeEmail,
-  normalizeLicenseKey,
-  safeEqual,
-} from "@/lib/chariow";
 
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
 
-/** GET : sonde de santé (visible dans un navigateur). */
-export async function GET() {
-  return NextResponse.json({
-    ok: true,
-    service: "nexirole-chariow-webhook",
-    secretConfigured: Boolean(process.env.CHARIOW_WEBHOOK_SECRET),
-    message:
-      "Webhook NexiRole opérationnel. Les événements Chariow Pulse doivent arriver en POST (idéalement signés via ?secret=…).",
-    timestamp: new Date().toISOString(),
-  });
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const PAID_EVENT_PATTERN =
+  /(payment|checkout|order|subscription|license|invoice|purchase)[_.:\-]?(succeed|success|succeeded|paid|complete|completed|confirmed|active|activated|created|captured|fulfilled)/i;
+
+function verifySignature(rawBody: string, signatureHeader: string | null): boolean {
+  const secret = process.env.CHARIOW_WEBHOOK_SECRET;
+  if (!secret) {
+    console.warn("[webhooks/chariow] CHARIOW_WEBHOOK_SECRET absent : signature non vérifiée.");
+    return true;
+  }
+  if (!signatureHeader) {
+    console.warn("[webhooks/chariow] En-tête de signature absent : événement accepté (mode tolérant).");
+    return true;
+  }
+  const v1Match = signatureHeader.match(/v1=([a-f0-9]{32,})/i);
+  const provided = (v1Match ? v1Match[1] : signatureHeader.trim()).toLowerCase();
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  try {
+    return timingSafeEqual(Buffer.from(provided, "utf8"), Buffer.from(expected, "utf8"));
+  } catch {
+    return provided === expected;
+  }
 }
 
-/** POST : réception des événements Chariow Pulse. */
-export async function POST(request: NextRequest) {
-  // --- 0) Lecture du corps brut ---
-  let rawBody = "";
-  try {
-    rawBody = await request.text();
-  } catch {
-    return NextResponse.json({ ok: false, error: "corps_illisible" }, { status: 400 });
+function findEmail(value: unknown): string | null {
+  if (typeof value === "string") {
+    return EMAIL_PATTERN.test(value) ? value.toLowerCase().trim() : null;
   }
-
-  // --- 1) Vérification du secret partagé (?secret=… ou en-tête) ---
-  const expectedSecret = process.env.CHARIOW_WEBHOOK_SECRET;
-  if (expectedSecret) {
-    const url = new URL(request.url);
-    const received =
-      url.searchParams.get("secret") ??
-      request.headers.get("x-webhook-secret") ??
-      request.headers.get("x-chariow-secret") ??
-      request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-      "";
-    if (received.length === 0) {
-      // Tolérance : Chariow n'envoie pas encore le secret — on accepte mais on alerte.
-      console.warn(
-        "[CHARIOW] Livraison sans secret — acceptée par tolérance. Ajoutez ?secret=VOTRE_SECRET à l'URL dans Chariow Pulse.",
-      );
-    } else if (!safeEqual(received, expectedSecret)) {
-      console.error("[CHARIOW] Secret invalide — livraison rejetée (401).");
-      return NextResponse.json({ ok: false, error: "secret_invalide" }, { status: 401 });
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findEmail(item);
+      if (found) return found;
     }
-  } else {
-    console.warn("[CHARIOW] CHARIOW_WEBHOOK_SECRET non configuré — livraison acceptée SANS vérification.");
+    return null;
   }
-
-  // --- 2) Analyse JSON (tolérante) ---
-  let payload: unknown;
-  try {
-    payload = JSON.parse(rawBody || "{}");
-  } catch {
-    console.error("[CHARIOW] JSON invalide :", rawBody.slice(0, 300));
-    return NextResponse.json({ ok: false, error: "json_invalide" }, { status: 400 });
-  }
-
-  // --- 3) Extraction tolérante des informations clés ---
-  const eventType = extractEventType(payload, rawBody);
-  const eventId = extractEventId(payload, rawBody);
-  const email = normalizeEmail(deepFind(payload, EMAIL_KEYS));
-  const licenseKey = normalizeLicenseKey(deepFind(payload, LICENSE_KEYS));
-
-  console.log("[CHARIOW] Événement reçu :", {
-    eventId,
-    eventType,
-    email,
-    licenseKeyPresent: Boolean(licenseKey),
-  });
-
-  // --- 4) Traitement en base, de manière idempotente ---
-  try {
-    const existing = await prisma.chariowEvent.findUnique({ where: { eventId } });
-    if (existing) {
-      return NextResponse.json({ ok: true, duplicate: true, eventId, eventType });
-    }
-    if (!existing) {
-      await prisma.chariowEvent.create({
-        data: { eventId, eventType, payload: JSON.stringify(payload) },
-      });
-    }
-
-    let activation: Record<string, unknown>;
-
-    if (isTerminationEvent(eventType)) {
-      // Remboursement / révocation / expiration → retour au plan gratuit.
-      if (email) {
-        await prisma.user.updateMany({
-          where: { email, plan: { not: "FREE" } },
-          data: { plan: "FREE", licenseStatus: "EXPIRED", expiresAt: null },
-        });
-      }
-      activation = { action: "desactivation", email };
-    } else {
-      const plan = detectPlan(payload);
-      if (!plan) {
-        console.error("[CHARIOW] Plan indéterminé pour l'événement", eventId, "— à activer manuellement.");
-        activation = { action: "aucune", raison: "plan_indetermine" };
-      } else if (!email) {
-        activation = { action: "aucune", raison: "email_absent" };
-      } else {
-        const user = await prisma.user.findUnique({ where: { email } });
-        if (!user) {
-          console.error(
-            "[CHARIOW] Aucun compte NexiRole pour",
-            email,
-            "— la clé reste activable manuellement depuis le Dashboard.",
-          );
-          activation = { action: "aucune", raison: "compte_introuvable", email };
-        } else {
-          const expiresAt = new Date(Date.now() + PLAN_DURATION_DAYS[plan] * 86_400_000);
-          await prisma.user.update({
-            where: { id: user.id },
-            data: {
-              plan,
-              licenseStatus: "ACTIVE",
-              expiresAt,
-              ...(licenseKey ? { licenseKey } : {}),
-            },
-          });
-          activation = { action: "activation", plan, email, expiresAt: expiresAt.toISOString() };
-        }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["email", "customer_email", "buyer_email", "payer_email", "billing_email"]) {
+      const candidate = record[key];
+      if (typeof candidate === "string" && EMAIL_PATTERN.test(candidate)) {
+        return candidate.toLowerCase().trim();
       }
     }
+    for (const item of Object.values(record)) {
+      const found = findEmail(item);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
-    console.log("[CHARIOW] Événement traité :", { eventId, eventType, activation });
+function detectPlan(flatPayload: string): "BOOST" | "PRO" {
+  const proId = (process.env.CHARIOW_PRODUCT_PRO_ID ?? "carriere-pro").toLowerCase();
+  const boostId = (process.env.CHARIOW_PRODUCT_BOOST_ID ?? "pass-boost").toLowerCase();
+  if (flatPayload.includes(proId)) return "PRO";
+  if (flatPayload.includes(boostId)) return "BOOST";
+  if (/pass[\s_-]?boost/.test(flatPayload)) return "BOOST";
+  if (/\bpro\b/.test(flatPayload)) return "PRO";
+  return "BOOST";
+}
 
-    return NextResponse.json({ ok: true, eventId, eventType, activation });
-  } catch (error) {
-    console.error("[CHARIOW] ERREUR DE TRAITEMENT :", error);
-    const errorCode =
-      typeof error === "object" && error !== null
-        ? (error as { code?: unknown }).code
-        : null;
-    const prismaCode = typeof errorCode === "string" ? errorCode : null;
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "erreur_base_de_donnees",
-        prismaCode,
-        hint: "Exécutez « npx prisma db push » sur la base de production, puis cliquez sur « Rejouer » dans Chariow Pulse.",
+export async function POST(request: Request) {
+  const rawBody = await request.text();
+  const signatureHeader =
+    request.headers.get("x-chariow-signature") ??
+    request.headers.get("x-webhook-signature") ??
+    request.headers.get("x-signature");
+
+  if (!verifySignature(rawBody, signatureHeader)) {
+    return NextResponse.json({ error: "Signature invalide" }, { status: 401 });
+  }
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    console.warn("[webhooks/chariow] Corps non JSON ignoré.");
+    return NextResponse.json({ received: true });
+  }
+
+  const eventType = String(
+    payload.event ?? payload.type ?? payload.event_type ?? ""
+  ).toLowerCase();
+  const flatPayload = JSON.stringify(payload).toLowerCase();
+  const isPaidEvent =
+    PAID_EVENT_PATTERN.test(eventType) ||
+    (eventType.length === 0 && PAID_EVENT_PATTERN.test(flatPayload));
+
+  if (!isPaidEvent) {
+    console.log(`[webhooks/chariow] Événement ignoré : ${eventType || "inconnu"}`);
+    return NextResponse.json({ received: true, ignored: eventType || "unknown" });
+  }
+
+  const email = findEmail(payload);
+  if (!email) {
+    console.warn("[webhooks/chariow] Aucun e-mail trouvé dans la charge utile.");
+    return NextResponse.json({ received: true, warning: "email introuvable" });
+  }
+
+  const plan = detectPlan(flatPayload);
+  const days = plan === "PRO" ? 90 : 30;
+  const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+  try {
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: "insensitive" } },
+      select: { id: true },
+    });
+
+    if (!user) {
+      console.warn(`[webhooks/chariow] Aucun utilisateur pour ${email}.`);
+      return NextResponse.json({ received: true, warning: "utilisateur introuvable" });
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        plan,
+        licenseStatus: "ACTIVE",
+        expiresAt,
+        searchesUsed: 0,
+        generationsUsed: 0,
       },
-      { status: 500 },
+    });
+
+    console.log(
+      `[webhooks/chariow] ${plan} activé pour ${email} jusqu'au ${expiresAt.toISOString()}`
     );
+    return NextResponse.json({
+      received: true,
+      plan,
+      email,
+      expiresAt: expiresAt.toISOString(),
+    });
+  } catch (error) {
+    console.error("[webhooks/chariow] Erreur Prisma :", error);
+    return NextResponse.json({ error: "Erreur serveur" }, { status: 500 });
   }
+}
+
+export async function GET() {
+  return NextResponse.json({ status: "ok" });
 }
