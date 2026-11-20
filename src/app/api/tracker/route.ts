@@ -1,7 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { PrismaClient } from "@/generated/prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IMPORTANT — IMPORT PRISMA :
@@ -9,8 +8,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 // conservez VOTRE import et supprimez le bloc singleton ci-dessous.
 // ─────────────────────────────────────────────────────────────────────────────
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter });
+const prisma = globalForPrisma.prisma ?? new PrismaClient();
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,7 +51,7 @@ interface TrackerRow {
   companyName: string;
   jobUrl: string | null;
   status: string;
-  followUpDate?: Date | null;
+  followUpDate: Date | null;
   notes: string | null;
   createdAt: Date | null;
 }
@@ -281,7 +279,7 @@ export async function POST(request: Request) {
       const row = await prisma.jobApplicationTracker.findFirst({ where: { id: applicationId, userId } });
       if (!row) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
 
-      const referenceDate: Date | null = row.lastActionDate ?? row.createdAt ?? null;
+      const referenceDate: Date | null = row.followUpDate ?? row.createdAt ?? null;
       const referenceMs =
         referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())
           ? referenceDate.getTime()
