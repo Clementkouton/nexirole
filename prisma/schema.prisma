@@ -1,6 +1,6 @@
-// NexiRole — Authentification Auth.js v5 + PostgreSQL (Neon)
+﻿// NexiRole â€” Authentification Auth.js v5 + PostgreSQL (Neon)
 // Prisma 7 : les URLs de connexion vivent dans prisma.config.ts
-// (plus de url/directUrl ici) et le client est généré dans src/generated/prisma.
+// (plus de url/directUrl ici) et le client est gÃ©nÃ©rÃ© dans src/generated/prisma.
 
 generator client {
   provider = "prisma-client"
@@ -11,25 +11,25 @@ datasource db {
   provider = "postgresql"
 }
 
-// ── Utilisateur ──────────────────────────────────────────────
+// â”€â”€ Utilisateur â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 model User {
   id            String    @id @default(cuid())
   name          String?
   email         String    @unique
   emailVerified DateTime?
   image         String?
-  passwordHash  String? // Bcrypt coût 12 — null = compte Google uniquement
+  passwordHash  String? // Bcrypt coÃ»t 12 â€” null = compte Google uniquement
   role          String    @default("user")
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  // ── Licence Chariow (PARTIE 1) ─────────────────────────────
+  // â”€â”€ Licence Chariow (PARTIE 1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   plan             String    @default("FREE") // FREE | BOOST | PRO
-  licenseKey       String?   @unique // clé UUID générée par Chariow
+  licenseKey       String?   @unique // clÃ© UUID gÃ©nÃ©rÃ©e par Chariow
   licenseStatus    String    @default("INACTIVE") // INACTIVE | ACTIVE | REVOKED | EXPIRED
-  expiresAt        DateTime? // fin de validité (BOOST 30 j / PRO 90 j)
-  // Compteurs d'usage — remis à zéro à l'activation d'une licence.
-  // usagePeriodStart pilote la fenêtre glissante de 30 jours du plan FREE.
+  expiresAt        DateTime? // fin de validitÃ© (BOOST 30 j / PRO 90 j)
+  // Compteurs d'usage â€” remis Ã  zÃ©ro Ã  l'activation d'une licence.
+  // usagePeriodStart pilote la fenÃªtre glissante de 30 jours du plan FREE.
   searchesUsed     Int       @default(0)
   generationsUsed  Int       @default(0)
   usagePeriodStart DateTime? @default(now())
@@ -38,16 +38,16 @@ model User {
   generatedApplications GeneratedApplication[]
   jobApplications       JobApplicationTracker[]
 
-  accounts            Account[]
-  sessions            Session[]
+  accounts Account[]
+  sessions Session[]
+
+  @@map("users")
   password            String?
   resetPasswordToken  String?
   resetPasswordExpiry DateTime?
-
-  @@map("users")
 }
 
-// ── Comptes OAuth (Google...) — requis par Auth.js ───────────
+// â”€â”€ Comptes OAuth (Google...) â€” requis par Auth.js â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 model Account {
   id                String   @id @default(cuid())
   userId            String
@@ -70,7 +70,7 @@ model Account {
   @@map("accounts")
 }
 
-// ── Sessions base de données (présentes pour compatibilité) ──
+// â”€â”€ Sessions base de donnÃ©es (prÃ©sentes pour compatibilitÃ©) â”€â”€
 model Session {
   sessionToken String   @id
   userId       String
@@ -83,7 +83,7 @@ model Session {
   @@map("sessions")
 }
 
-// ── Tokens de vérification (requis par Auth.js) ──────────────
+// â”€â”€ Tokens de vÃ©rification (requis par Auth.js) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 model VerificationToken {
   identifier String
   token      String
@@ -93,24 +93,24 @@ model VerificationToken {
   @@map("verification_tokens")
 }
 
-// ── Réinitialisation de mot de passe ─────────────────────────
+// â”€â”€ RÃ©initialisation de mot de passe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 model PasswordResetToken {
   id      String   @id @default(cuid())
   email   String
-  token   String   @unique // SHA-256 du token envoyé par email — jamais le token brut
+  token   String   @unique // SHA-256 du token envoyÃ© par email â€” jamais le token brut
   expires DateTime
 
   @@index([email])
   @@map("password_reset_tokens")
 }
 
-// ── CV analysés (PARTIE 2) — sauvegarde automatique du parse-cv
+// â”€â”€ CV analysÃ©s (PARTIE 2) â€” sauvegarde automatique du parse-cv
 model SavedResume {
   id             String   @id @default(cuid())
   userId         String
   fileName       String
-  extractedText  String // texte extrait, nettoyé et tronqué (anti-injection)
-  detectedSkills String[] // compétences extraites par l'IA
+  extractedText  String // texte extrait, nettoyÃ© et tronquÃ© (anti-injection)
+  detectedSkills String[] // compÃ©tences extraites par l'IA
   profileSummary String? // premiers lignes significatives du CV
   createdAt      DateTime @default(now())
 
@@ -120,7 +120,7 @@ model SavedResume {
   @@map("saved_resumes")
 }
 
-// ── Dossiers générés (PARTIE 2) — historique complet
+// â”€â”€ Dossiers gÃ©nÃ©rÃ©s (PARTIE 2) â€” historique complet
 model GeneratedApplication {
   id               String   @id @default(cuid())
   userId           String
@@ -129,10 +129,10 @@ model GeneratedApplication {
   jobUrl           String?
   templateId       String   @default("moderne")
   withPhoto        Boolean  @default(false)
-  cvJson           Json // CV optimisé (structure optimCvSchema)
-  coverLetter      String // lettre de motivation (JSON sérialisé)
+  cvJson           Json // CV optimisÃ© (structure optimCvSchema)
+  coverLetter      String // lettre de motivation (JSON sÃ©rialisÃ©)
   interviewKitJson Json? // kit entretien (structure interviewKitSchema)
-  candidateJson    Json? // coordonnées extraites du CV
+  candidateJson    Json? // coordonnÃ©es extraites du CV
   initialScore     Int?
   optimizedScore   Int?
   createdAt        DateTime @default(now())
@@ -143,26 +143,24 @@ model GeneratedApplication {
   @@map("generated_applications")
 }
 
-// ── Suivi des candidatures (PARTIE 2) — tableau interactif
+// â”€â”€ Suivi des candidatures (PARTIE 2) â€” tableau interactif
 model JobApplicationTracker {
-  id           String    @id @default(cuid())
-  userId       String
-  jobTitle     String
-  companyName  String
-  jobUrl       String?
-  status       String    @default("A_POSTULER") // A_POSTULER | ENVOYE | ENTRETIEN | REFUS | OFFRE
-  notes        String?
-  followUpDate DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id             String   @id @default(cuid())
+  userId         String
+  jobTitle       String
+  companyName    String
+  jobUrl         String?
+  status         String   @default("A_POSTULER")
+  lastActionDate DateTime @default(now())
+  notes          String?
+  createdAt      DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@map("job_application_tracker")
+  @@index([userId, lastActionDate])
 }
 
-// ── Journal des webhooks Chariow (PARTIE 1) — idempotence
+// â”€â”€ Journal des webhooks Chariow (PARTIE 1) â€” idempotence
 model ChariowEvent {
   id            String   @id @default(cuid())
   eventId       String   @unique // x-pulse-delivery-id (idempotence Chariow)
@@ -183,4 +181,5 @@ enum TrackerStatus {
   ENTRETIEN
   OFFRE
   REFUSEE
+
 }
