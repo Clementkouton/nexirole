@@ -1,38 +1,46 @@
 import type { NextAuthConfig } from "next-auth";
 
-// Configuration utilisée par le middleware (runtime Edge).
-// AUCUN import de Prisma ou bcrypt ici : non supportés sur l'Edge.
+// ============================================================
+// Configuration de base NextAuth v5 (compatible edge/middleware).
+// Fusionnée dans src/auth.ts via ...authConfig.
+// ============================================================
+
 export const authConfig = {
+  // Accepte localhost:3000 ET https://nexirole.vercel.app sans erreur de domaine
+  trustHost: true,
+
   pages: {
     signIn: "/login",
     error: "/login",
   },
-  session: { strategy: "jwt" },
-  providers: [], // Providers réels déclarés dans src/auth.ts
-    callbacks: {
-    // Contrôle d'accès centralisé, exécuté par le proxy
-    authorized({ request, auth }) {
-      const { pathname } = request.nextUrl;
-      const isLoggedIn = !!auth?.user;
 
-      const isLoginPage = pathname.startsWith("/login");
-      const isRegisterPage = pathname.startsWith("/register");
-      const isAuthPage = isLoginPage || isRegisterPage;
-      const isProtected = pathname.startsWith("/dashboard");
-
-      // REDIRECTION UNIQUEMENT SUR GET : les Server Actions arrivent en POST
-      // sur la page où elles sont définies. Rediriger un POST provoque
-      // l'erreur "Invalid Server Actions request".
-      if (isAuthPage && isLoggedIn && request.method === "GET") {
-        return Response.redirect(new URL("/dashboard", request.nextUrl));
+  callbacks: {
+    // Sécurise TOUTES les redirections : URL relative ou même origine OK,
+    // tout le reste (ex. devtunnels.ms) retombe sur /dashboard.
+    redirect({ url, baseUrl }) {
+      if (url.startsWith("/")) return `${baseUrl}${url}`;
+      let origin = "";
+      try {
+        origin = new URL(url).origin;
+      } catch {
+        return `${baseUrl}/dashboard`;
       }
+      const allowedOrigins = new Set([
+        baseUrl,
+        "https://nexirole.vercel.app",
+        "http://localhost:3000",
+      ]);
+      if (allowedOrigins.has(origin)) return url;
+      return `${baseUrl}/dashboard`;
+    },
 
-      // /dashboard et sous-pages : réservées aux utilisateurs connectés
-      if (isProtected) {
-        return isLoggedIn;
-      }
-
+    // Aucune route bloquée au niveau middleware : l'interface protège
+    // elle-même ses contenus (ex. /dashboard affiche « Se connecter »
+    // quand la session est absente — comportement conservé à l'identique).
+    authorized() {
       return true;
     },
   },
+
+  providers: [], // providers réels déclarés dans src/auth.ts
 } satisfies NextAuthConfig;
