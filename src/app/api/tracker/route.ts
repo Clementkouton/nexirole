@@ -10,8 +10,10 @@ import { PrismaPg } from "@prisma/adapter-pg";
 // En cas de doute, copiez la ligne d'import Prisma utilisée dans src/auth.ts.
 // ─────────────────────────────────────────────────────────────────────────────
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
-const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter, log: ["error", "warn"] });
+const prisma = globalForPrisma.prisma ?? new PrismaClient({
+  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
+  log: ["query", "info", "warn", "error"]
+});
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,7 +52,7 @@ interface TrackerRow {
   companyName: string;
   jobUrl: string | null;
   status: string;
-  lastActionDate?: Date | null;
+  lastActionDate: Date | null;
   notes: string | null;
   createdAt: Date | null;
 }
@@ -70,13 +72,45 @@ function serializeApplication(row: TrackerRow) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CORRECTIF 401 : avec la stratégie JWT de next-auth v5, session.user ne
+// contient par défaut que name/email/image — PAS d'id. On résout donc
+// l'utilisateur via l'id s'il existe, sinon via l'email (toujours présent).
+// ─────────────────────────────────────────────────────────────────────────────
 async function requireUserId(): Promise<string | null> {
   const session = await auth();
-  return session?.user?.id ?? null;
+  const sessionUser = (session?.user ?? null) as unknown as
+    | { id?: string; email?: string | null }
+    | null;
+
+  // Log de diagnostic (noms de champs uniquement, aucune donnée personnelle)
+  console.log(
+    "[api/tracker] session présente :", Boolean(session),
+    "| champs user :", Object.keys(session?.user ?? {}).join(", ") || "aucun",
+  );
+
+  const directId = typeof sessionUser?.id === "string" ? sessionUser.id.trim() : "";
+  if (directId !== "") return directId;
+
+  const email = typeof sessionUser?.email === "string" ? sessionUser.email.trim() : "";
+  if (email !== "") {
+    try {
+      const found = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+      return found?.id ?? null;
+    } catch (error) {
+      console.error("[api/tracker] Résolution utilisateur par email impossible :", error);
+      return null;
+    }
+  }
+
+  return null;
 }
 
 function unauthorized(): NextResponse {
-  return NextResponse.json({ error: "Vous devez être connecté pour accéder au suivi." }, { status: 401 });
+  return NextResponse.json(
+    { error: "Session invalide. Reconnectez-vous puis réessayez." },
+    { status: 401 },
+  );
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
@@ -245,7 +279,7 @@ export async function POST(request: Request) {
       const row = await prisma.jobApplicationTracker.findFirst({ where: { id: applicationId, userId } });
       if (!row) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
 
-      const referenceDate: Date | null = row.updatedAt ?? row.createdAt ?? null;
+      const referenceDate: Date | null = row.lastActionDate ?? row.createdAt ?? null;
       const referenceMs =
         referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())
           ? referenceDate.getTime()
