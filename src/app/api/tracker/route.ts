@@ -7,23 +7,24 @@ import { PrismaPg } from "@prisma/adapter-pg";
 // IMPORTANT — IMPORT PRISMA :
 // Si votre projet importe déjà Prisma autrement (ex. `import { prisma } from "@/lib/prisma"`),
 // conservez VOTRE import et supprimez le bloc singleton ci-dessous.
-// En cas de doute, copiez la ligne d'import Prisma utilisée dans src/auth.ts.
 // ─────────────────────────────────────────────────────────────────────────────
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const prisma = globalForPrisma.prisma ?? new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
-  log: ["query", "info", "warn", "error"]
-});
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter });
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTRAT D'API
-// GET    /api/tracker                → { applications: [...] } triées par lastActionDate desc
+// GET    /api/tracker                → { applications: [...] } triées par date desc
 // POST   /api/tracker                → création ({ jobTitle, companyName, jobUrl?, notes? })
 // POST   /api/tracker                → { action: "generate-followup", applicationId }
 //                                      → { subject, body, daysSinceLastAction, source }
-// PATCH  /api/tracker                → { id, status } (+ lastActionDate = maintenant)
+// PATCH  /api/tracker                → { id, status } (+ date de référence = maintenant)
 // DELETE /api/tracker?id=...         → { success: true }
+//
+// NB — VOTRE SCHÉMA : le modèle Prisma existant utilise `followUpDate` (DateTime?)
+// comme date de référence. La route interroge ce champ et l'expose au client
+// sous le nom `lastActionDate` — la page n'a donc aucun changement à faire.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ALLOWED_STATUSES = ["A_POSTULER", "ENVOYE", "ENTRETIEN", "OFFRE", "REFUSEE"] as const;
@@ -52,7 +53,7 @@ interface TrackerRow {
   companyName: string;
   jobUrl: string | null;
   status: string;
-  lastActionDate: Date | null;
+  followUpDate?: Date | null;
   notes: string | null;
   createdAt: Date | null;
 }
@@ -66,16 +67,17 @@ function serializeApplication(row: TrackerRow) {
     companyName: row.companyName,
     jobUrl: row.jobUrl ?? null,
     status: isAllowedStatus(row.status) ? row.status : "A_POSTULER",
-    lastActionDate: toIsoDate(row.lastActionDate, createdAt),
+    // Champ DB `followUpDate` exposé au client sous le nom `lastActionDate`
+    lastActionDate: toIsoDate(row.followUpDate, createdAt),
     notes: row.notes ?? null,
     createdAt: toIsoDate(createdAt, new Date()),
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CORRECTIF 401 : avec la stratégie JWT de next-auth v5, session.user ne
-// contient par défaut que name/email/image — PAS d'id. On résout donc
-// l'utilisateur via l'id s'il existe, sinon via l'email (toujours présent).
+// Résolution utilisateur : avec la stratégie JWT de next-auth v5, session.user
+// ne contient par défaut que name/email/image — PAS d'id. On utilise l'id
+// s'il existe, sinon l'email (toujours présent dans la session).
 // ─────────────────────────────────────────────────────────────────────────────
 async function requireUserId(): Promise<string | null> {
   const session = await auth();
@@ -83,7 +85,7 @@ async function requireUserId(): Promise<string | null> {
     | { id?: string; email?: string | null }
     | null;
 
-  // Log de diagnostic (noms de champs uniquement, aucune donnée personnelle)
+  // Log de diagnostic — à retirer une fois la fonctionnalité validée
   console.log(
     "[api/tracker] session présente :", Boolean(session),
     "| champs user :", Object.keys(session?.user ?? {}).join(", ") || "aucun",
@@ -244,7 +246,7 @@ async function generateFollowupEmail(input: FollowupInput): Promise<FollowupEmai
   }
 }
 
-/* ─────────────── GET : liste triée par lastActionDate desc ─────────────── */
+/* ─────────────── GET : liste triée par date de référence desc ─────────────── */
 
 export async function GET() {
   const userId = await requireUserId();
@@ -252,7 +254,7 @@ export async function GET() {
   try {
     const rows = await prisma.jobApplicationTracker.findMany({
       where: { userId },
-      orderBy: [{ lastActionDate: "desc" }, { createdAt: "desc" }],
+      orderBy: [{ followUpDate: "desc" }, { createdAt: "desc" }],
     });
     return NextResponse.json({ applications: rows.map(serializeApplication) });
   } catch (error) {
@@ -319,7 +321,7 @@ export async function POST(request: Request) {
 
   try {
     const created = await prisma.jobApplicationTracker.create({
-      data: { userId, jobTitle, companyName, jobUrl, notes, status, lastActionDate: new Date() },
+      data: { userId, jobTitle, companyName, jobUrl, notes, status, followUpDate: new Date() },
     });
     return NextResponse.json({ application: serializeApplication(created) }, { status: 201 });
   } catch (error) {
@@ -328,7 +330,7 @@ export async function POST(request: Request) {
   }
 }
 
-/* ─────────────── PATCH : changement de statut (+ lastActionDate = maintenant) ─────────────── */
+/* ─────────────── PATCH : changement de statut (+ date de référence = maintenant) ─────────────── */
 
 export async function PATCH(request: Request) {
   const userId = await requireUserId();
@@ -346,7 +348,7 @@ export async function PATCH(request: Request) {
     if (!existing) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
     const updated = await prisma.jobApplicationTracker.update({
       where: { id: existing.id },
-      data: { status: nextStatus, lastActionDate: new Date() },
+      data: { status: nextStatus, followUpDate: new Date() },
     });
     return NextResponse.json({ application: serializeApplication(updated) });
   } catch (error) {
