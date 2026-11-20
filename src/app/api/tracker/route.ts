@@ -1,15 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { PrismaClient } from "@/generated/prisma/client";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IMPORTANT — IMPORT PRISMA :
-// Si votre projet importe déjà Prisma autrement (ex. `import { prisma } from "@/lib/prisma"`),
-// conservez VOTRE import et supprimez le bloc singleton ci-dessous.
-// ─────────────────────────────────────────────────────────────────────────────
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const prisma = globalForPrisma.prisma ?? new PrismaClient();
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+import { prisma } from "@/lib/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTRAT D'API
@@ -51,7 +42,7 @@ interface TrackerRow {
   companyName: string;
   jobUrl: string | null;
   status: string;
-  followUpDate: Date | null;
+  lastActionDate?: Date | null;
   notes: string | null;
   createdAt: Date | null;
 }
@@ -65,8 +56,8 @@ function serializeApplication(row: TrackerRow) {
     companyName: row.companyName,
     jobUrl: row.jobUrl ?? null,
     status: isAllowedStatus(row.status) ? row.status : "A_POSTULER",
-    // Champ DB `followUpDate` exposé au client sous le nom `lastActionDate`
-    lastActionDate: toIsoDate(row.followUpDate, createdAt),
+    // Date de référence exposée au client sous le nom `lastActionDate`
+    lastActionDate: toIsoDate(row.lastActionDate, createdAt),
     notes: row.notes ?? null,
     createdAt: toIsoDate(createdAt, new Date()),
   };
@@ -252,7 +243,7 @@ export async function GET() {
   try {
     const rows = await prisma.jobApplicationTracker.findMany({
       where: { userId },
-      orderBy: [{ followUpDate: "desc" }, { createdAt: "desc" }],
+      orderBy: [{ lastActionDate: "desc" }, { createdAt: "desc" }],
     });
     return NextResponse.json({ applications: rows.map(serializeApplication) });
   } catch (error) {
@@ -279,7 +270,7 @@ export async function POST(request: Request) {
       const row = await prisma.jobApplicationTracker.findFirst({ where: { id: applicationId, userId } });
       if (!row) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
 
-      const referenceDate: Date | null = row.followUpDate ?? row.createdAt ?? null;
+      const referenceDate: Date | null = row.lastActionDate ?? row.createdAt ?? null;
       const referenceMs =
         referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())
           ? referenceDate.getTime()
@@ -319,7 +310,7 @@ export async function POST(request: Request) {
 
   try {
     const created = await prisma.jobApplicationTracker.create({
-      data: { userId, jobTitle, companyName, jobUrl, notes, status, followUpDate: new Date() },
+      data: { userId, jobTitle, companyName, jobUrl, notes, status, lastActionDate: new Date() },
     });
     return NextResponse.json({ application: serializeApplication(created) }, { status: 201 });
   } catch (error) {
@@ -346,7 +337,7 @@ export async function PATCH(request: Request) {
     if (!existing) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
     const updated = await prisma.jobApplicationTracker.update({
       where: { id: existing.id },
-      data: { status: nextStatus, followUpDate: new Date() },
+      data: { status: nextStatus, lastActionDate: new Date() },
     });
     return NextResponse.json({ application: serializeApplication(updated) });
   } catch (error) {
