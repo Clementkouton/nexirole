@@ -6,12 +6,12 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 
 export type AuthActionResult = { error?: string };
+export type ForgotPasswordState = { error?: string; success?: string } | null;
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// NextAuth v5 signale une redirection (succès / navigation forcée) via une
-// erreur interne dont le digest commence par NEXT_REDIRECT.
-// Elle ne doit JAMAIS être interceptée par un catch : on la relance.
+// NextAuth v5 signale une redirection via une erreur interne dont le digest
+// commence par NEXT_REDIRECT. Elle ne doit JAMAIS être avalée par un catch.
 function isNextRedirectError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const digest = (error as { digest?: unknown }).digest;
@@ -39,13 +39,12 @@ export async function loginAction(email: string, password: string): Promise<Auth
   try {
     await signIn("credentials", { email: normalizedEmail, password, redirect: false });
   } catch (error) {
-    // Ne jamais avaler une redirection Next (sinon la connexion n'aboutit pas)
     if (isNextRedirectError(error)) throw error;
     if (error instanceof AuthError) return { error: credentialsErrorMessage(error) };
     throw error;
   }
 
-  return {}; // succès — la session est posée, le client redirige vers /dashboard
+  return {};
 }
 
 // ── Inscription + connexion automatique ─────────────────────
@@ -78,11 +77,34 @@ export async function registerAction(name: string, email: string, password: stri
   } catch (error) {
     if (isNextRedirectError(error)) throw error;
     if (error instanceof AuthError) {
-      // Compte créé mais connexion auto impossible : l'utilisateur se connecte manuellement
       return { error: "Compte créé ! Connectez-vous avec vos identifiants." };
     }
     throw error;
   }
 
-  return {}; // succès — inscription + session en un seul passage
+  return {};
+}
+
+// ── Mot de passe oublié (export restauré pour forgot-password-form.tsx) ──
+export async function forgotPasswordAction(
+  _prevState: ForgotPasswordState,
+  formData: FormData
+): Promise<ForgotPasswordState> {
+  const rawEmail = formData.get("email");
+  const email = typeof rawEmail === "string" ? rawEmail.toLowerCase().trim() : "";
+
+  if (!EMAIL_REGEX.test(email)) {
+    return { error: "Indiquez une adresse e-mail valide." };
+  }
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  // Message identique dans les deux cas : on ne révèle jamais l'existence d'un compte
+  console.log(
+    `[Auth][ForgotPassword] Demande pour ${email} — compte ${user ? "trouvé" : "inconnu"} (envoi d'e-mail non encore configuré)`
+  );
+
+  return {
+    success:
+      "Si un compte existe pour cet e-mail, un lien de réinitialisation vous a été envoyé. Vérifiez votre boîte de réception et vos spams.",
+  };
 }
