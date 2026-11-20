@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import {
+  IconClipboardList,
   IconCrown,
   IconFileText,
   IconHistory,
@@ -15,6 +16,7 @@ import {
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Tableau de bord", icon: IconLayoutDashboard },
+  { href: "/dashboard/tracker", label: "Suivi candidatures", icon: IconClipboardList },
   { href: "/dashboard/agent", label: "Agent IA", icon: IconRobot },
   { href: "/dashboard/dossier", label: "Dossier par lien", icon: IconLink },
   { href: "/dashboard/cv-builder", label: "Créateur de CV", icon: IconFileText },

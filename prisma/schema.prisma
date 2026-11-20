@@ -45,6 +45,8 @@ model User {
   password            String?
   resetPasswordToken  String?
   resetPasswordExpiry DateTime?
+
+  jobApplications JobApplicationTracker[]
 }
 
 // ── Comptes OAuth (Google...) — requis par Auth.js ───────────
@@ -175,4 +177,28 @@ model ChariowEvent {
   @@index([customerEmail])
   @@index([licenseKey])
   @@map("chariow_events")
+}
+
+enum TrackerStatus {
+  A_POSTULER
+  ENVOYE
+  ENTRETIEN
+  OFFRE
+  REFUSEE
+}
+
+model JobApplicationTracker {
+  id             String        @id @default(cuid())
+  userId         String
+  jobTitle       String
+  companyName    String
+  jobUrl         String?
+  status         TrackerStatus @default(A_POSTULER)
+  lastActionDate DateTime      @default(now())
+  notes          String?
+  createdAt      DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, lastActionDate])
 }
