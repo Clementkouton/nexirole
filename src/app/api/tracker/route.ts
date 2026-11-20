@@ -1,307 +1,342 @@
 ﻿import { NextResponse } from "next/server";
 import { auth } from "@/auth";
-// NOTE : conservez le chemin d'import de prisma utilisé dans VOTRE projet
-// (par exemple "@/lib/prisma", "@/db" ou "@/lib/db") si différent de celui-ci.
-import { prisma } from "@/lib/prisma";
+import { PrismaClient } from "@/generated/prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 
-export const dynamic = "force-dynamic";
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT — IMPORT PRISMA :
+// Si votre projet importe déjà Prisma autrement (ex. `import { prisma } from "@/lib/prisma"`),
+// conservez VOTRE import et supprimez le bloc singleton ci-dessous.
+// En cas de doute, copiez la ligne d'import Prisma utilisée dans src/auth.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
+const prisma = globalForPrisma.prisma ?? new PrismaClient({ adapter, log: ["error", "warn"] });
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
-type TrackerStatusValue = "A_POSTULER" | "ENVOYE" | "ENTRETIEN" | "OFFRE" | "REFUSEE";
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTRAT D'API
+// GET    /api/tracker                → { applications: [...] } triées par lastActionDate desc
+// POST   /api/tracker                → création ({ jobTitle, companyName, jobUrl?, notes? })
+// POST   /api/tracker                → { action: "generate-followup", applicationId }
+//                                      → { subject, body, daysSinceLastAction, source }
+// PATCH  /api/tracker                → { id, status } (+ lastActionDate = maintenant)
+// DELETE /api/tracker?id=...         → { success: true }
+// ─────────────────────────────────────────────────────────────────────────────
 
-const VALID_STATUSES: readonly TrackerStatusValue[] = [
-  "A_POSTULER",
-  "ENVOYE",
-  "ENTRETIEN",
-  "OFFRE",
-  "REFUSEE",
-];
+const ALLOWED_STATUSES = ["A_POSTULER", "ENVOYE", "ENTRETIEN", "OFFRE", "REFUSEE"] as const;
+type TrackerStatus = (typeof ALLOWED_STATUSES)[number];
 
 const DAY_MS = 86_400_000;
 const GROQ_MODEL = "llama-3.3-70b-versatile";
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-interface FollowUpEmail {
-  subject: string;
-  body: string;
+function isAllowedStatus(value: unknown): value is TrackerStatus {
+  return typeof value === "string" && (ALLOWED_STATUSES as readonly string[]).includes(value);
 }
 
-interface FollowUpContext {
+/** Convertit une valeur en date ISO valide — ne lève JAMAIS d'exception. */
+function toIsoDate(value: unknown, fallback: Date): string {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return fallback.toISOString();
+}
+
+interface TrackerRow {
+  id: string;
   jobTitle: string;
   companyName: string;
-  daysSince: number;
-  candidateName: string;
+  jobUrl: string | null;
+  status: string;
+  lastActionDate?: Date | null;
   notes: string | null;
+  createdAt: Date | null;
+}
+
+/** Sérialisation blindée : une date ISO TOUJOURS valide, jamais null/undefined. */
+function serializeApplication(row: TrackerRow) {
+  const createdAt = row.createdAt ?? new Date();
+  return {
+    id: row.id,
+    jobTitle: row.jobTitle,
+    companyName: row.companyName,
+    jobUrl: row.jobUrl ?? null,
+    status: isAllowedStatus(row.status) ? row.status : "A_POSTULER",
+    lastActionDate: toIsoDate(row.lastActionDate, createdAt),
+    notes: row.notes ?? null,
+    createdAt: toIsoDate(createdAt, new Date()),
+  };
+}
+
+async function requireUserId(): Promise<string | null> {
+  const session = await auth();
+  return session?.user?.id ?? null;
 }
 
 function unauthorized(): NextResponse {
-  return NextResponse.json({ error: "Vous devez être connecté." }, { status: 401 });
+  return NextResponse.json({ error: "Vous devez être connecté pour accéder au suivi." }, { status: 401 });
 }
 
-/**
- * Récupère l'utilisateur connecté. Tolérant : si la session n'expose pas
- * l'id (JWT sans callback), on retombe sur la recherche par e-mail.
- */
-async function getCurrentUser(): Promise<{ id: string; name: string } | null> {
-  const session = await auth();
-  const email = session?.user?.email;
-  if (!email) return null;
-
-  const sessionUser = session.user as { id?: unknown; name?: unknown };
-  let userId =
-    typeof sessionUser.id === "string" && sessionUser.id.length > 0 ? sessionUser.id : null;
-  let candidateName =
-    typeof sessionUser.name === "string" && sessionUser.name.length > 0 ? sessionUser.name : null;
-
-  if (!userId) {
-    const dbUser = await prisma.user.findFirst({
-      where: { email: { equals: email, mode: "insensitive" } },
-      select: { id: true, name: true },
-    });
-    if (!dbUser) return null;
-    userId = dbUser.id;
-    candidateName = candidateName ?? dbUser.name;
-  }
-
-  return { id: userId, name: candidateName ?? "Candidat" };
-}
-
-function buildFallbackEmail(context: FollowUpContext): FollowUpEmail {
-  const plural = context.daysSince > 1 ? "s" : "";
-  const subject = `Suivi de ma candidature – ${context.jobTitle} chez ${context.companyName}`;
-  const body = [
-    "Bonjour,",
-    "",
-    `Je me permets de revenir vers vous concernant ma candidature au poste de ${context.jobTitle}, que je vous ai adressée il y a ${context.daysSince} jour${plural}.`,
-    "",
-    `Mon intérêt pour ce poste et pour ${context.companyName} reste intact : mon profil correspond aux attentes exprimées et je serais ravi(e) d'échanger avec vous sur ce que je peux apporter à votre équipe.`,
-    "",
-    "Pourriez-vous me faire part de l'état d'avancement de ma candidature ? Je reste naturellement à votre disposition pour tout complément d'information.",
-    "",
-    "Dans l'attente de votre retour, je vous prie d'agréer mes salutations distinguées.",
-    "",
-    context.candidateName,
-  ].join("\n");
-  return { subject, body };
-}
-
-function parseFollowUpJson(raw: string): FollowUpEmail | null {
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start === -1 || end <= start) return null;
+async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
   try {
-    const parsed = JSON.parse(raw.slice(start, end + 1)) as { subject?: unknown; body?: unknown };
-    if (typeof parsed.subject !== "string" || typeof parsed.body !== "string") return null;
-    if (!parsed.subject.trim() || !parsed.body.trim()) return null;
-    return { subject: parsed.subject.trim(), body: parsed.body.trim() };
+    const body: unknown = await request.json();
+    return body && typeof body === "object" ? (body as Record<string, unknown>) : null;
   } catch {
     return null;
   }
 }
 
-async function generateFollowUpEmail(context: FollowUpContext): Promise<FollowUpEmail> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return buildFallbackEmail(context);
+function readStringField(record: Record<string, unknown> | null, keys: string[]): string {
+  if (!record) return "";
+  for (const key of keys) {
+    const value: unknown = record[key];
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return "";
+}
 
-  const systemMessage =
-    "Tu es un expert de la recherche d'emploi en France. Tu rédiges des e-mails de relance de candidature courts, polis et percutants. Tu réponds EXCLUSIVEMENT par un objet JSON valide, sans aucun texte autour, au format exact : {\"subject\": \"objet de l'e-mail\", \"body\": \"corps de l'e-mail avec des sauts de ligne \\n\"}.";
+/* ─────────────── Génération de l'e-mail de relance (Groq) ─────────────── */
 
-  const userMessage = [
-    "Rédige un e-mail de relance de candidature.",
-    `Poste visé : ${context.jobTitle}`,
-    `Entreprise : ${context.companyName}`,
-    `Candidature envoyée il y a : ${context.daysSince} jour(s)`,
-    `Nom du candidat : ${context.candidateName}`,
-    context.notes ? `Contexte additionnel : ${context.notes}` : null,
-    "",
-    "Consignes :",
-    "- L'objet doit être court et professionnel (90 caractères maximum).",
-    `- Le corps doit contenir entre 120 et 180 mots : rappel de la candidature envoyée il y a ${context.daysSince} jours, reformulation de l'intérêt pour le poste, un élément de valeur, puis une demande polie d'information sur l'avancement.`,
-    "- Ton confiant, jamais suppliant, aucune formule creuse.",
-    `- Termine le corps par la signature « ${context.candidateName} ».`,
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
+const FOLLOWUP_SYSTEM_PROMPT = `Tu es un coach carrière senior de NexiRole, expert en candidatures et communication professionnelle.
+Rédige un e-mail de relance de candidature EN FRANÇAIS destiné à un recruteur.
+Contraintes :
+- ton professionnel, poli et persuasif ;
+- corps entre 120 et 180 mots ;
+- personnalisé : poste visé, entreprise, nombre de jours écoulés depuis l'envoi ;
+- structure : salutation, rappel du contexte, réaffirmation de la motivation et de la valeur apportée, appel à l'action clair (proposer un échange ou un entretien), formule de politesse, signature « [Votre nom] » ;
+- n'invente aucun fait (ne suppose pas qu'un entretien a déjà eu lieu).
+Réponds STRICTEMENT avec un JSON valide, sans texte autour :
+{"objet": "…", "corps": "…"}`;
 
+interface FollowupInput {
+  jobTitle: string;
+  companyName: string;
+  days: number;
+  notes: string | null;
+}
+
+interface FollowupEmail {
+  subject: string;
+  body: string;
+  source: "groq" | "modele";
+}
+
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
   try {
-    const response = await fetch(GROQ_URL, {
+    const parsed: unknown = JSON.parse(cleaned);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      try {
+        const parsed: unknown = JSON.parse(cleaned.slice(start, end + 1));
+        return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+/** E-mail de secours si Groq est indisponible — la fonctionnalité ne casse jamais. */
+function buildTemplateEmail(input: FollowupInput): FollowupEmail {
+  const delayLabel = input.days <= 0 ? "récemment" : `il y a ${input.days} jour${input.days > 1 ? "s" : ""}`;
+  const notesBlock = input.notes
+    ? `\n\nPour rappel, quelques éléments de mon profil : ${input.notes}`
+    : "";
+  return {
+    subject: `Suivi de ma candidature — ${input.jobTitle} chez ${input.companyName}`,
+    body: [
+      "Madame, Monsieur,",
+      "",
+      `Je me permets de revenir vers vous concernant ma candidature au poste de ${input.jobTitle} au sein de ${input.companyName}, envoyée ${delayLabel}.`,
+      "",
+      "Ce projet continue de me motiver pleinement : je suis convaincu(e) que mon profil correspond à vos attentes et je serais ravi(e) de vous l'exposer lors d'un entretien, à votre convenance.",
+      "",
+      "Si votre processus de recrutement est toujours en cours, je reste bien entendu disponible pour toute information complémentaire.",
+      "",
+      "Je vous remercie pour l'attention portée à ma candidature et vous prie d'agréer, Madame, Monsieur, mes salutations distinguées.",
+      "",
+      "[Votre nom]",
+      notesBlock,
+    ].join("\n"),
+    source: "modele",
+  };
+}
+
+async function generateFollowupEmail(input: FollowupInput): Promise<FollowupEmail> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return buildTemplateEmail(input);
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: GROQ_MODEL,
+        temperature: 0.7,
+        max_tokens: 900,
+        response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: systemMessage },
-          { role: "user", content: userMessage },
+          { role: "system", content: FOLLOWUP_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: JSON.stringify({
+              poste: input.jobTitle,
+              entreprise: input.companyName,
+              jours_depuis_derniere_action: input.days,
+              notes_candidat: input.notes ?? "",
+            }),
+          },
         ],
-        temperature: 0.6,
-        max_tokens: 700,
       }),
-      signal: AbortSignal.timeout(20_000),
     });
-    if (!response.ok) return buildFallbackEmail(context);
-
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: unknown } }>;
-    };
-    const content = payload.choices?.[0]?.message?.content;
-    if (typeof content !== "string") return buildFallbackEmail(context);
-
-    return parseFollowUpJson(content) ?? buildFallbackEmail(context);
-  } catch {
-    return buildFallbackEmail(context);
+    if (!response.ok) throw new Error(`Groq HTTP ${response.status}`);
+    const payload: unknown = await response.json();
+    const choices = (payload as { choices?: Array<{ message?: { content?: string } }> }).choices ?? [];
+    const content = choices[0]?.message?.content ?? "";
+    const parsed = extractJsonObject(content);
+    const subject = readStringField(parsed, ["objet", "subject"]);
+    const body = readStringField(parsed, ["corps", "body", "message"]);
+    if (!subject || !body) throw new Error("Réponse Groq incomplète");
+    return { subject, body, source: "groq" };
+  } catch (error) {
+    console.error("[api/tracker] Groq indisponible, e-mail type utilisé :", error);
+    return buildTemplateEmail(input);
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* GET — liste des candidatures de l'utilisateur connecté               */
-/* ------------------------------------------------------------------ */
-export async function GET(): Promise<NextResponse> {
-  const currentUser = await getCurrentUser();
-  if (!currentUser) return unauthorized();
+/* ─────────────── GET : liste triée par lastActionDate desc ─────────────── */
 
-  const applications = await prisma.jobApplicationTracker.findMany({
-    where: { userId: currentUser.id },
-    orderBy: { lastActionDate: "desc" },
-  });
-
-  return NextResponse.json({ applications });
+export async function GET() {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
+  try {
+    const rows = await prisma.jobApplicationTracker.findMany({
+      where: { userId },
+      orderBy: [{ lastActionDate: "desc" }, { createdAt: "desc" }],
+    });
+    return NextResponse.json({ applications: rows.map(serializeApplication) });
+  } catch (error) {
+    console.error("[api/tracker][GET]", error);
+    return NextResponse.json({ error: "Impossible de charger le suivi des candidatures." }, { status: 500 });
+  }
 }
 
-/* ------------------------------------------------------------------ */
-/* POST — création OU génération de relance IA                          */
-/* ------------------------------------------------------------------ */
-export async function POST(request: Request): Promise<NextResponse> {
-  const currentUser = await getCurrentUser();
-  if (!currentUser) return unauthorized();
+/* ─────────────── POST : création OU génération de relance IA ─────────────── */
 
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-  if (!body) {
-    return NextResponse.json({ error: "Requête invalide." }, { status: 400 });
-  }
+export async function POST(request: Request) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
+  const body = await readJsonBody(request);
+  if (!body) return NextResponse.json({ error: "Corps de requête JSON invalide." }, { status: 400 });
 
-  // --- Génération d'un e-mail de relance IA ---
+  // Cas 1 — Génération d'un e-mail de relance par l'IA
   if (body.action === "generate-followup") {
-    const id = typeof body.id === "string" ? body.id : "";
-    if (!id) {
-      return NextResponse.json({ error: "Candidature introuvable." }, { status: 400 });
+    const applicationId = typeof body.applicationId === "string" ? body.applicationId : "";
+    if (!applicationId) {
+      return NextResponse.json({ error: "Identifiant de candidature manquant." }, { status: 400 });
     }
-    const application = await prisma.jobApplicationTracker.findFirst({
-      where: { id, userId: currentUser.id },
-    });
-    if (!application) {
-      return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
+    try {
+      const row = await prisma.jobApplicationTracker.findFirst({ where: { id: applicationId, userId } });
+      if (!row) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
+
+      const referenceDate: Date | null = row.updatedAt ?? row.createdAt ?? null;
+      const referenceMs =
+        referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())
+          ? referenceDate.getTime()
+          : Date.now();
+      const daysSinceLastAction = Math.max(0, Math.floor((Date.now() - referenceMs) / DAY_MS));
+
+      const email = await generateFollowupEmail({
+        jobTitle: row.jobTitle,
+        companyName: row.companyName,
+        days: daysSinceLastAction,
+        notes: row.notes,
+      });
+      return NextResponse.json({
+        subject: email.subject,
+        body: email.body,
+        daysSinceLastAction,
+        source: email.source,
+      });
+    } catch (error) {
+      console.error("[api/tracker][POST:followup]", error);
+      return NextResponse.json({ error: "La génération de l'e-mail de relance a échoué." }, { status: 500 });
     }
-    const daysSince = Math.max(
-      0,
-      Math.floor((Date.now() - application.lastActionDate.getTime()) / DAY_MS)
-    );
-    const email = await generateFollowUpEmail({
-      jobTitle: application.jobTitle,
-      companyName: application.companyName,
-      daysSince,
-      candidateName: currentUser.name,
-      notes: application.notes,
-    });
-    return NextResponse.json({ ...email, daysSince });
   }
 
-  // --- Création d'une nouvelle candidature ---
+  // Cas 2 — Création d'une candidature
   const jobTitle = typeof body.jobTitle === "string" ? body.jobTitle.trim() : "";
   const companyName = typeof body.companyName === "string" ? body.companyName.trim() : "";
-  const jobUrl = typeof body.jobUrl === "string" ? body.jobUrl.trim() : "";
-  const notes = typeof body.notes === "string" ? body.notes.trim() : "";
-  const status = (VALID_STATUSES as readonly unknown[]).includes(body.status)
-    ? (body.status as TrackerStatusValue)
-    : "A_POSTULER";
-
   if (!jobTitle || !companyName) {
     return NextResponse.json(
-      { error: "Le poste et l'entreprise sont obligatoires." },
-      { status: 400 }
+      { error: "L'intitulé du poste et le nom de l'entreprise sont obligatoires." },
+      { status: 400 },
     );
   }
-  if (jobTitle.length > 140 || companyName.length > 140) {
-    return NextResponse.json(
-      { error: "Le poste et l'entreprise sont limités à 140 caractères." },
-      { status: 400 }
-    );
-  }
-  if (jobUrl.length > 500 || notes.length > 1000) {
-    return NextResponse.json(
-      { error: "L'URL de l'offre ou les notes dépassent la taille autorisée." },
-      { status: 400 }
-    );
-  }
+  const jobUrl = typeof body.jobUrl === "string" && body.jobUrl.trim() !== "" ? body.jobUrl.trim() : null;
+  const notes = typeof body.notes === "string" && body.notes.trim() !== "" ? body.notes.trim() : null;
+  const status: TrackerStatus = isAllowedStatus(body.status) ? body.status : "A_POSTULER";
 
-  const application = await prisma.jobApplicationTracker.create({
-    data: {
-      userId: currentUser.id,
-      jobTitle,
-      companyName,
-      jobUrl: jobUrl || null,
-      notes: notes || null,
-      status,
-    },
-  });
-
-  return NextResponse.json({ application }, { status: 201 });
+  try {
+    const created = await prisma.jobApplicationTracker.create({
+      data: { userId, jobTitle, companyName, jobUrl, notes, status, lastActionDate: new Date() },
+    });
+    return NextResponse.json({ application: serializeApplication(created) }, { status: 201 });
+  } catch (error) {
+    console.error("[api/tracker][POST:create]", error);
+    return NextResponse.json({ error: "Impossible d'enregistrer la candidature." }, { status: 500 });
+  }
 }
 
-/* ------------------------------------------------------------------ */
-/* PATCH — changement de statut + lastActionDate à maintenant           */
-/* ------------------------------------------------------------------ */
-export async function PATCH(request: Request): Promise<NextResponse> {
-  const currentUser = await getCurrentUser();
-  if (!currentUser) return unauthorized();
+/* ─────────────── PATCH : changement de statut (+ lastActionDate = maintenant) ─────────────── */
 
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-  const id = typeof body?.id === "string" ? body.id : "";
-  const status = (VALID_STATUSES as readonly unknown[]).includes(body?.status)
-    ? (body?.status as TrackerStatusValue)
-    : null;
+export async function PATCH(request: Request) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
+  const body = await readJsonBody(request);
+  if (!body) return NextResponse.json({ error: "Corps de requête JSON invalide." }, { status: 400 });
 
-  if (!id || !status) {
-    return NextResponse.json({ error: "Candidature ou statut invalide." }, { status: 400 });
+  const id = typeof body.id === "string" ? body.id : "";
+  const nextStatus: unknown = body.status;
+  if (!id) return NextResponse.json({ error: "Identifiant de candidature manquant." }, { status: 400 });
+  if (!isAllowedStatus(nextStatus)) return NextResponse.json({ error: "Statut invalide." }, { status: 400 });
+
+  try {
+    const existing = await prisma.jobApplicationTracker.findFirst({ where: { id, userId } });
+    if (!existing) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
+    const updated = await prisma.jobApplicationTracker.update({
+      where: { id: existing.id },
+      data: { status: nextStatus, lastActionDate: new Date() },
+    });
+    return NextResponse.json({ application: serializeApplication(updated) });
+  } catch (error) {
+    console.error("[api/tracker][PATCH]", error);
+    return NextResponse.json({ error: "La mise à jour du statut a échoué." }, { status: 500 });
   }
-
-  const existing = await prisma.jobApplicationTracker.findFirst({
-    where: { id, userId: currentUser.id },
-  });
-  if (!existing) {
-    return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
-  }
-
-  const application = await prisma.jobApplicationTracker.update({
-    where: { id },
-    data: { status, lastActionDate: new Date() },
-  });
-
-  return NextResponse.json({ application });
 }
 
-/* ------------------------------------------------------------------ */
-/* DELETE — suppression d'une candidature                               */
-/* ------------------------------------------------------------------ */
-export async function DELETE(request: Request): Promise<NextResponse> {
-  const currentUser = await getCurrentUser();
-  if (!currentUser) return unauthorized();
+/* ─────────────── DELETE : suppression ─────────────── */
 
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-  const id = typeof body?.id === "string" ? body.id : "";
-  if (!id) {
-    return NextResponse.json({ error: "Candidature introuvable." }, { status: 400 });
+export async function DELETE(request: Request) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get("id") ?? "";
+  if (!id) return NextResponse.json({ error: "Identifiant de candidature manquant." }, { status: 400 });
+
+  try {
+    const existing = await prisma.jobApplicationTracker.findFirst({ where: { id, userId } });
+    if (!existing) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
+    await prisma.jobApplicationTracker.delete({ where: { id: existing.id } });
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("[api/tracker][DELETE]", error);
+    return NextResponse.json({ error: "La suppression a échoué." }, { status: 500 });
   }
-
-  const existing = await prisma.jobApplicationTracker.findFirst({
-    where: { id, userId: currentUser.id },
-  });
-  if (!existing) {
-    return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
-  }
-
-  await prisma.jobApplicationTracker.delete({ where: { id } });
-
-  return NextResponse.json({ ok: true });
 }

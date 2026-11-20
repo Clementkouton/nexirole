@@ -38,15 +38,13 @@ model User {
   generatedApplications GeneratedApplication[]
   jobApplications       JobApplicationTracker[]
 
-  accounts Account[]
-  sessions Session[]
-
-  @@map("users")
+  accounts            Account[]
+  sessions            Session[]
   password            String?
   resetPasswordToken  String?
   resetPasswordExpiry DateTime?
 
-  jobApplications JobApplicationTracker[]
+  @@map("users")
 }
 
 // ── Comptes OAuth (Google...) — requis par Auth.js ───────────
@@ -185,20 +183,4 @@ enum TrackerStatus {
   ENTRETIEN
   OFFRE
   REFUSEE
-}
-
-model JobApplicationTracker {
-  id             String        @id @default(cuid())
-  userId         String
-  jobTitle       String
-  companyName    String
-  jobUrl         String?
-  status         TrackerStatus @default(A_POSTULER)
-  lastActionDate DateTime      @default(now())
-  notes          String?
-  createdAt      DateTime      @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, lastActionDate])
 }
