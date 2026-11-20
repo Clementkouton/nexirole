@@ -1,0 +1,185 @@
+﻿// NexiRole â€” Authentification Auth.js v5 + PostgreSQL (Neon)
+// Prisma 7 : les URLs de connexion vivent dans prisma.config.ts
+// (plus de url/directUrl ici) et le client est gÃ©nÃ©rÃ© dans src/generated/prisma.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// â”€â”€ Utilisateur â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String? // Bcrypt coÃ»t 12 â€” null = compte Google uniquement
+  role          String    @default("user")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // â”€â”€ Licence Chariow (PARTIE 1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  plan             String    @default("FREE") // FREE | BOOST | PRO
+  licenseKey       String?   @unique // clÃ© UUID gÃ©nÃ©rÃ©e par Chariow
+  licenseStatus    String    @default("INACTIVE") // INACTIVE | ACTIVE | REVOKED | EXPIRED
+  expiresAt        DateTime? // fin de validitÃ© (BOOST 30 j / PRO 90 j)
+  // Compteurs d'usage â€” remis Ã  zÃ©ro Ã  l'activation d'une licence.
+  // usagePeriodStart pilote la fenÃªtre glissante de 30 jours du plan FREE.
+  searchesUsed     Int       @default(0)
+  generationsUsed  Int       @default(0)
+  usagePeriodStart DateTime? @default(now())
+
+  savedResumes          SavedResume[]
+  generatedApplications GeneratedApplication[]
+  jobApplications       JobApplicationTracker[]
+
+  accounts Account[]
+  sessions Session[]
+
+  @@map("users")
+  password            String?
+  resetPasswordToken  String?
+  resetPasswordExpiry DateTime?
+}
+
+// â”€â”€ Comptes OAuth (Google...) â€” requis par Auth.js â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+model Account {
+  id                String   @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+// â”€â”€ Sessions base de donnÃ©es (prÃ©sentes pour compatibilitÃ©) â”€â”€
+model Session {
+  sessionToken String   @id
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// â”€â”€ Tokens de vÃ©rification (requis par Auth.js) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// â”€â”€ RÃ©initialisation de mot de passe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+model PasswordResetToken {
+  id      String   @id @default(cuid())
+  email   String
+  token   String   @unique // SHA-256 du token envoyÃ© par email â€” jamais le token brut
+  expires DateTime
+
+  @@index([email])
+  @@map("password_reset_tokens")
+}
+
+// â”€â”€ CV analysÃ©s (PARTIE 2) â€” sauvegarde automatique du parse-cv
+model SavedResume {
+  id             String   @id @default(cuid())
+  userId         String
+  fileName       String
+  extractedText  String // texte extrait, nettoyÃ© et tronquÃ© (anti-injection)
+  detectedSkills String[] // compÃ©tences extraites par l'IA
+  profileSummary String? // premiers lignes significatives du CV
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_resumes")
+}
+
+// â”€â”€ Dossiers gÃ©nÃ©rÃ©s (PARTIE 2) â€” historique complet
+model GeneratedApplication {
+  id               String   @id @default(cuid())
+  userId           String
+  jobTitle         String
+  companyName      String
+  jobUrl           String?
+  templateId       String   @default("moderne")
+  withPhoto        Boolean  @default(false)
+  cvJson           Json // CV optimisÃ© (structure optimCvSchema)
+  coverLetter      String // lettre de motivation (JSON sÃ©rialisÃ©)
+  interviewKitJson Json? // kit entretien (structure interviewKitSchema)
+  candidateJson    Json? // coordonnÃ©es extraites du CV
+  initialScore     Int?
+  optimizedScore   Int?
+  createdAt        DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("generated_applications")
+}
+
+// â”€â”€ Suivi des candidatures (PARTIE 2) â€” tableau interactif
+model JobApplicationTracker {
+  id             String   @id @default(cuid())
+  userId         String
+  jobTitle       String
+  companyName    String
+  jobUrl         String?
+  status         String   @default("A_POSTULER")
+  lastActionDate DateTime @default(now())
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, lastActionDate])
+}
+
+// â”€â”€ Journal des webhooks Chariow (PARTIE 1) â€” idempotence
+model ChariowEvent {
+  id            String   @id @default(cuid())
+  eventId       String   @unique // x-pulse-delivery-id (idempotence Chariow)
+  eventType     String // successful.sale | license.issued | license.revoked...
+  customerEmail String?
+  licenseKey    String?
+  payload       Json // payload brut complet (audit)
+  createdAt     DateTime @default(now())
+
+  @@index([customerEmail])
+  @@index([licenseKey])
+  @@map("chariow_events")
+}
+
+enum TrackerStatus {
+  A_POSTULER
+  ENVOYE
+  ENTRETIEN
+  OFFRE
+  REFUSEE
+
+}
