@@ -5,6 +5,7 @@ import { pdf } from "@react-pdf/renderer";
 import QRCode from "qrcode";
 import { renderQrCvDocument } from "@/components/pdf/CvPdfQrTemplates";
 import type { PdfCv } from "@/components/pdf/CvPdfQrTemplates";
+import { enrichCv } from "@/lib/cv-normalize";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,7 +101,10 @@ function pickPeriod(o: Record<string, unknown>): string {
   return start || end || asText(o.period) || asText(o.periode);
 }
 
-function normalizeCvForPdf(raw: unknown): PdfCv {
+function normalizeCvForPdf(...args: Parameters<typeof normalizeCvForPdfBase>) {
+  return enrichCv(normalizeCvForPdfBase(...args), args[0]);
+}
+function normalizeCvForPdfBase(raw: unknown): PdfCv {
   const root = asRec(raw) ?? {};
   const personal = asRec(root.personal) ?? {};
   const name = asText(personal.fullName) || asText(root.fullName) || asText(personal.name) || asText(root.name) || asText(root.title2) || "CV";

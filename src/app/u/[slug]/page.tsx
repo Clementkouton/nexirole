@@ -4,7 +4,6 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { normalizeCv, extractTheme } from "@/lib/cv-normalize";
-import type { NormalizedCv } from "@/lib/cv-normalize";
 import {
   IconPrinter, IconQrcode, IconEye, IconWorld, IconMail, IconPhone, IconMapPin, IconLink,
 } from "@tabler/icons-react";
