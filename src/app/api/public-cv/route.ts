@@ -5,7 +5,7 @@ import { pdf } from "@react-pdf/renderer";
 import QRCode from "qrcode";
 import { renderQrCvDocument } from "@/components/pdf/CvPdfQrTemplates";
 import type { PdfCv } from "@/components/pdf/CvPdfQrTemplates";
-import { enrichCv } from "@/lib/cv-normalize";
+import { enrichCv } from "@/lib/cv-enrich";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

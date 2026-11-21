@@ -9,6 +9,7 @@ import {
 } from "@tabler/icons-react";
 import { NextResponse } from "next/server";
 
+type NormalizedCv = ReturnType<typeof normalizeCv>;
 
 
 export const dynamic = "force-dynamic";
