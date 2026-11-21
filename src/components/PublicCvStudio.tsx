@@ -5,6 +5,8 @@ import {
   IconUpload, IconTrash, IconCopy, IconCheck, IconEye, IconQrcode, IconWorld,
   IconLink, IconLoader2, IconPalette, IconExternalLink, IconAlertTriangle, IconLock, IconPhoto,
 } from "@tabler/icons-react";
+import { useRouter } from "next/navigation";
+import { IconCircleCheck } from "@tabler/icons-react";
 
 const WEB_TEMPLATES: { id: string; label: string }[] = [
   { id: "classique", label: "Classique Navy" },
@@ -116,6 +118,8 @@ export function PublicCvStudio({ cvData }: { cvData?: unknown }) {
   const [tableMissing, setTableMissing] = useState(false);
   const [dataFound, setDataFound] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+
 
   const applyRow = useCallback((r: Record<string, unknown>) => {
     setRow({
@@ -330,6 +334,10 @@ export function PublicCvStudio({ cvData }: { cvData?: unknown }) {
             </span>
           </>
         ) : null}
+        <button type="button" onClick={() => router.push("/dashboard")}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-[#051937] px-4 py-2 text-sm font-bold text-white hover:brightness-110">
+          <IconCircleCheck size={16} stroke={1.6} /> Terminer
+        </button>
       </div>
     </section>
   );

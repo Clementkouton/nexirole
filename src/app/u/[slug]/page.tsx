@@ -1,80 +1,15 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { normalizeCv, extractTheme } from "@/lib/cv-normalize";
+import type { NormalizedCv } from "@/lib/cv-normalize";
 import {
   IconPrinter, IconQrcode, IconEye, IconWorld, IconMail, IconPhone, IconMapPin, IconLink,
 } from "@tabler/icons-react";
 
 export const dynamic = "force-dynamic";
-
-/* ---------------- types + helpers ---------------- */
-
-type NormalizedCv = {
-  name: string; title: string; photo: string | null;
-  email: string; phone: string; location: string; website: string;
-  summary: string;
-  experiences: { role: string; company: string; period: string; description: string }[];
-  educations: { degree: string; school: string; period: string }[];
-  skills: string[]; languages: string[];
-};
-
-function asRec(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-}
-function asText(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
-function asArr(v: unknown): unknown[] { return Array.isArray(v) ? v : []; }
-
-function pickPeriod(o: Record<string, unknown>): string {
-  const start = asText(o.startDate) || asText(o.start) || asText(o.from) || asText(o.dateDebut);
-  const end = asText(o.endDate) || asText(o.end) || asText(o.to) || asText(o.dateFin) || (o.current === true ? "Aujourd'hui" : "");
-  if (start && end) return `${start} — ${end}`;
-  return start || end || asText(o.period) || asText(o.periode);
-}
-
-function normalizeCv(raw: unknown): NormalizedCv {
-  const root = asRec(raw) ?? {};
-  const personal = asRec(root.personal) ?? {};
-  const name = asText(personal.fullName) || asText(root.fullName) || asText(personal.name) || asText(root.name) || "CV";
-  const photoRaw = asText(personal.photo) || asText(root.photo) || asText(root.avatar);
-  const photo = /^data:image\/(png|jpe?g|webp);base64,/.test(photoRaw) || /^https?:\/\//.test(photoRaw) ? photoRaw : null;
-  const experiences = asArr(root.experiences ?? root.experience ?? root.work).map((x) => {
-    const o = asRec(x) ?? {};
-    return {
-      role: asText(o.role) || asText(o.position) || asText(o.title) || asText(o.poste),
-      company: asText(o.company) || asText(o.employer) || asText(o.entreprise),
-      period: pickPeriod(o),
-      description: asText(o.description) || asArr(o.bullets).filter((b) => typeof b === "string").join("\n"),
-    };
-  }).filter((e) => e.role || e.company);
-  const educations = asArr(root.educations ?? root.education ?? root.formations).map((x) => {
-    const o = asRec(x) ?? {};
-    return {
-      degree: asText(o.degree) || asText(o.diploma) || asText(o.diplome) || asText(o.title),
-      school: asText(o.school) || asText(o.institution) || asText(o.ecole),
-      period: pickPeriod(o),
-    };
-  }).filter((d) => d.degree || d.school);
-  return {
-    name, title: asText(personal.title) || asText(root.title) || asText(root.jobTitle), photo,
-    email: asText(personal.email) || asText(root.email),
-    phone: asText(personal.phone) || asText(root.phone),
-    location: asText(personal.location) || asText(personal.city) || asText(root.location),
-    website: asText(personal.website) || asText(root.website) || asText(root.linkedin),
-    summary: asText(root.summary) || asText(root.objective) || asText(root.profile) || asText(root.profil),
-    experiences, educations,
-    skills: asArr(root.skills ?? root.competences).map((s) => (typeof s === "string" ? s : asText(asRec(s)?.name))).filter(Boolean),
-    languages: asArr(root.languages ?? root.langues).map((l) => (typeof l === "string" ? l : asText(asRec(l)?.name))).filter(Boolean),
-  };
-}
-
-function extractWebTheme(raw: unknown, templateColumn: string | null): { webTemplate: string; accentColor: string } {
-  const root = asRec(raw) ?? {};
-  const theme = asRec(root.theme) ?? {};
-  const accent = typeof theme.accentColor === "string" && /^#[0-9a-fA-F]{6}$/.test(theme.accentColor) ? theme.accentColor : "#FFC107";
-  const web = (typeof theme.webTemplate === "string" && theme.webTemplate) || templateColumn || "classique";
-  return { webTemplate: web, accentColor: accent };
-}
 
 function mix(hex: string, target: number, ratio: number): string {
   const n = hex.replace("#", "");
@@ -105,7 +40,7 @@ function ContactChips({ cv, dark = false, accent }: { cv: NormalizedCv; dark?: b
     cv.phone ? { icon: <IconPhone size={14} stroke={1.6} />, text: cv.phone, href: `tel:${cv.phone}` } : null,
     cv.location ? { icon: <IconMapPin size={14} stroke={1.6} />, text: cv.location, href: null } : null,
     cv.website ? { icon: <IconLink size={14} stroke={1.6} />, text: cv.website, href: cv.website } : null,
-  ].filter(Boolean) as { icon: React.ReactNode; text: string; href: string | null }[];
+  ].filter(Boolean) as { icon: ReactNode; text: string; href: string | null }[];
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
       {items.map((it, i) => {
@@ -118,10 +53,7 @@ function ContactChips({ cv, dark = false, accent }: { cv: NormalizedCv; dark?: b
   );
 }
 
-function SectionTitle({ children, accent, variant = "bar" }: { children: React.ReactNode; accent: string; variant?: "bar" | "underline" | "plain" }) {
-  if (variant === "underline") {
-    return <h2 className="mb-3 text-[11px] font-bold uppercase tracking-[0.18em]" style={{ color: darken(accent, 0.35), borderBottom: `2px solid ${accent}`, paddingBottom: 4 }}>{children}</h2>;
-  }
+function SectionTitle({ children, accent, variant = "bar" }: { children: ReactNode; accent: string; variant?: "bar" | "underline" | "plain" }) {
   if (variant === "plain") {
     return <h2 className="mb-2 text-[11px] font-bold uppercase tracking-[0.22em] text-slate-800">{children}</h2>;
   }
@@ -163,10 +95,10 @@ function SkillChips({ skills, accent }: { skills: string[]; accent: string }) {
   );
 }
 
-function CvSection({ title, accent, variant, children }: { title: string; accent: string; variant?: "bar" | "underline" | "plain"; children: React.ReactNode }) {
+function CvSection({ title, accent, children }: { title: string; accent: string; children: ReactNode }) {
   return (
     <section className="mb-5">
-      <SectionTitle accent={accent} variant={variant}>{title}</SectionTitle>
+      <SectionTitle accent={accent}>{title}</SectionTitle>
       {children}
     </section>
   );
@@ -177,14 +109,14 @@ function CvSection({ title, accent, variant, children }: { title: string; accent
 function TplClassique({ cv, accent }: { cv: NormalizedCv; accent: string }) {
   return (
     <div>
-      <header className="px-8 py-7 text-center" style={{ backgroundColor: "#051937" }}>
+      <div className="px-8 py-7 text-center" style={{ backgroundColor: "#051937" }}>
         <div className="mb-3 flex justify-center"><Photo src={cv.photo} size={84} ring={accent} /></div>
         <h1 className="text-2xl font-bold text-white">{cv.name}</h1>
         {cv.title ? <p className="mt-1 text-sm" style={{ color: accent }}>{cv.title}</p> : null}
         <div className="mt-3 flex justify-center"><ContactChips cv={cv} dark accent={accent} /></div>
-      </header>
+      </div>
       <div className="p-8">
-        {cv.summary ? <CvSection title="Profil" accent={accent}>{<p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
+        {cv.summary ? <CvSection title="Profil" accent={accent}><p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
         {cv.experiences.length ? <CvSection title="Expérience professionnelle" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
         {cv.educations.length ? <CvSection title="Formation" accent={accent}>{cv.educations.map((d, i) => (<div key={i} className="mb-2"><p className="text-sm font-semibold text-slate-900">{d.degree}</p><p className="text-xs text-slate-500">{d.school}{d.period ? ` · ${d.period}` : ""}</p></div>))}</CvSection> : null}
         {cv.skills.length ? <CvSection title="Compétences" accent={accent}><SkillChips skills={cv.skills} accent={accent} /></CvSection> : null}
@@ -206,7 +138,7 @@ function TplModerne({ cv, accent }: { cv: NormalizedCv; accent: string }) {
         {cv.skills.length ? (<><p className="mb-2 text-[10px] font-bold uppercase tracking-widest" style={{ color: accent }}>Compétences</p><div className="flex flex-col gap-1">{cv.skills.map((s, i) => <span key={i} className="text-xs text-slate-200">· {s}</span>)}</div></>) : null}
       </aside>
       <main className="flex-1 p-7">
-        {cv.summary ? <CvSection title="Profil" accent={accent}>{<p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
+        {cv.summary ? <CvSection title="Profil" accent={accent}><p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
         {cv.experiences.length ? <CvSection title="Expérience professionnelle" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
         {cv.educations.length ? <CvSection title="Formation" accent={accent}>{cv.educations.map((d, i) => (<div key={i} className="mb-2"><p className="text-sm font-semibold text-slate-900">{d.degree}</p><p className="text-xs text-slate-500">{d.school}{d.period ? ` · ${d.period}` : ""}</p></div>))}</CvSection> : null}
         {cv.languages.length ? <CvSection title="Langues" accent={accent}><SkillChips skills={cv.languages} accent={accent} /></CvSection> : null}
@@ -218,7 +150,7 @@ function TplModerne({ cv, accent }: { cv: NormalizedCv; accent: string }) {
 function TplExecutif({ cv, accent }: { cv: NormalizedCv; accent: string }) {
   return (
     <div>
-      <header className="px-8 pb-6 pt-8" style={{ backgroundColor: "#051937" }}>
+      <div className="px-8 pb-6 pt-8" style={{ backgroundColor: "#051937" }}>
         <div className="flex items-center gap-5">
           <Photo src={cv.photo} size={76} ring={accent} />
           <div className="flex-1">
@@ -227,11 +159,11 @@ function TplExecutif({ cv, accent }: { cv: NormalizedCv; accent: string }) {
           </div>
         </div>
         <div className="mt-4"><ContactChips cv={cv} dark accent={accent} /></div>
-      </header>
+      </div>
       <div className="h-1" style={{ backgroundColor: accent }} />
       <div className="grid gap-6 p-8 md:grid-cols-[1.6fr_1fr]">
         <div>
-          {cv.summary ? <CvSection title="Profil" accent={accent}>{<p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
+          {cv.summary ? <CvSection title="Profil" accent={accent}><p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
           {cv.experiences.length ? <CvSection title="Expérience professionnelle" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
         </div>
         <div>
@@ -247,17 +179,17 @@ function TplExecutif({ cv, accent }: { cv: NormalizedCv; accent: string }) {
 function TplMinimal({ cv, accent }: { cv: NormalizedCv; accent: string }) {
   return (
     <div className="p-9">
-      <header className="mb-6 flex items-center gap-5 border-b pb-5" style={{ borderColor: accent }}>
+      <div className="mb-6 flex items-center gap-5 border-b pb-5" style={{ borderColor: accent }}>
         <Photo src={cv.photo} size={64} ring="#E2E8F0" />
         <div className="flex-1">
           <h1 className="text-[26px] font-bold tracking-tight text-[#051937]">{cv.name}</h1>
           {cv.title ? <p className="text-sm text-slate-500">{cv.title}</p> : null}
         </div>
         <ContactChips cv={cv} accent="#051937" />
-      </header>
-      {cv.summary ? <CvSection title="Profil" accent={accent} variant="plain">{<p className="mb-4 whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
-      {cv.experiences.length ? <CvSection title="Expérience" accent={accent} variant="plain">{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
-      {cv.educations.length ? <CvSection title="Formation" accent={accent} variant="plain">{cv.educations.map((d, i) => (<div key={i} className="mb-2"><p className="text-sm font-semibold text-slate-900">{d.degree}</p><p className="text-xs text-slate-500">{d.school}{d.period ? ` · ${d.period}` : ""}</p></div>))}</CvSection> : null}
+      </div>
+      {cv.summary ? <CvSection title="Profil" accent={accent}><p className="mb-4 whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
+      {cv.experiences.length ? <CvSection title="Expérience" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
+      {cv.educations.length ? <CvSection title="Formation" accent={accent}>{cv.educations.map((d, i) => (<div key={i} className="mb-2"><p className="text-sm font-semibold text-slate-900">{d.degree}</p><p className="text-xs text-slate-500">{d.school}{d.period ? ` · ${d.period}` : ""}</p></div>))}</CvSection> : null}
       {cv.skills.length ? <p className="mb-4 text-[13px] leading-relaxed text-slate-700">{cv.skills.join("  ·  ")}</p> : null}
       {cv.languages.length ? <p className="text-[13px] text-slate-700">{cv.languages.join("  ·  ")}</p> : null}
     </div>
@@ -267,17 +199,17 @@ function TplMinimal({ cv, accent }: { cv: NormalizedCv; accent: string }) {
 function TplColonne({ cv, accent }: { cv: NormalizedCv; accent: string }) {
   return (
     <div className="p-8">
-      <header className="mb-6 flex items-center gap-4">
+      <div className="mb-6 flex items-center gap-4">
         <Photo src={cv.photo} size={70} ring={accent} />
         <div>
           <h1 className="text-xl font-bold text-[#051937]">{cv.name}</h1>
           {cv.title ? <p className="text-sm" style={{ color: darken(accent, 0.35) }}>{cv.title}</p> : null}
           <div className="mt-1.5"><ContactChips cv={cv} accent={accent} /></div>
         </div>
-      </header>
+      </div>
       <div className="grid gap-7 md:grid-cols-2">
         <div className="md:border-r md:border-slate-200 md:pr-7">
-          {cv.summary ? <CvSection title="Profil" accent={accent}>{<p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
+          {cv.summary ? <CvSection title="Profil" accent={accent}><p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
           {cv.experiences.length ? <CvSection title="Expérience" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
         </div>
         <div>
@@ -293,7 +225,7 @@ function TplColonne({ cv, accent }: { cv: NormalizedCv; accent: string }) {
 function TplTimeline({ cv, accent }: { cv: NormalizedCv; accent: string }) {
   return (
     <div className="p-8">
-      <header className="mb-6" style={{ borderBottom: `2px solid ${accent}` }}>
+      <div className="mb-6" style={{ borderBottom: `2px solid ${accent}` }}>
         <div className="flex items-center gap-4 pb-4">
           <Photo src={cv.photo} size={64} ring={accent} />
           <div>
@@ -302,8 +234,8 @@ function TplTimeline({ cv, accent }: { cv: NormalizedCv; accent: string }) {
             <div className="mt-1"><ContactChips cv={cv} accent={accent} /></div>
           </div>
         </div>
-      </header>
-      {cv.summary ? <CvSection title="Profil" accent={accent}>{<p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
+      </div>
+      {cv.summary ? <CvSection title="Profil" accent={accent}><p className="whitespace-pre-line text-sm leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
       {cv.experiences.length ? <CvSection title="Parcours" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} timeline />)}</CvSection> : null}
       {cv.educations.length ? <CvSection title="Formation" accent={accent}>{cv.educations.map((d, i) => <ExpItem key={i} e={{ role: d.degree, company: d.school, period: d.period, description: "" }} accent={accent} timeline />)}</CvSection> : null}
       {cv.skills.length ? <CvSection title="Compétences" accent={accent}><SkillChips skills={cv.skills} accent={accent} /></CvSection> : null}
@@ -314,7 +246,7 @@ function TplTimeline({ cv, accent }: { cv: NormalizedCv; accent: string }) {
 function TplCompact({ cv, accent }: { cv: NormalizedCv; accent: string }) {
   return (
     <div className="p-7">
-      <header className="mb-4 flex items-center justify-between gap-4 rounded-lg px-4 py-3" style={{ backgroundColor: "#051937" }}>
+      <div className="mb-4 flex items-center justify-between gap-4 rounded-lg px-4 py-3" style={{ backgroundColor: "#051937" }}>
         <div className="flex items-center gap-3">
           <Photo src={cv.photo} size={46} ring={accent} />
           <div>
@@ -323,8 +255,8 @@ function TplCompact({ cv, accent }: { cv: NormalizedCv; accent: string }) {
           </div>
         </div>
         <ContactChips cv={cv} dark accent={accent} />
-      </header>
-      {cv.summary ? <CvSection title="Profil" accent={accent}>{<p className="whitespace-pre-line text-[13px] leading-relaxed text-slate-600">{cv.summary}</p>}</CvSection> : null}
+      </div>
+      {cv.summary ? <CvSection title="Profil" accent={accent}><p className="whitespace-pre-line text-[13px] leading-relaxed text-slate-600">{cv.summary}</p></CvSection> : null}
       {cv.experiences.length ? <CvSection title="Expérience professionnelle" accent={accent}>{cv.experiences.map((e, i) => <ExpItem key={i} e={e} accent={accent} />)}</CvSection> : null}
       {cv.educations.length ? <CvSection title="Formation" accent={accent}>{cv.educations.map((d, i) => (<div key={i} className="mb-2"><p className="text-[13px] font-semibold text-slate-900">{d.degree}</p><p className="text-xs text-slate-500">{d.school}{d.period ? ` · ${d.period}` : ""}</p></div>))}</CvSection> : null}
       {cv.skills.length ? <p className="text-[13px] leading-relaxed text-slate-700">{cv.skills.join(", ")}</p> : null}
@@ -355,7 +287,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
     const cv = normalizeCv(row.cvData);
     const description = (cv.summary || `CV en ligne de ${cv.name}`).slice(0, 160);
     return {
-      title: cv.name ? `${cv.name}${cv.title ? ` — ${cv.title}` : ""}` : "CV en ligne — NexiRole",
+      title: cv.name && cv.name !== "CV" ? `${cv.name}${cv.title ? ` — ${cv.title}` : ""}` : "CV en ligne — NexiRole",
       description,
       robots: { index: true, follow: true },
       openGraph: { title: cv.name || "CV en ligne", description, type: "profile" },
@@ -383,13 +315,35 @@ export default async function PublicCvPage({ params }: { params: Promise<{ slug:
   void prisma.publicResume.update({ where: { id: row.id }, data: { viewsCount: { increment: 1 } } }).catch(() => undefined);
 
   const cv = normalizeCv(row.cvData);
-  const theme = extractWebTheme(row.cvData, row.templateId);
+  const theme = extractTheme(row.cvData, row.templateId);
   const pdfUrl = `/api/public-cv?slug=${encodeURIComponent(row.slug)}&format=pdf`;
 
   return (
-    <div className="min-h-screen bg-slate-100 pb-24">
-      <style dangerouslySetInnerHTML={{ __html: `@media print{.nr-no-print{display:none!important}body{background:#fff!important}.nr-page{box-shadow:none!important;margin:0!important;max-width:100%!important;border-radius:0!important}@page{margin:12mm}}` }} />
-      <script dangerouslySetInnerHTML={{ __html: `document.addEventListener('DOMContentLoaded',function(){var b=document.getElementById('nr-print-btn');if(b){b.addEventListener('click',function(){window.print();});}});` }} />
+    <div id="nr-public-root" className="min-h-screen bg-slate-100 pb-24">
+      <style dangerouslySetInnerHTML={{ __html: `.nr-hide{display:none!important}@media print{.nr-no-print{display:none!important}.nr-hide{display:none!important}body{background:#fff!important}.nr-page{box-shadow:none!important;margin:0!important;max-width:100%!important;border-radius:0!important}@page{margin:12mm}}` }} />
+      <script dangerouslySetInnerHTML={{ __html: `(function(){
+  function nrOnReady(fn){ if(document.readyState!=='loading'){fn();}else{document.addEventListener('DOMContentLoaded',fn);} }
+  nrOnReady(function(){
+    try{ var b=document.getElementById('nr-print-btn'); if(b){ b.addEventListener('click', function(){ window.print(); }); } }catch(e){}
+    try{
+      var root=document.getElementById('nr-public-root'); if(!root) return;
+      var words=['Fonctionnalités','Comment ça marche','Lancer l\\'Assistant','Générateur par Lien','Agent de Recherche'];
+      var bodyText=document.body?document.body.textContent||'':'';
+      var hits=0; for(var i=0;i<words.length;i++){ if(bodyText.indexOf(words[i])!==-1) hits++; }
+      if(hits>=2){
+        var els=document.querySelectorAll('header,nav,section,div');
+        for(var j=0;j<els.length;j++){
+          var el=els[j];
+          if(el.contains(root)||root.contains(el)) continue;
+          var t=el.textContent||'';
+          if(t.length>4000) continue;
+          var c=0; for(var k=0;k<words.length;k++){ if(t.indexOf(words[k])!==-1) c++; }
+          if(c>=2){ el.classList.add('nr-hide'); break; }
+        }
+      }
+    }catch(e){}
+  });
+})();` }} />
 
       <div className="nr-no-print mx-auto flex max-w-[860px] flex-wrap items-center justify-between gap-2 px-4 pt-5">
         <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-600 shadow-sm">
@@ -407,6 +361,12 @@ export default async function PublicCvPage({ params }: { params: Promise<{ slug:
           </a>
         </div>
       </div>
+
+      {cv.isEmpty ? (
+        <div className="nr-no-print mx-auto my-3 max-w-[860px] rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          Les données publiées n&apos;ont pas été reconnues (CV vide). Ouvre le créateur de CV puis clique « Mettre à jour la publication » dans le bloc « Lien Web Public &amp; QR Code ».
+        </div>
+      ) : null}
 
       <div className="nr-page mx-auto my-5 max-w-[860px] overflow-hidden rounded-2xl bg-white shadow-xl">
         {renderWebTemplate(theme.webTemplate, cv, theme.accentColor)}

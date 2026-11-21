@@ -40,6 +40,7 @@ import { Button, Input, Label, Textarea } from "@/components/ui";
 import { downloadPdf } from "@/lib/download-client";
 import { toast } from "sonner";
 import type { CvBuilderData } from "@/lib/types";
+import { PublicCvStudio } from "@/components/dashboard/PublicCvStudio";
 
 /* ------------------------------------------------------------------ */
 /*  Types & constantes                                                 */
@@ -2405,9 +2406,9 @@ export default function CvBuilderPage() {
       : "Sauvegarde automatique activée";
 
   return (
-    <div className="bg-ice">
+    <><div className="bg-ice">
       {/* Styles d'impression : seule la feuille CV (portail) est imprimée, A4 exact.
-          Le portail est un enfant direct de <body> : pagination multi-pages native. */}
+        Le portail est un enfant direct de <body> : pagination multi-pages native. */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -2429,8 +2430,7 @@ export default function CvBuilderPage() {
   }
 }
 `,
-        }}
-      />
+        }} />
 
       {/* En-tête */}
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white">
@@ -2489,8 +2489,7 @@ export default function CvBuilderPage() {
           <button
             type="button"
             onClick={() => setMobileTab("form")}
-            className={`py-2.5 text-sm font-semibold transition-colors ${mobileTab === "form" ? "bg-navy text-white" : "text-slate-600"
-              }`}
+            className={`py-2.5 text-sm font-semibold transition-colors ${mobileTab === "form" ? "bg-navy text-white" : "text-slate-600"}`}
             aria-pressed={mobileTab === "form"}
           >
             Formulaire
@@ -2498,8 +2497,7 @@ export default function CvBuilderPage() {
           <button
             type="button"
             onClick={() => setMobileTab("preview")}
-            className={`py-2.5 text-sm font-semibold transition-colors ${mobileTab === "preview" ? "bg-navy text-white" : "text-slate-600"
-              }`}
+            className={`py-2.5 text-sm font-semibold transition-colors ${mobileTab === "preview" ? "bg-navy text-white" : "text-slate-600"}`}
             aria-pressed={mobileTab === "preview"}
           >
             Aperçu du CV
@@ -2521,13 +2519,11 @@ export default function CvBuilderPage() {
                     onClick={() => setStep(s.id)}
                     className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3.5 py-2 text-xs font-semibold transition-all ${active
                       ? "border-navy bg-navy text-white shadow-[0_8px_20px_-8px_rgba(5,25,55,0.5)]"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-navy/30 hover:text-navy"
-                      }`}
+                      : "border-slate-200 bg-white text-slate-600 hover:border-navy/30 hover:text-navy"}`}
                     aria-current={active ? "step" : undefined}
                   >
                     <span
-                      className={`flex size-5 items-center justify-center rounded-full text-[10px] font-bold ${active ? "bg-gold text-navy" : "bg-slate-100 text-slate-500"
-                        }`}
+                      className={`flex size-5 items-center justify-center rounded-full text-[10px] font-bold ${active ? "bg-gold text-navy" : "bg-slate-100 text-slate-500"}`}
                     >
                       {s.id + 1}
                     </span>
@@ -2594,8 +2590,7 @@ export default function CvBuilderPage() {
                       onClick={() => setDesign((prev) => ({ ...prev, template: tpl.id }))}
                       className={`rounded-xl border px-3 py-2.5 text-left text-[11px] font-semibold transition-all ${active
                         ? "border-navy bg-navy text-white"
-                        : "border-slate-200 bg-white text-slate-600 hover:border-navy/40"
-                        }`}
+                        : "border-slate-200 bg-white text-slate-600 hover:border-navy/40"}`}
                       aria-pressed={active}
                     >
                       {active && <IconCheck className="mb-1 size-3.5 text-gold" />}
@@ -2701,8 +2696,7 @@ export default function CvBuilderPage() {
                   checked={showQrOnPdf}
                   onChange={toggleShowQrOnPdf}
                   className="size-4 accent-[#FFC107]"
-                  aria-label="Afficher le QR Code sur mon PDF"
-                />
+                  aria-label="Afficher le QR Code sur mon PDF" />
               </label>
 
               {showQrOnPdf && pubSlug === null && (
@@ -2736,8 +2730,7 @@ export default function CvBuilderPage() {
 
           {/* Colonne aperçu */}
           <aside
-            className={`min-w-0 lg:sticky lg:top-20 lg:self-start ${mobileTab === "preview" ? "" : "hidden lg:block"
-              }`}
+            className={`min-w-0 lg:sticky lg:top-20 lg:self-start ${mobileTab === "preview" ? "" : "hidden lg:block"}`}
           >
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               {/* Barre d'aperçu */}
@@ -2754,8 +2747,7 @@ export default function CvBuilderPage() {
                     onClick={() => setZoomMode("fit")}
                     className={`rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${zoomMode === "fit"
                       ? "bg-navy text-white"
-                      : "bg-slate-200 text-navy hover:bg-slate-300"
-                      }`}
+                      : "bg-slate-200 text-navy hover:bg-slate-300"}`}
                     aria-pressed={zoomMode === "fit"}
                   >
                     Ajuster
@@ -2765,8 +2757,7 @@ export default function CvBuilderPage() {
                     onClick={() => setZoomMode("actual")}
                     className={`rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${zoomMode === "actual"
                       ? "bg-navy text-white"
-                      : "bg-slate-200 text-navy hover:bg-slate-300"
-                      }`}
+                      : "bg-slate-200 text-navy hover:bg-slate-300"}`}
                     aria-pressed={zoomMode === "actual"}
                   >
                     100 %
@@ -2949,8 +2940,7 @@ export default function CvBuilderPage() {
                             onClick={() => toggleSelectedSkill(skill)}
                             className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${active
                               ? "border-navy bg-navy text-white"
-                              : "border-slate-200 bg-white text-slate-500 line-through opacity-60"
-                              }`}
+                              : "border-slate-200 bg-white text-slate-500 line-through opacity-60"}`}
                             aria-pressed={active}
                           >
                             {active && <IconCheck className="size-3" />}
@@ -3004,9 +2994,9 @@ export default function CvBuilderPage() {
       )}
 
       {/* Portail d'impression : rendu A4 dédié, enfant direct de <body>.
-          Invisible à l'écran, affiché seul pendant l'impression. */}
-      {mounted &&
-        createPortal(
+        Invisible à l'écran, affiché seul pendant l'impression. */}
+      {mounted
+        ? createPortal(
           <div id="cv-print-root" className="hidden" aria-hidden>
             <div
               id="cv-print-sheet"
@@ -3020,9 +3010,7 @@ export default function CvBuilderPage() {
               }}
             >
               <CvSheet data={data} design={design} />
-              {showQrOnPdf && qrDataUrl !== null && (
-                /* QR « Version en ligne » imprimé en haut à droite — posé sur le
-                   conteneur d'impression : aucun modèle de CV n'est modifié. */
+                {showQrOnPdf && qrDataUrl !== null ? (
                 <div
                   style={{
                     position: "absolute",
@@ -3042,8 +3030,7 @@ export default function CvBuilderPage() {
                   <img
                     src={qrDataUrl}
                     alt="QR code — version en ligne du CV"
-                    style={{ width: "20mm", height: "20mm", display: "block" }}
-                  />
+                    style={{ width: "20mm", height: "20mm", display: "block" }} />
                   <span
                     style={{
                       fontSize: "6.5px",
@@ -3056,11 +3043,13 @@ export default function CvBuilderPage() {
                     Version en ligne
                   </span>
                 </div>
-              )}
+              ) : null}
             </div>
           </div>,
           document.body
-        )}
+        )
+        : null}
     </div>
+      <PublicCvStudio />
   );
 }
