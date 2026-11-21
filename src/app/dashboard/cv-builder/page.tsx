@@ -1,2539 +1,883 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { createPortal } from "react-dom";
-import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { PDFDownloadLink } from "@react-pdf/renderer";
+import { toDataURL } from "qrcode";
 import {
-  IconAlertCircle,
-  IconArrowLeft,
-  IconArrowRight,
+  IconAward,
   IconBriefcase,
   IconCheck,
-  IconCirclePlus,
-  IconDeviceFloppy,
+  IconCopy,
   IconDownload,
-  IconId,
+  IconExternalLink,
+  IconEye,
+  IconEyeOff,
+  IconFileText,
   IconLanguage,
+  IconLink,
   IconLoader2,
-  IconPalette,
-  IconPrinter,
+  IconPlus,
+  IconQrcode,
+  IconRefresh,
   IconSchool,
-  IconSparkles,
   IconTrash,
+  IconUpload,
   IconUser,
-  IconWand,
-  IconX,
+  IconWorld,
 } from "@tabler/icons-react";
-import { Button, Input, Label, Textarea } from "@/components/ui";
-import { downloadPdf } from "@/lib/download-client";
-import { toast } from "sonner";
-import type { CvBuilderData } from "@/lib/types";
+import CvPdfDocument, { type CvData } from "@/components/pdf/CvPdfDocument";
 
-/* ------------------------------------------------------------------ */
-/*  Types & constantes                                                 */
-/* ------------------------------------------------------------------ */
+// ─────────────────────────────────────────────────────────────────────────────
+// CV BUILDER — édition du CV structuré + publication du CV en ligne + QR PDF
+// Brouillon conservé dans localStorage (« nexirole-cv-draft ») et synchronisé
+// avec PublicResume via /api/public-cv (GET au chargement, POST à la publication).
+// ─────────────────────────────────────────────────────────────────────────────
 
-type TemplateId = "modern" | "sleek" | "bold" | "clean";
-type FontKey = "inter" | "jakarta" | "georgia" | "arial";
-
-interface CvDesign {
-  template: TemplateId;
-  accent: string;
-  headingFont: FontKey;
-  bodyFont: FontKey;
-  scale: number; // 0.92 | 1 | 1.08
+interface DraftExperience {
+  poste: string;
+  entreprise: string;
+  periode: string;
+  description: string;
 }
-
-interface ImprovementResult {
+interface DraftFormation {
+  diplome: string;
+  etablissement: string;
+  periode: string;
+}
+interface DraftLangue {
+  nom: string;
+  niveau: string;
+}
+interface DraftCv {
+  fullName: string;
+  jobTitle: string;
+  email: string;
+  phone: string;
+  location: string;
+  website: string;
+  photoUrl: string;
   resume: string;
-  titreSuggere: string;
-  experiences: Array<{ index: number; realisations: string[] }>;
-  competences: string[];
-  conseils: string[];
+  experiences: DraftExperience[];
+  formations: DraftFormation[];
+  competencesTexte: string;
+  langues: DraftLangue[];
+  showQrOnPdf: boolean;
+}
+interface InfoPublique {
+  slug: string;
+  publicUrl: string;
+  viewsCount: number;
+  isPublic: boolean;
 }
 
-interface SheetProps {
-  data: CvBuilderData;
-  design: CvDesign;
+const DRAFT_VIDE: DraftCv = {
+  fullName: "",
+  jobTitle: "",
+  email: "",
+  phone: "",
+  location: "",
+  website: "",
+  photoUrl: "",
+  resume: "",
+  experiences: [],
+  formations: [],
+  competencesTexte: "",
+  langues: [],
+  showQrOnPdf: true,
+};
+
+const CLE_BROUILLON = "nexirole-cv-draft";
+
+function texte(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+function objet(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+function liste(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
-function uid(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
+/** Reconstruit un brouillon depuis un cvData quelconque (localStorage ou serveur). */
+function draftDepuisCvData(raw: unknown): DraftCv {
+  const source = objet(raw) ?? {};
+  const identite = objet(source.identite) ?? objet(source.identity);
+  const competencesBrut = source.competences ?? source.skills;
+  let competencesTexte = "";
+  if (typeof competencesBrut === "string") {
+    competencesTexte = competencesBrut;
+  } else if (Array.isArray(competencesBrut)) {
+    competencesTexte = competencesBrut
+      .map((item) => {
+        if (typeof item === "string") return item.trim();
+        const entry = objet(item);
+        if (!entry) return "";
+        const nom = texte(entry.nom ?? entry.name ?? entry.label);
+        const niveau = texte(entry.niveau ?? entry.level);
+        return nom !== "" && niveau !== "" ? `${nom} (${niveau})` : nom;
+      })
+      .filter(Boolean)
+      .join(", ");
   }
-  return `id-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-const EMPTY_DATA: CvBuilderData = {
-  personal: {
-    fullName: "",
-    title: "",
-    email: "",
-    phone: "",
-    location: "",
-    linkedin: "",
-  },
-  summary: "",
-  experiences: [
-    {
-      id: "exp-1", role: "", company: "", period: "", location: "", achievements: [""],
-      target: undefined
-    },
-  ],
-  education: [{ id: "edu-1", degree: "", school: "", period: "" }],
-  skills: [],
-  languages: [{ id: "lang-1", name: "", level: "" }],
-};
-
-const DEFAULT_DESIGN: CvDesign = {
-  template: "modern",
-  accent: "#051937",
-  headingFont: "jakarta",
-  bodyFont: "inter",
-  scale: 1,
-};
-
-const STORAGE_KEY = "nexirole-cv-builder-v2";
-const STORAGE_KEY_V1 = "nexirole-cv-builder-v1";
-
-const STEPS = [
-  { id: 0, label: "Infos personnelles", icon: IconId },
-  { id: 1, label: "Résumé", icon: IconUser },
-  { id: 2, label: "Expériences", icon: IconBriefcase },
-  { id: 3, label: "Formations", icon: IconSchool },
-  { id: 4, label: "Compétences & langues", icon: IconLanguage },
-  { id: 5, label: "Design & modèle", icon: IconPalette },
-] as const;
-
-const TEMPLATES: Array<{
-  id: TemplateId;
-  name: string;
-  desc: string;
-}> = [
-    { id: "modern", name: "Modern Color Accent", desc: "Colonne latérale colorée, très complet" },
-    { id: "sleek", name: "Sleek Executive", desc: "Élégant et classique, idéal cadres" },
-    { id: "bold", name: "Bold Minimalism", desc: "Typographie forte et contemporaine" },
-    { id: "clean", name: "Clean Balanced ATS", desc: "Une colonne, lisibilité ATS maximale" },
-  ];
-
-const ACCENT_PRESETS: Array<{ hex: string; name: string }> = [
-  { hex: "#051937", name: "Navy NexiRole" },
-  { hex: "#FFC107", name: "Or NexiRole" },
-  { hex: "#2563EB", name: "Bleu" },
-  { hex: "#059669", name: "Émeraude" },
-  { hex: "#7C3AED", name: "Violet" },
-  { hex: "#DC2626", name: "Rouge" },
-  { hex: "#0F172A", name: "Noir" },
-  { hex: "#B45309", name: "Ambre" },
-];
-
-const FONT_FAMILIES: Record<FontKey, { label: string; stack: string }> = {
-  inter: { label: "Inter (moderne)", stack: "var(--font-inter), 'Inter', Arial, sans-serif" },
-  jakarta: {
-    label: "Plus Jakarta Sans (marque)",
-    stack: "var(--font-jakarta), 'Plus Jakarta Sans', Arial, sans-serif",
-  },
-  georgia: { label: "Georgia (serif classique)", stack: "Georgia, 'Times New Roman', serif" },
-  arial: { label: "Arial (sobre / ATS)", stack: "Arial, Helvetica, sans-serif" },
-};
-
-const SIZES: Array<{ value: number; label: string }> = [
-  { value: 0.92, label: "Compact" },
-  { value: 1, label: "Normal" },
-  { value: 1.08, label: "Aéré" },
-];
-
-/* ------------------------------------------------------------------ */
-/*  Utilitaires                                                        */
-/* ------------------------------------------------------------------ */
-
-function str(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-/** Normalise des données potentiellement corrompues du localStorage :
- *  chaque champ redevient une vraie chaîne — c'est la garantie anti-formulaire-bloqué. */
-function sanitizeData(raw: unknown): CvBuilderData {
-  const d = (raw ?? {}) as Partial<CvBuilderData>;
-  const p = (d.personal ?? {}) as Partial<CvBuilderData["personal"]>;
-
-  const experiences =
-    Array.isArray(d.experiences) && d.experiences.length > 0
-      ? d.experiences.map((e) => ({
-        id: str(e?.id) || uid(),
-        target: str(e?.target),
-        role: str(e?.role),
-        company: str(e?.company),
-        period: str(e?.period),
-        location: str(e?.location),
-        achievements:
-          Array.isArray(e?.achievements) && e.achievements.length > 0
-            ? e.achievements.map((a) => str(a))
-            : [""],
-      }))
-      : [{ ...EMPTY_DATA.experiences[0], id: uid() }];
-
-  const education =
-    Array.isArray(d.education) && d.education.length > 0
-      ? d.education.map((e) => ({
-        id: str(e?.id) || uid(),
-        degree: str(e?.degree),
-        school: str(e?.school),
-        period: str(e?.period),
-      }))
-      : [{ ...EMPTY_DATA.education[0], id: uid() }];
-
-  const languages =
-    Array.isArray(d.languages) && d.languages.length > 0
-      ? d.languages.map((l) => ({
-        id: str(l?.id) || uid(),
-        name: str(l?.name),
-        level: str(l?.level),
-      }))
-      : [{ ...EMPTY_DATA.languages[0], id: uid() }];
-
+  const flagQr: unknown = source.showQrOnPdf;
   return {
-    personal: {
-      fullName: str(p.fullName),
-      title: str(p.title),
-      email: str(p.email),
-      phone: str(p.phone),
-      location: str(p.location),
-      linkedin: str(p.linkedin),
-    },
-    summary: str(d.summary),
-    experiences,
-    education,
-    skills: Array.isArray(d.skills) ? d.skills.map((s) => str(s)).filter(Boolean) : [],
-    languages,
+    fullName: texte(identite?.fullName ?? identite?.nom ?? identite?.name),
+    jobTitle: texte(identite?.jobTitle ?? identite?.titre ?? identite?.poste),
+    email: texte(identite?.email),
+    phone: texte(identite?.phone ?? identite?.telephone),
+    location: texte(identite?.location ?? identite?.ville ?? identite?.adresse),
+    website: texte(identite?.website ?? identite?.siteWeb),
+    photoUrl: texte(identite?.photoUrl ?? identite?.photo),
+    resume: texte(source.resume ?? source["résumé"] ?? source.summary ?? source.profil),
+    experiences: liste(source.experiences ?? source.experience)
+      .map((item) => {
+        const entry = objet(item);
+        return {
+          poste: texte(entry?.poste ?? entry?.titre ?? entry?.title),
+          entreprise: texte(entry?.entreprise ?? entry?.company),
+          periode: texte(entry?.periode ?? entry?.dates ?? entry?.period),
+          description: texte(entry?.description ?? entry?.details),
+        };
+      })
+      .filter((item) => item.poste !== "" || item.entreprise !== "" || item.description !== ""),
+    formations: liste(source.formations ?? source.education)
+      .map((item) => {
+        const entry = objet(item);
+        return {
+          diplome: texte(entry?.diplome ?? entry?.titre ?? entry?.degree),
+          etablissement: texte(entry?.etablissement ?? entry?.school ?? entry?.ecole),
+          periode: texte(entry?.periode ?? entry?.dates ?? entry?.period),
+        };
+      })
+      .filter((item) => item.diplome !== "" || item.etablissement !== ""),
+    competencesTexte,
+    langues: liste(source.langues ?? source.languages)
+      .map((item) => {
+        if (typeof item === "string") {
+          const parts = item.split(/[:\-–—]/);
+          return { nom: (parts[0] ?? "").trim(), niveau: (parts[1] ?? "").trim() };
+        }
+        const entry = objet(item);
+        return {
+          nom: texte(entry?.nom ?? entry?.name ?? entry?.langue),
+          niveau: texte(entry?.niveau ?? entry?.level),
+        };
+      })
+      .filter((item) => item.nom !== ""),
+    showQrOnPdf: typeof flagQr === "boolean" ? flagQr : true,
   };
 }
 
-function sanitizeDesign(raw: unknown): CvDesign {
-  const d = (raw ?? {}) as Partial<CvDesign>;
-  const template = (["modern", "sleek", "bold", "clean"] as TemplateId[]).includes(
-    d.template as TemplateId
-  )
-    ? (d.template as TemplateId)
-    : DEFAULT_DESIGN.template;
-  const headingFont = (Object.keys(FONT_FAMILIES) as FontKey[]).includes(d.headingFont as FontKey)
-    ? (d.headingFont as FontKey)
-    : DEFAULT_DESIGN.headingFont;
-  const bodyFont = (Object.keys(FONT_FAMILIES) as FontKey[]).includes(d.bodyFont as FontKey)
-    ? (d.bodyFont as FontKey)
-    : DEFAULT_DESIGN.bodyFont;
-  const scale = [0.92, 1, 1.08].includes(d.scale as number) ? (d.scale as number) : 1;
-  const accent =
-    typeof d.accent === "string" && /^#[0-9a-fA-F]{6}$/.test(d.accent)
-      ? d.accent
-      : DEFAULT_DESIGN.accent;
-  return { template, headingFont, bodyFont, scale, accent };
-}
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const m = hex.trim().replace("#", "");
-  const full = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
-  if (!/^[0-9a-fA-F]{6}$/.test(full)) return null;
+/** Construit le cvData canonique envoyé à l'API et au composant PDF. */
+function buildCvData(draft: DraftCv): CvData {
   return {
-    r: parseInt(full.slice(0, 2), 16),
-    g: parseInt(full.slice(2, 4), 16),
-    b: parseInt(full.slice(4, 6), 16),
+    identite: {
+      fullName: draft.fullName.trim(),
+      jobTitle: draft.jobTitle.trim(),
+      email: draft.email.trim(),
+      phone: draft.phone.trim(),
+      location: draft.location.trim(),
+      website: draft.website.trim(),
+      photoUrl: draft.photoUrl.trim(),
+    },
+    resume: draft.resume.trim(),
+    experiences: draft.experiences
+      .map((item) => ({
+        poste: item.poste.trim(),
+        entreprise: item.entreprise.trim(),
+        periode: item.periode.trim(),
+        description: item.description.trim(),
+      }))
+      .filter((item) => item.poste !== "" || item.entreprise !== "" || item.description !== ""),
+    formations: draft.formations
+      .map((item) => ({
+        diplome: item.diplome.trim(),
+        etablissement: item.etablissement.trim(),
+        periode: item.periode.trim(),
+      }))
+      .filter((item) => item.diplome !== "" || item.etablissement !== ""),
+    competences: draft.competencesTexte
+      .split(/[,;]/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+    langues: draft.langues
+      .map((item) => ({ nom: item.nom.trim(), niveau: item.niveau.trim() }))
+      .filter((item) => item.nom !== ""),
+    showQrOnPdf: draft.showQrOnPdf,
   };
 }
 
-/** Luminance perçue (0 = sombre, 1 = clair). */
-function luminance(hex: string): number {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return 0;
-  return (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+async function genererQr(url: string): Promise<string | null> {
+  try {
+    return await toDataURL(url, { color: { dark: "#051937", light: "#FFFFFF" }, margin: 1, width: 320 });
+  } catch {
+    return null;
+  }
 }
 
-/** Couleur de texte lisible posée sur un fond `hex`. */
-function onColor(hex: string): string {
-  return luminance(hex) > 0.6 ? "#051937" : "#ffffff";
+async function lireErreur(res: Response): Promise<string> {
+  try {
+    const data = (await res.json()) as { error?: unknown };
+    return typeof data.error === "string" ? data.error : "Opération impossible.";
+  } catch {
+    return "Opération impossible.";
+  }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Bouton « Améliorer avec l'IA » local (champ par champ)             */
-/* ------------------------------------------------------------------ */
+/* ─────────────────────────── Champs réutilisables ─────────────────────────── */
 
-function FieldImproveButton({
+function Champ({
   label,
   value,
-  context,
-  onImproved,
-  compact,
+  onChange,
+  placeholder,
+  type = "text",
 }: {
-  label: string;
+  label?: string;
   value: string;
-  context?: string;
-  onImproved: (text: string) => void;
-  compact?: boolean;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
 }) {
-  const [loading, setLoading] = useState(false);
-
-  async function handleClick() {
-    if (value.trim().length < 5) {
-      toast.error("Écrivez d'abord quelques mots à améliorer.");
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await fetch("/api/improve-text", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label, text: value, context }),
-      });
-      const json = (await res.json().catch(() => null)) as
-        | { improved?: string; error?: string }
-        | null;
-      if (!res.ok || !json?.improved) {
-        toast.error(json?.error ?? "L'amélioration IA a échoué. Réessayez.");
-        return;
-      }
-      onImproved(json.improved);
-      toast.success("Texte amélioré par l'IA");
-    } catch {
-      toast.error("Impossible de joindre le serveur. Réessayez.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={loading}
-      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-gold/70 bg-gold-soft font-semibold text-accent-foreground transition-colors hover:bg-gold hover:text-navy disabled:cursor-not-allowed disabled:opacity-60 ${compact ? "px-2.5 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
-        }`}
-      aria-label={`Améliorer avec l'IA : ${label}`}
-    >
-      {loading ? (
-        <IconLoader2 className="size-3.5 animate-spin" />
-      ) : (
-        <IconWand className="size-3.5" />
-      )}
-      {loading ? "Amélioration…" : "Améliorer"}
-    </button>
+    <label className="block">
+      {label ? (
+        <span className="mb-1.5 block text-sm font-semibold text-[#051937]">{label}</span>
+      ) : null}
+      <input
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-[#FFC107] focus:ring-2 focus:ring-[#FFC107]/30"
+      />
+    </label>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Feuille CV — les 4 modèles                                         */
-/* ------------------------------------------------------------------ */
-
-interface Computed {
-  accent: string;
-  onAccent: string;
-  heading: string;
-  body: string;
-  contactItems: string[];
-  exps: CvBuilderData["experiences"];
-  edus: CvBuilderData["education"];
-  langs: CvBuilderData["languages"];
-}
-
-function computeSheet(data: CvBuilderData, design: CvDesign): Computed {
-  const { personal } = data;
-  return {
-    accent: design.accent,
-    onAccent: onColor(design.accent),
-    heading: FONT_FAMILIES[design.headingFont].stack,
-    body: FONT_FAMILIES[design.bodyFont].stack,
-    contactItems: [personal.email, personal.phone, personal.location, personal.linkedin]
-      .map((v) => v.trim())
-      .filter(Boolean),
-    exps: data.experiences.filter(
-      (e) =>
-        e.role.trim() ||
-        e.company.trim() ||
-        e.achievements.some((a) => a.trim())
-    ),
-    edus: data.education.filter((e) => e.degree.trim() || e.school.trim()),
-    langs: data.languages.filter((l) => l.name.trim()),
-  };
-}
-
-function SheetFooter() {
+function Zone({
+  label,
+  value,
+  onChange,
+  rows = 4,
+  placeholder,
+  hint,
+}: {
+  label?: string;
+  value: string;
+  onChange: (v: string) => void;
+  rows?: number;
+  placeholder?: string;
+  hint?: string;
+}) {
   return (
-    <p
-      style={{
-        marginTop: "1.3em",
-        paddingTop: "0.55em",
-        borderTop: "1px solid #e2e8f0",
-        fontSize: "0.6em",
-        color: "#94a3b8",
-        textAlign: "center",
-      }}
-    >
-      Optimisé avec NexiRole
-    </p>
+    <label className="block">
+      {label ? (
+        <span className="mb-1.5 block text-sm font-semibold text-[#051937]">{label}</span>
+      ) : null}
+      <textarea
+        rows={rows}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        className="w-full resize-y rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-700 outline-none transition focus:border-[#FFC107] focus:ring-2 focus:ring-[#FFC107]/30"
+      />
+      {hint ? <span className="mt-1 block text-xs text-slate-400">{hint}</span> : null}
+    </label>
   );
 }
 
-function TemplateModern({ data, design }: SheetProps) {
-  const c = computeSheet(data, design);
-  const { personal, summary, skills } = data;
-
-  const sectionTitle: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    marginBottom: "0.5em",
-  };
-  const barStyle: CSSProperties = {
-    width: "16px",
-    height: "3px",
-    background: c.accent,
-    borderRadius: "2px",
-    flexShrink: 0,
-  };
-  const labelStyle: CSSProperties = {
-    fontSize: "0.72em",
-    fontWeight: 800,
-    letterSpacing: "0.14em",
-    textTransform: "uppercase",
-    color: "#051937",
-  };
-  const chipBorder = c.onAccent === "#ffffff" ? "rgba(255,255,255,0.45)" : "rgba(5,25,55,0.35)";
-
+function Carte({
+  icon: Icon,
+  titre,
+  sousTitre,
+  children,
+}: {
+  icon: typeof IconUser;
+  titre: string;
+  sousTitre?: string;
+  children: ReactNode;
+}) {
   return (
-    <div style={{ display: "flex", minHeight: "inherit", textAlign: "left" }}>
-      {/* Colonne latérale colorée */}
-      <aside
-        style={{
-          width: "33%",
-          background: c.accent,
-          color: c.onAccent,
-          padding: "1.5em 1.1em",
-          display: "flex",
-          flexDirection: "column",
-          gap: "1.15em",
-        }}
-      >
+    <section className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
+      <div className="mb-4 flex items-center gap-3 border-b border-slate-100 pb-4">
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FFC107]/20 text-[#051937]">
+          <Icon size={20} stroke={1.8} />
+        </span>
         <div>
-          <div style={{ fontFamily: c.heading, fontSize: "1.28em", fontWeight: 800, lineHeight: 1.15 }}>
-            {personal.fullName.trim() || "Votre Nom"}
-          </div>
-          <div
-            style={{
-              fontSize: "0.72em",
-              marginTop: "0.35em",
-              textTransform: "uppercase",
-              letterSpacing: "0.09em",
-              opacity: 0.88,
-              fontWeight: 600,
-            }}
-          >
-            {personal.title.trim() || "Titre professionnel"}
-          </div>
-        </div>
-
-        {c.contactItems.length > 0 && (
-          <div>
-            <div style={{ fontSize: "0.6em", fontWeight: 800, letterSpacing: "0.16em", opacity: 0.75, marginBottom: "0.4em" }}>
-              CONTACT
-            </div>
-            {c.contactItems.map((item) => (
-              <div key={item} style={{ fontSize: "0.68em", marginBottom: "0.3em", wordBreak: "break-word" }}>
-                {item}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {skills.length > 0 && (
-          <div>
-            <div style={{ fontSize: "0.6em", fontWeight: 800, letterSpacing: "0.16em", opacity: 0.75, marginBottom: "0.4em" }}>
-              COMPÉTENCES
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
-              {skills.map((skill, i) => (
-                <span
-                  key={`${skill}-${i}`}
-                  style={{
-                    border: `1px solid ${chipBorder}`,
-                    borderRadius: "999px",
-                    padding: "1px 8px",
-                    fontSize: "0.62em",
-                    fontWeight: 600,
-                  }}
-                >
-                  {skill}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {c.langs.length > 0 && (
-          <div>
-            <div style={{ fontSize: "0.6em", fontWeight: 800, letterSpacing: "0.16em", opacity: 0.75, marginBottom: "0.4em" }}>
-              LANGUES
-            </div>
-            {c.langs.map((lang) => (
-              <div key={lang.id} style={{ fontSize: "0.68em", marginBottom: "0.25em" }}>
-                <span style={{ fontWeight: 700 }}>{lang.name}</span>
-                {lang.level.trim() ? <span style={{ opacity: 0.8 }}> — {lang.level}</span> : null}
-              </div>
-            ))}
-          </div>
-        )}
-      </aside>
-
-      {/* Colonne principale */}
-      <main style={{ flex: 1, minWidth: 0, padding: "1.45em 1.35em", color: "#1e293b" }}>
-        {summary.trim() && (
-          <section style={{ marginBottom: "1.1em" }}>
-            <div style={sectionTitle}>
-              <span style={barStyle} />
-              <span style={labelStyle}>Profil professionnel</span>
-            </div>
-            <p style={{ fontSize: "0.76em", lineHeight: 1.55, color: "#334155" }}>{summary}</p>
-          </section>
-        )}
-
-        {c.exps.length > 0 && (
-          <section style={{ marginBottom: "1.1em" }}>
-            <div style={sectionTitle}>
-              <span style={barStyle} />
-              <span style={labelStyle}>Expériences professionnelles</span>
-            </div>
-            {c.exps.map((exp) => (
-              <div key={exp.id} style={{ marginBottom: "0.85em" }}>
-                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
-                  <span style={{ fontFamily: c.heading, fontSize: "0.84em", fontWeight: 700, color: "#0f172a" }}>
-                    {exp.role.trim() || "Poste"}
-                  </span>
-                  <span style={{ fontSize: "0.64em", color: "#64748b", whiteSpace: "nowrap" }}>
-                    {exp.period}
-                  </span>
-                </div>
-                <div style={{ fontSize: "0.71em", fontWeight: 600, color: "#334155", marginTop: "1px" }}>
-                  {exp.company.trim() || "Entreprise"}
-                  {exp.location.trim() ? ` · ${exp.location}` : ""}
-                </div>
-                <ul style={{ marginTop: "3px", listStyle: "none", padding: 0 }}>
-                  {exp.achievements
-                    .filter((a) => a.trim())
-                    .map((a, i) => (
-                      <li
-                        key={i}
-                        style={{ display: "flex", gap: "6px", fontSize: "0.71em", lineHeight: 1.5, color: "#475569" }}
-                      >
-                        <span style={{ color: c.accent, fontWeight: 700 }}>•</span>
-                        <span>{a}</span>
-                      </li>
-                    ))}
-                </ul>
-              </div>
-            ))}
-          </section>
-        )}
-
-        {c.edus.length > 0 && (
-          <section>
-            <div style={sectionTitle}>
-              <span style={barStyle} />
-              <span style={labelStyle}>Formation</span>
-            </div>
-            {c.edus.map((edu) => (
-              <div key={edu.id} style={{ marginBottom: "0.6em" }}>
-                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
-                  <span style={{ fontSize: "0.8em", fontWeight: 700, color: "#0f172a" }}>
-                    {edu.degree.trim() || "Diplôme"}
-                  </span>
-                  <span style={{ fontSize: "0.64em", color: "#64748b", whiteSpace: "nowrap" }}>
-                    {edu.period}
-                  </span>
-                </div>
-                <div style={{ fontSize: "0.71em", color: "#475569" }}>{edu.school}</div>
-              </div>
-            ))}
-          </section>
-        )}
-
-        <SheetFooter />
-      </main>
-    </div>
-  );
-}
-
-function TemplateSleek({ data, design }: SheetProps) {
-  const c = computeSheet(data, design);
-  const { personal, summary, skills } = data;
-
-  const sectionTitle: CSSProperties = {
-    fontSize: "0.72em",
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: "0.18em",
-    color: "#0f172a",
-    borderBottom: "1px solid #e2e8f0",
-    paddingBottom: "3px",
-    marginBottom: "0.55em",
-  };
-  const accentDash: CSSProperties = { color: c.accent, marginRight: "5px", fontWeight: 800 };
-
-  return (
-    <div style={{ padding: "1.55em 1.65em", color: "#1f2937", textAlign: "left" }}>
-      <header style={{ textAlign: "center", paddingBottom: "0.85em" }}>
-        <div style={{ fontFamily: c.heading, fontSize: "1.5em", fontWeight: 700, color: "#0f172a", letterSpacing: "0.02em" }}>
-          {personal.fullName.trim() || "Votre Nom"}
-        </div>
-        <div style={{ fontSize: "0.74em", textTransform: "uppercase", letterSpacing: "0.22em", color: "#475569", marginTop: "0.3em" }}>
-          {personal.title.trim() || "Titre professionnel"}
-        </div>
-        <div
-          style={{
-            width: "46px",
-            height: "3px",
-            background: c.accent,
-            margin: "0.6em auto 0",
-            borderRadius: "2px",
-          }}
-        />
-        {c.contactItems.length > 0 && (
-          <div style={{ fontSize: "0.66em", color: "#64748b", marginTop: "0.5em" }}>
-            {c.contactItems.join("   ·   ")}
-          </div>
-        )}
-      </header>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1.62fr 1fr", gap: "1.25em", marginTop: "1em" }}>
-        {/* Colonne principale */}
-        <div>
-          {summary.trim() && (
-            <section style={{ marginBottom: "1em" }}>
-              <div style={sectionTitle}>
-                <span style={accentDash}>—</span>Profil
-              </div>
-              <p style={{ fontSize: "0.74em", lineHeight: 1.6, color: "#374151" }}>{summary}</p>
-            </section>
-          )}
-
-          {c.exps.length > 0 && (
-            <section style={{ marginBottom: "1em" }}>
-              <div style={sectionTitle}>
-                <span style={accentDash}>—</span>Expériences
-              </div>
-              {c.exps.map((exp) => (
-                <div key={exp.id} style={{ marginBottom: "0.8em" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
-                    <span style={{ fontFamily: c.heading, fontSize: "0.82em", fontWeight: 700, color: "#0f172a" }}>
-                      {exp.role.trim() || "Poste"}
-                    </span>
-                    <span style={{ fontSize: "0.63em", color: "#64748b", whiteSpace: "nowrap" }}>{exp.period}</span>
-                  </div>
-                  <div style={{ fontSize: "0.7em", color: "#475569", fontStyle: "italic", marginTop: "1px" }}>
-                    {exp.company.trim() || "Entreprise"}
-                    {exp.location.trim() ? ` · ${exp.location}` : ""}
-                  </div>
-                  <ul style={{ marginTop: "3px", listStyle: "none", padding: 0 }}>
-                    {exp.achievements
-                      .filter((a) => a.trim())
-                      .map((a, i) => (
-                        <li key={i} style={{ display: "flex", gap: "6px", fontSize: "0.7em", lineHeight: 1.5, color: "#4b5563" }}>
-                          <span style={{ color: c.accent }}>•</span>
-                          <span>{a}</span>
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-              ))}
-            </section>
-          )}
-
-          {c.edus.length > 0 && (
-            <section>
-              <div style={sectionTitle}>
-                <span style={accentDash}>—</span>Formation
-              </div>
-              {c.edus.map((edu) => (
-                <div key={edu.id} style={{ marginBottom: "0.55em" }}>
-                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
-                    <span style={{ fontSize: "0.78em", fontWeight: 700, color: "#0f172a" }}>
-                      {edu.degree.trim() || "Diplôme"}
-                    </span>
-                    <span style={{ fontSize: "0.63em", color: "#64748b", whiteSpace: "nowrap" }}>{edu.period}</span>
-                  </div>
-                  <div style={{ fontSize: "0.7em", color: "#475569" }}>{edu.school}</div>
-                </div>
-              ))}
-            </section>
-          )}
-        </div>
-
-        {/* Colonne secondaire */}
-        <div style={{ borderLeft: "1px solid #e2e8f0", paddingLeft: "1.1em" }}>
-          {c.contactItems.length > 0 && (
-            <section style={{ marginBottom: "1em" }}>
-              <div style={sectionTitle}>
-                <span style={accentDash}>—</span>Contact
-              </div>
-              {c.contactItems.map((item) => (
-                <div key={item} style={{ fontSize: "0.68em", color: "#4b5563", marginBottom: "0.3em", wordBreak: "break-word" }}>
-                  {item}
-                </div>
-              ))}
-            </section>
-          )}
-
-          {skills.length > 0 && (
-            <section style={{ marginBottom: "1em" }}>
-              <div style={sectionTitle}>
-                <span style={accentDash}>—</span>Compétences
-              </div>
-              {skills.map((skill, i) => (
-                <div key={`${skill}-${i}`} style={{ display: "flex", gap: "6px", fontSize: "0.7em", color: "#4b5563", marginBottom: "0.28em" }}>
-                  <span style={{ color: c.accent }}>•</span>
-                  <span>{skill}</span>
-                </div>
-              ))}
-            </section>
-          )}
-
-          {c.langs.length > 0 && (
-            <section>
-              <div style={sectionTitle}>
-                <span style={accentDash}>—</span>Langues
-              </div>
-              {c.langs.map((lang) => (
-                <div key={lang.id} style={{ fontSize: "0.7em", color: "#4b5563", marginBottom: "0.28em" }}>
-                  <span style={{ fontWeight: 700, color: "#0f172a" }}>{lang.name}</span>
-                  {lang.level.trim() ? ` — ${lang.level}` : ""}
-                </div>
-              ))}
-            </section>
-          )}
+          <h2 className="text-base font-bold text-[#051937]">{titre}</h2>
+          {sousTitre ? <p className="text-xs text-slate-500">{sousTitre}</p> : null}
         </div>
       </div>
-
-      <SheetFooter />
-    </div>
+      {children}
+    </section>
   );
 }
 
-function TemplateBold({ data, design }: SheetProps) {
-  const c = computeSheet(data, design);
-  const { personal, summary, skills } = data;
-
-  const titleRow: CSSProperties = {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    margin: "1.15em 0 0.55em",
-  };
-  const barStyle: CSSProperties = {
-    width: "22px",
-    height: "3px",
-    background: c.accent,
-    borderRadius: "2px",
-    flexShrink: 0,
-  };
-  const labelStyle: CSSProperties = {
-    fontSize: "0.86em",
-    fontWeight: 800,
-    textTransform: "uppercase",
-    letterSpacing: "0.1em",
-    color: "#0f172a",
-  };
-
-  return (
-    <div style={{ padding: "1.6em 1.7em", color: "#111827", textAlign: "left" }}>
-      <header>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: "10px" }}>
-          <span
-            style={{
-              width: "14px",
-              height: "14px",
-              background: c.accent,
-              borderRadius: "3px",
-              marginTop: "0.45em",
-              flexShrink: 0,
-            }}
-          />
-          <div style={{ minWidth: 0 }}>
-            <div
-              style={{
-                fontFamily: c.heading,
-                fontSize: "1.85em",
-                fontWeight: 800,
-                textTransform: "uppercase",
-                lineHeight: 1.05,
-                color: "#0f172a",
-              }}
-            >
-              {personal.fullName.trim() || "Votre Nom"}
-            </div>
-            <div
-              style={{
-                fontSize: "0.76em",
-                fontWeight: 700,
-                textTransform: "uppercase",
-                letterSpacing: "0.18em",
-                color: "#475569",
-                marginTop: "0.3em",
-              }}
-            >
-              {personal.title.trim() || "Titre professionnel"}
-            </div>
-          </div>
-        </div>
-        {c.contactItems.length > 0 && (
-          <div
-            style={{
-              fontSize: "0.68em",
-              color: "#64748b",
-              marginTop: "0.7em",
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "3px 14px",
-            }}
-          >
-            {c.contactItems.map((item) => (
-              <span key={item}>{item}</span>
-            ))}
-          </div>
-        )}
-      </header>
-
-      {summary.trim() && (
-        <section>
-          <div style={titleRow}>
-            <span style={barStyle} />
-            <span style={labelStyle}>Profil</span>
-          </div>
-          <p style={{ fontSize: "0.75em", lineHeight: 1.6, color: "#374151" }}>{summary}</p>
-        </section>
-      )}
-
-      {c.exps.length > 0 && (
-        <section>
-          <div style={titleRow}>
-            <span style={barStyle} />
-            <span style={labelStyle}>Expériences</span>
-          </div>
-          {c.exps.map((exp) => (
-            <div key={exp.id} style={{ marginBottom: "0.85em" }}>
-              <div style={{ fontSize: "0.88em", fontWeight: 800, color: "#0f172a" }}>
-                {exp.role.trim() || "Poste"}
-              </div>
-              <div
-                style={{
-                  fontSize: "0.64em",
-                  fontWeight: 600,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.08em",
-                  color: "#64748b",
-                  marginTop: "1px",
-                }}
-              >
-                {[exp.company.trim() || "Entreprise", exp.period.trim(), exp.location.trim()]
-                  .filter(Boolean)
-                  .join("  ·  ")}
-              </div>
-              <ul style={{ marginTop: "4px", listStyle: "none", padding: 0 }}>
-                {exp.achievements
-                  .filter((a) => a.trim())
-                  .map((a, i) => (
-                    <li key={i} style={{ display: "flex", gap: "6px", fontSize: "0.71em", lineHeight: 1.5, color: "#4b5563" }}>
-                      <span style={{ color: c.accent, fontWeight: 800 }}>■</span>
-                      <span>{a}</span>
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {skills.length > 0 && (
-        <section>
-          <div style={titleRow}>
-            <span style={barStyle} />
-            <span style={labelStyle}>Compétences</span>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-            {skills.map((skill, i) => (
-              <span
-                key={`${skill}-${i}`}
-                style={{
-                  border: "1.5px solid #0f172a",
-                  borderRadius: "999px",
-                  padding: "2px 10px",
-                  fontSize: "0.66em",
-                  fontWeight: 600,
-                  color: "#0f172a",
-                }}
-              >
-                {skill}
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {c.edus.length > 0 && (
-        <section>
-          <div style={titleRow}>
-            <span style={barStyle} />
-            <span style={labelStyle}>Formation</span>
-          </div>
-          {c.edus.map((edu) => (
-            <div key={edu.id} style={{ marginBottom: "0.55em", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
-              <div>
-                <span style={{ fontSize: "0.8em", fontWeight: 800, color: "#0f172a" }}>
-                  {edu.degree.trim() || "Diplôme"}
-                </span>
-                <span style={{ fontSize: "0.68em", color: "#475569" }}>
-                  {edu.school.trim() ? ` — ${edu.school}` : ""}
-                </span>
-              </div>
-              <span style={{ fontSize: "0.63em", color: "#64748b", whiteSpace: "nowrap" }}>{edu.period}</span>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {c.langs.length > 0 && (
-        <section>
-          <div style={titleRow}>
-            <span style={barStyle} />
-            <span style={labelStyle}>Langues</span>
-          </div>
-          <div style={{ fontSize: "0.72em", color: "#374151", lineHeight: 1.7 }}>
-            {c.langs
-              .map((lang) => (lang.level.trim() ? `${lang.name} — ${lang.level}` : lang.name))
-              .join("   ·   ")}
-          </div>
-        </section>
-      )}
-
-      <SheetFooter />
-    </div>
-  );
-}
-
-function TemplateClean({ data, design }: SheetProps) {
-  const c = computeSheet(data, design);
-  const { personal, summary, skills } = data;
-
-  const sectionTitle: CSSProperties = {
-    fontSize: "0.78em",
-    fontWeight: 800,
-    textTransform: "uppercase",
-    letterSpacing: "0.1em",
-    color: "#0f172a",
-    borderBottom: "1px solid #cbd5e1",
-    paddingBottom: "2px",
-    margin: "1em 0 0.5em",
-  };
-
-  return (
-    <div style={{ padding: "1.55em 1.6em", color: "#1f2937", textAlign: "left" }}>
-      <header style={{ borderBottom: "2px solid #0f172a", paddingBottom: "0.7em" }}>
-        <div style={{ fontFamily: c.heading, fontSize: "1.35em", fontWeight: 800, color: "#0f172a" }}>
-          {personal.fullName.trim() || "Votre Nom"}
-        </div>
-        <div style={{ fontSize: "0.84em", color: "#374151", marginTop: "2px" }}>
-          {personal.title.trim() || "Titre professionnel"}
-        </div>
-        {c.contactItems.length > 0 && (
-          <div style={{ fontSize: "0.7em", color: "#4b5563", marginTop: "6px" }}>
-            {c.contactItems.join("  |  ")}
-          </div>
-        )}
-      </header>
-
-      {summary.trim() && (
-        <section>
-          <div style={sectionTitle}>Profil professionnel</div>
-          <p style={{ fontSize: "0.76em", lineHeight: 1.6, color: "#374151" }}>{summary}</p>
-        </section>
-      )}
-
-      {c.exps.length > 0 && (
-        <section>
-          <div style={sectionTitle}>Expériences professionnelles</div>
-          {c.exps.map((exp) => (
-            <div key={exp.id} style={{ marginBottom: "0.75em" }}>
-              <div style={{ fontSize: "0.82em", fontWeight: 700, color: "#111827" }}>
-                {exp.role.trim() || "Poste"}
-              </div>
-              <div style={{ fontSize: "0.72em", color: "#4b5563", marginTop: "1px" }}>
-                {[exp.company.trim() || "Entreprise", exp.period.trim(), exp.location.trim()]
-                  .filter(Boolean)
-                  .join(" | ")}
-              </div>
-              <ul style={{ marginTop: "3px", listStyle: "none", padding: 0 }}>
-                {exp.achievements
-                  .filter((a) => a.trim())
-                  .map((a, i) => (
-                    <li key={i} style={{ display: "flex", gap: "6px", fontSize: "0.72em", lineHeight: 1.55, color: "#374151" }}>
-                      <span>-</span>
-                      <span>{a}</span>
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {skills.length > 0 && (
-        <section>
-          <div style={sectionTitle}>Compétences</div>
-          <p style={{ fontSize: "0.74em", lineHeight: 1.65, color: "#374151" }}>
-            {skills.join("  •  ")}
-          </p>
-        </section>
-      )}
-
-      {c.edus.length > 0 && (
-        <section>
-          <div style={sectionTitle}>Formation</div>
-          {c.edus.map((edu) => (
-            <div key={edu.id} style={{ marginBottom: "0.5em" }}>
-              <div style={{ fontSize: "0.78em", fontWeight: 700, color: "#111827" }}>
-                {edu.degree.trim() || "Diplôme"}
-              </div>
-              <div style={{ fontSize: "0.72em", color: "#4b5563" }}>
-                {[edu.school.trim(), edu.period.trim()].filter(Boolean).join(" | ")}
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {c.langs.length > 0 && (
-        <section>
-          <div style={sectionTitle}>Langues</div>
-          {c.langs.map((lang) => (
-            <div key={lang.id} style={{ fontSize: "0.73em", color: "#374151", marginBottom: "0.22em" }}>
-              <span style={{ fontWeight: 700, color: "#111827" }}>{lang.name}</span>
-              {lang.level.trim() ? ` — ${lang.level}` : ""}
-            </div>
-          ))}
-        </section>
-      )}
-
-      <SheetFooter />
-    </div>
-  );
-}
-
-function CvSheet({ data, design }: SheetProps) {
-  switch (design.template) {
-    case "sleek":
-      return <TemplateSleek data={data} design={design} />;
-    case "bold":
-      return <TemplateBold data={data} design={design} />;
-    case "clean":
-      return <TemplateClean data={data} design={design} />;
-    default:
-      return <TemplateModern data={data} design={design} />;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Page principale                                                    */
-/* ------------------------------------------------------------------ */
+/* ──────────────────────────────── La page ──────────────────────────────── */
 
 export default function CvBuilderPage() {
-  const [data, setData] = useState<CvBuilderData>(EMPTY_DATA);
-  const [design, setDesign] = useState<CvDesign>(DEFAULT_DESIGN);
-  const [step, setStep] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [skillInput, setSkillInput] = useState("");
-  const [downloading, setDownloading] = useState(false);
-  const [mobileTab, setMobileTab] = useState<"form" | "preview">("form");
-  const [zoomMode, setZoomMode] = useState<"fit" | "actual">("fit");
+  const [draft, setDraft] = useState<DraftCv>(DRAFT_VIDE);
+  const [chargement, setChargement] = useState(true);
+  const [publicInfo, setPublicInfo] = useState<InfoPublique | null>(null);
+  const [publicationEnCours, setPublicationEnCours] = useState(false);
+  const [messagePublication, setMessagePublication] = useState("");
+  const [copie, setCopie] = useState(false);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  const [pdfSnapshot, setPdfSnapshot] = useState<CvData | null>(null);
 
-  /* Modale d'amélioration IA globale */
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
-  const [aiResult, setAiResult] = useState<ImprovementResult | null>(null);
-  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  function majChamp(cle: "fullName" | "jobTitle" | "email" | "phone" | "location" | "website" | "photoUrl" | "resume" | "competencesTexte", valeur: string) {
+    setDraft((actuel) => ({ ...actuel, [cle]: valeur }));
+  }
+  function majExperience(index: number, champ: keyof DraftExperience, valeur: string) {
+    setDraft((actuel) => ({
+      ...actuel,
+      experiences: actuel.experiences.map((item, i) =>
+        i === index ? ({ ...item, [champ]: valeur } as DraftExperience) : item,
+      ),
+    }));
+  }
+  function majFormation(index: number, champ: keyof DraftFormation, valeur: string) {
+    setDraft((actuel) => ({
+      ...actuel,
+      formations: actuel.formations.map((item, i) =>
+        i === index ? ({ ...item, [champ]: valeur } as DraftFormation) : item,
+      ),
+    }));
+  }
+  function majLangue(index: number, champ: keyof DraftLangue, valeur: string) {
+    setDraft((actuel) => ({
+      ...actuel,
+      langues: actuel.langues.map((item, i) =>
+        i === index ? ({ ...item, [champ]: valeur } as DraftLangue) : item,
+      ),
+    }));
+  }
+  function ajouterExperience() {
+    setDraft((actuel) => ({
+      ...actuel,
+      experiences: [...actuel.experiences, { poste: "", entreprise: "", periode: "", description: "" }],
+    }));
+  }
+  function supprimerExperience(index: number) {
+    setDraft((actuel) => ({ ...actuel, experiences: actuel.experiences.filter((_, i) => i !== index) }));
+  }
+  function ajouterFormation() {
+    setDraft((actuel) => ({
+      ...actuel,
+      formations: [...actuel.formations, { diplome: "", etablissement: "", periode: "" }],
+    }));
+  }
+  function supprimerFormation(index: number) {
+    setDraft((actuel) => ({ ...actuel, formations: actuel.formations.filter((_, i) => i !== index) }));
+  }
+  function ajouterLangue() {
+    setDraft((actuel) => ({ ...actuel, langues: [...actuel.langues, { nom: "", niveau: "" }] }));
+  }
+  function supprimerLangue(index: number) {
+    setDraft((actuel) => ({ ...actuel, langues: actuel.langues.filter((_, i) => i !== index) }));
+  }
 
-  /* Aperçu : mise à l'échelle de la feuille A4 (794 px) */
-  const previewWrapRef = useRef<HTMLDivElement>(null);
-  const sheetRef = useRef<HTMLDivElement>(null);
-  const [wrapWidth, setWrapWidth] = useState(800);
-  const [sheetHeight, setSheetHeight] = useState(1123);
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => setMounted(true), []);
-
-  /* Chargement (migration v1 → v2 incluse) */
+  // Chargement initial : brouillon localStorage, puis config serveur /api/public-cv
   useEffect(() => {
-    try {
-      const savedV2 = window.localStorage.getItem(STORAGE_KEY);
-      if (savedV2) {
-        const parsed = JSON.parse(savedV2) as { data?: unknown; design?: unknown; step?: unknown };
-        setData(sanitizeData(parsed.data));
-        setDesign(sanitizeDesign(parsed.design));
-        if (typeof parsed.step === "number" && parsed.step >= 0 && parsed.step <= 5) {
-          setStep(parsed.step);
-        }
-      } else {
-        const savedV1 = window.localStorage.getItem(STORAGE_KEY_V1);
-        if (savedV1) {
-          setData(sanitizeData(JSON.parse(savedV1)));
-        }
-      }
-    } catch {
-      /* données locales corrompues : on repart du modèle vide */
-    }
-    setLoaded(true);
-  }, []);
-
-  /* Sauvegarde automatique (debounce 600 ms) — n'écrit JAMAIS dans l'état */
-  useEffect(() => {
-    if (!loaded) return;
-    setSaving(true);
-    const timer = window.setTimeout(() => {
+    let annule = false;
+    (async () => {
+      let brouillonLocal = false;
       try {
-        window.localStorage.setItem(
-          STORAGE_KEY,
-          JSON.stringify({ data, design, step })
-        );
+        const brut = window.localStorage.getItem(CLE_BROUILLON);
+        if (brut) {
+          const parse: unknown = JSON.parse(brut);
+          if (!annule) {
+            setDraft(draftDepuisCvData(parse));
+            brouillonLocal = true;
+          }
+        }
       } catch {
-        /* quota dépassé : on ignore */
+        // brouillon illisible : on repart du CV vide
       }
-      setSaving(false);
-    }, 600);
+      try {
+        const res = await fetch("/api/public-cv");
+        if (res.ok && !annule) {
+          const data = (await res.json()) as {
+            publicResume?: {
+              slug: string;
+              publicUrl: string;
+              viewsCount: number;
+              isPublic: boolean;
+              cvData?: unknown;
+            } | null;
+          };
+          if (data.publicResume) {
+            setPublicInfo({
+              slug: data.publicResume.slug,
+              publicUrl: data.publicResume.publicUrl,
+              viewsCount: data.publicResume.viewsCount,
+              isPublic: data.publicResume.isPublic,
+            });
+            if (!brouillonLocal && data.publicResume.cvData) {
+              setDraft(draftDepuisCvData(data.publicResume.cvData));
+            }
+          }
+        }
+      } catch {
+        // session indisponible : l'éditeur reste utilisable
+      }
+      if (!annule) setChargement(false);
+    })();
+    return () => {
+      annule = true;
+    };
+  }, []);
+
+  // Persistance du brouillon
+  useEffect(() => {
+    if (chargement) return;
+    try {
+      window.localStorage.setItem(CLE_BROUILLON, JSON.stringify(draft));
+    } catch {
+      // quota dépassé : on ignore
+    }
+  }, [draft, chargement]);
+
+  // Génération du QR code dès que l'URL publique existe et que l'interrupteur est actif
+  useEffect(() => {
+    const url = publicInfo?.publicUrl;
+    if (!url || !draft.showQrOnPdf) {
+      setQrCodeDataUrl(null);
+      return;
+    }
+    let annule = false;
+    genererQr(url).then((qr) => {
+      if (!annule && qr !== null) setQrCodeDataUrl(qr);
+    });
+    return () => {
+      annule = true;
+    };
+  }, [publicInfo?.publicUrl, draft.showQrOnPdf]);
+
+  // Instantané du CV pour le PDF (avec temporisation : pas de régénération à chaque frappe)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setPdfSnapshot(buildCvData(draft)), 700);
     return () => window.clearTimeout(timer);
-  }, [data, design, step, loaded]);
+  }, [draft]);
 
-  /* Mesure de la largeur du conteneur d'aperçu (responsive) */
-  useEffect(() => {
-    const el = previewWrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width;
-      if (width && width > 0) setWrapWidth(width);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  /* Mesure de la hauteur réelle de la feuille */
-  useEffect(() => {
-    const el = sheetRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      setSheetHeight(Math.max(1123, el.offsetHeight));
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const fitScale = Math.min(1, wrapWidth / 794);
-  const previewScale = zoomMode === "fit" ? fitScale : 1;
-  const previewViewportHeight =
-    zoomMode === "fit" ? sheetHeight * previewScale : Math.min(sheetHeight, 760);
-
-  /* ---------------------------------------------------------------- */
-  /*  Mise à jour de l'état (toujours fonctionnel = jamais bloqué)     */
-  /* ---------------------------------------------------------------- */
-
-  function update(patch: Partial<CvBuilderData>) {
-    setData((prev) => ({ ...prev, ...patch }));
-  }
-
-  function updatePersonal(patch: Partial<CvBuilderData["personal"]>) {
-    setData((prev) => ({ ...prev, personal: { ...prev.personal, ...patch } }));
-  }
-
-  function patchExperience(
-    id: string,
-    patcher: (current: CvBuilderData["experiences"][number]) => CvBuilderData["experiences"][number]
-  ) {
-    setData((prev) => ({
-      ...prev,
-      experiences: prev.experiences.map((item) => (item.id === id ? patcher(item) : item)),
-    }));
-  }
-
-  function patchEducation(
-    id: string,
-    patcher: (current: CvBuilderData["education"][number]) => CvBuilderData["education"][number]
-  ) {
-    setData((prev) => ({
-      ...prev,
-      education: prev.education.map((item) => (item.id === id ? patcher(item) : item)),
-    }));
-  }
-
-  function patchLanguage(
-    id: string,
-    patcher: (current: CvBuilderData["languages"][number]) => CvBuilderData["languages"][number]
-  ) {
-    setData((prev) => ({
-      ...prev,
-      languages: prev.languages.map((item) => (item.id === id ? patcher(item) : item)),
-    }));
-  }
-
-  function addExperience() {
-    setData((prev) => ({
-      ...prev,
-      experiences: [
-        ...prev.experiences,
-        {
-          ...EMPTY_DATA.experiences[0],
-          id: uid(),
-          achievements: [""],
-        },
-      ],
-    }));
-  }
-
-  function addEducation() {
-    setData((prev) => ({
-      ...prev,
-      education: [...prev.education, { id: uid(), degree: "", school: "", period: "" }],
-    }));
-  }
-
-  function addLanguage() {
-    setData((prev) => ({
-      ...prev,
-      languages: [...prev.languages, { id: uid(), name: "", level: "" }],
-    }));
-  }
-
-  function addSkill(raw: string) {
-    const skill = raw.trim().replace(/,+$/, "");
-    if (!skill) return;
-    setData((prev) => {
-      const exists = prev.skills.some((s) => s.toLowerCase() === skill.toLowerCase());
-      if (exists) return prev;
-      return { ...prev, skills: [...prev.skills, skill] };
-    });
-    setSkillInput("");
-  }
-
-  const contextHint = useMemo(
+  const pdfDocument = useMemo(
     () =>
-      [data.personal.title, data.personal.location].filter(Boolean).join(" — "),
-    [data.personal.title, data.personal.location]
+      pdfSnapshot === null ? null : (
+        <CvPdfDocument
+          cvData={pdfSnapshot}
+          templateId="modern-accent"
+          qrCodeDataUrl={qrCodeDataUrl}
+          publicUrl={publicInfo?.publicUrl ?? null}
+        />
+      ),
+    [pdfSnapshot, qrCodeDataUrl, publicInfo?.publicUrl],
   );
 
-  const cvHasContent = useMemo(() => {
-    return Boolean(
-      data.summary.trim().length > 30 ||
-      data.experiences.some((e) => e.role.trim() && e.achievements.some((a) => a.trim()))
-    );
-  }, [data.summary, data.experiences]);
+  const pdfFileName = useMemo(() => {
+    const base =
+      (publicInfo?.slug || draft.fullName || "cv")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "cv";
+    return `${base}-nexirole.pdf`;
+  }, [publicInfo?.slug, draft.fullName]);
 
-  /* ---------------------------------------------------------------- */
-  /*  Export PDF                                                      */
-  /* ---------------------------------------------------------------- */
-
-  function handlePrint() {
-    if (!data.personal.fullName.trim()) {
-      toast.error("Renseignez votre nom complet (étape 1) avant l'export.");
-      setStep(0);
-      return;
-    }
-    window.print();
-  }
-
-  async function handleDownloadPdfServer() {
-    if (!data.personal.fullName.trim()) {
-      toast.error("Renseignez votre nom complet (étape 1) avant l'export.");
-      setStep(0);
-      return;
-    }
-    setDownloading(true);
+  async function publierOuMettreAJour() {
+    setPublicationEnCours(true);
+    setMessagePublication("");
     try {
-      await downloadPdf(
-        "cv",
-        {
-          cv: {
-            title: data.personal.title.trim() || "Candidat",
-            summary: data.summary.trim(),
-            experiences: data.experiences
-              .filter((e) => e.role.trim() || e.company.trim())
-              .map((e) => ({
-                role: e.role.trim() || "Poste",
-                company: e.company.trim() || "Entreprise",
-                period: e.period.trim(),
-                location: e.location.trim(),
-                achievements: e.achievements.map((a) => a.trim()).filter(Boolean),
-              })),
-            education: data.education
-              .filter((e) => e.degree.trim() || e.school.trim())
-              .map((e) => ({
-                degree: e.degree.trim() || "Diplôme",
-                school: e.school.trim(),
-                period: e.period.trim(),
-              })),
-            skills: data.skills,
-            languages: data.languages
-              .filter((l) => l.name.trim())
-              .map((l) => ({ name: l.name.trim(), level: l.level.trim() || "Courant" })),
-            keywordsMatched: [],
-          },
-          candidateName: data.personal.fullName.trim(),
-          contact: {
-            email: data.personal.email.trim(),
-            phone: data.personal.phone.trim(),
-            location: data.personal.location.trim(),
-            linkedin: data.personal.linkedin.trim(),
-          },
-        },
-        `CV-${data.personal.fullName.trim() || "NexiRole"}`
-      );
-      toast.success("CV téléchargé (version ATS serveur)");
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "La génération du PDF a échoué."
-      );
-    } finally {
-      setDownloading(false);
-    }
-  }
-
-  /* ---------------------------------------------------------------- */
-  /*  Amélioration IA globale                                          */
-  /* ---------------------------------------------------------------- */
-
-  async function runGlobalImprove() {
-    if (!cvHasContent) {
-      toast.error("Remplissez d'abord votre résumé ou au moins une expérience.");
-      setStep(1);
-      return;
-    }
-    setAiOpen(true);
-    setAiLoading(true);
-    setAiError(null);
-    setAiResult(null);
-    try {
-      const improvable = data.experiences
-        .map((exp, index) => ({ exp, index }))
-        .filter(({ exp }) => exp.role.trim() || exp.company.trim());
-
-      const res = await fetch("/api/improve-cv", {
+      const res = await fetch("/api/public-cv", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cv: {
-            titre: data.personal.title,
-            nom: data.personal.fullName,
-            resume: data.summary,
-            experiences: improvable.map(({ exp, index }) => ({
-              index,
-              poste: exp.role,
-              entreprise: exp.company,
-              periode: exp.period,
-              realisations: exp.achievements.filter((a) => a.trim()),
-            })),
-            competences: data.skills,
-            langues: data.languages
-              .filter((l) => l.name.trim())
-              .map((l) => `${l.name} (${l.level})`),
-          },
-        }),
+        body: JSON.stringify({ cvData: buildCvData(draft) }),
       });
-      const json = (await res.json().catch(() => null)) as
-        | { result?: ImprovementResult; error?: string }
-        | null;
-      if (!res.ok || !json?.result) {
-        setAiError(json?.error ?? "L'amélioration IA a échoué. Réessayez dans un instant.");
+      if (!res.ok) {
+        setMessagePublication(await lireErreur(res));
         return;
       }
-      setAiResult(json.result);
-      setSelectedSkills(json.result.competences ?? []);
-    } catch {
-      setAiError("Impossible de joindre le serveur. Vérifiez votre connexion et réessayez.");
-    } finally {
-      setAiLoading(false);
-    }
-  }
-
-  function applyGlobalImprovement() {
-    if (!aiResult) return;
-    setData((prev) => {
-      const next: CvBuilderData = { ...prev };
-      if (aiResult.resume.trim()) next.summary = aiResult.resume.trim();
-      if (aiResult.titreSuggere.trim()) {
-        next.personal = { ...prev.personal, title: aiResult.titreSuggere.trim() };
+      const data = (await res.json()) as {
+        publicResume?: { slug: string; publicUrl: string; viewsCount: number; isPublic: boolean };
+      };
+      if (!data.publicResume) {
+        setMessagePublication("Réponse inattendue du serveur.");
+        return;
       }
-      next.experiences = prev.experiences.map((exp, index) => {
-        const imp = aiResult.experiences.find((x) => x.index === index);
-        if (!imp) return exp;
-        const cleaned = imp.realisations.map((s) => s.trim()).filter(Boolean);
-        return cleaned.length > 0 ? { ...exp, achievements: cleaned } : exp;
+      setPublicInfo({
+        slug: data.publicResume.slug,
+        publicUrl: data.publicResume.publicUrl,
+        viewsCount: data.publicResume.viewsCount,
+        isPublic: data.publicResume.isPublic,
       });
-      if (selectedSkills.length > 0) next.skills = selectedSkills;
-      return next;
-    });
-    toast.success("Améliorations appliquées à votre CV");
-    setAiOpen(false);
-  }
-
-  function toggleSelectedSkill(skill: string) {
-    setSelectedSkills((prev) =>
-      prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]
-    );
-  }
-
-  /* ---------------------------------------------------------------- */
-  /*  Rendu des étapes du formulaire                                   */
-  /* ---------------------------------------------------------------- */
-
-  const inputClass = "h-10 rounded-xl border-slate-200 text-sm";
-  const fieldLabelClass = "text-xs font-semibold text-navy";
-
-  function renderStep() {
-    switch (step) {
-      case 0:
-        return (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="sm:col-span-2">
-              <Label htmlFor="fullName" className={fieldLabelClass}>
-                Nom complet *
-              </Label>
-              <Input
-                id="fullName"
-                placeholder="Marie Dupont"
-                value={data.personal.fullName}
-                onChange={(evt) => updatePersonal({ fullName: evt.target.value })}
-                className={inputClass}
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <Label htmlFor="title" className={fieldLabelClass}>
-                Titre professionnel
-              </Label>
-              <Input
-                id="title"
-                placeholder="Ex : Développeuse Fullstack Senior"
-                value={data.personal.title}
-                onChange={(evt) => updatePersonal({ title: evt.target.value })}
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <Label htmlFor="email" className={fieldLabelClass}>
-                Email
-              </Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="marie.dupont@email.com"
-                value={data.personal.email}
-                onChange={(evt) => updatePersonal({ email: evt.target.value })}
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <Label htmlFor="phone" className={fieldLabelClass}>
-                Téléphone
-              </Label>
-              <Input
-                id="phone"
-                placeholder="+33 6 12 34 56 78"
-                value={data.personal.phone}
-                onChange={(evt) => updatePersonal({ phone: evt.target.value })}
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <Label htmlFor="location" className={fieldLabelClass}>
-                Ville / Pays
-              </Label>
-              <Input
-                id="location"
-                placeholder="Paris, France"
-                value={data.personal.location}
-                onChange={(evt) => updatePersonal({ location: evt.target.value })}
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <Label htmlFor="linkedin" className={fieldLabelClass}>
-                LinkedIn
-              </Label>
-              <Input
-                id="linkedin"
-                placeholder="linkedin.com/in/mariedupont"
-                value={data.personal.linkedin}
-                onChange={(evt) => updatePersonal({ linkedin: evt.target.value })}
-                className={inputClass}
-              />
-            </div>
-          </div>
-        );
-
-      case 1:
-        return (
-          <div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <Label htmlFor="summary" className={fieldLabelClass}>
-                Résumé professionnel — 3 à 4 phrases qui résument votre valeur
-              </Label>
-              <FieldImproveButton
-                label="Résumé professionnel"
-                value={data.summary}
-                context={contextHint}
-                onImproved={(text) => update({ summary: text })}
-              />
-            </div>
-            <Textarea
-              id="summary"
-              placeholder="Ex : Développeuse fullstack avec 6 ans d'expérience…"
-              value={data.summary}
-              onChange={(evt) => update({ summary: evt.target.value })}
-              rows={7}
-              className="nice-scrollbar mt-2 rounded-xl border-slate-200 text-sm"
-            />
-            <p className="mt-1.5 text-[11px] text-slate-400">
-              {data.summary.trim().split(/\s+/).filter(Boolean).length} mots —
-              cible recommandée : 40 à 70 mots.
-            </p>
-          </div>
-        );
-
-      case 2:
-        return (
-          <div className="space-y-5">
-            {data.experiences.map((exp, index) => (
-              <div
-                key={exp.id}
-                className="rounded-xl border border-slate-200 bg-ice/50 p-4"
-              >
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-bold uppercase tracking-wider text-navy">
-                    Expérience {index + 1}
-                  </p>
-                  {data.experiences.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        update({
-                          experiences: data.experiences.filter((item) => item.id !== exp.id),
-                        })
-                      }
-                      className="flex size-8 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
-                      aria-label={`Supprimer l'expérience ${index + 1}`}
-                    >
-                      <IconTrash className="size-4" />
-                    </button>
-                  )}
-                </div>
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <Label className={fieldLabelClass}>Poste occupé</Label>
-                    <Input
-                      placeholder="Développeur Frontend"
-                      value={exp.role}
-                      onChange={(evt) =>
-                        patchExperience(exp.id, (current) => ({
-                          ...current,
-                          role: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                  <div>
-                    <Label className={fieldLabelClass}>Entreprise</Label>
-                    <Input
-                      placeholder="Acme Corp"
-                      value={exp.company}
-                      onChange={(evt) =>
-                        patchExperience(exp.id, (current) => ({
-                          ...current,
-                          company: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                  <div>
-                    <Label className={fieldLabelClass}>Période</Label>
-                    <Input
-                      placeholder="2022 — Aujourd'hui"
-                      value={exp.period}
-                      onChange={(evt) =>
-                        patchExperience(exp.id, (current) => ({
-                          ...current,
-                          period: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                  <div>
-                    <Label className={fieldLabelClass}>Lieu</Label>
-                    <Input
-                      placeholder="Paris / Remote"
-                      value={exp.location}
-                      onChange={(evt) =>
-                        patchExperience(exp.id, (current) => ({
-                          ...current,
-                          location: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-3">
-                  <Label className={fieldLabelClass}>Réalisations &amp; missions</Label>
-                  <div className="mt-1.5 space-y-2">
-                    {exp.achievements.map((achievement, aIndex) => (
-                      <div key={aIndex} className="flex items-start gap-2">
-                        <Textarea
-                          placeholder="Ex : Refonte du front-end SaaS : -40 % de temps de chargement…"
-                          value={achievement}
-                          onChange={(evt) =>
-                            patchExperience(exp.id, (current) => ({
-                              ...current,
-                              achievements: current.achievements.map((a, i) =>
-                                i === aIndex ? evt.target.value : a
-                              ),
-                            }))
-                          }
-                          rows={2}
-                          className="nice-scrollbar flex-1 rounded-xl border-slate-200 text-sm"
-                        />
-                        <div className="flex flex-col gap-1.5">
-                          <FieldImproveButton
-                            compact
-                            label={`Réalisation ${aIndex + 1} (${exp.role || "poste"})`}
-                            value={achievement}
-                            context={contextHint}
-                            onImproved={(text) =>
-                              patchExperience(exp.id, (current) => ({
-                                ...current,
-                                achievements: current.achievements.map((a, i) =>
-                                  i === aIndex ? text : a
-                                ),
-                              }))
-                            }
-                          />
-                          {exp.achievements.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                patchExperience(exp.id, (current) => ({
-                                  ...current,
-                                  achievements: current.achievements.filter(
-                                    (_, i) => i !== aIndex
-                                  ),
-                                }))
-                              }
-                              className="mx-auto flex size-7 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
-                              aria-label={`Supprimer la réalisation ${aIndex + 1}`}
-                            >
-                              <IconX className="size-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      patchExperience(exp.id, (current) => ({
-                        ...current,
-                        achievements: [...current.achievements, ""],
-                      }))
-                    }
-                    className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-navy underline decoration-gold decoration-2 underline-offset-4"
-                  >
-                    <IconCirclePlus className="size-3.5 text-gold-dark" />
-                    Ajouter une réalisation
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            <Button
-              type="button"
-              onClick={addExperience}
-              variant="outline"
-              className="h-10 w-full rounded-xl border-dashed border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
-            >
-              <IconCirclePlus className="mr-2 size-4 text-gold-dark" />
-              Ajouter une expérience
-            </Button>
-          </div>
-        );
-
-      case 3:
-        return (
-          <div className="space-y-4">
-            {data.education.map((edu, index) => (
-              <div key={edu.id} className="rounded-xl border border-slate-200 bg-ice/50 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs font-bold uppercase tracking-wider text-navy">
-                    Formation {index + 1}
-                  </p>
-                  {data.education.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        update({
-                          education: data.education.filter((item) => item.id !== edu.id),
-                        })
-                      }
-                      className="flex size-8 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
-                      aria-label={`Supprimer la formation ${index + 1}`}
-                    >
-                      <IconTrash className="size-4" />
-                    </button>
-                  )}
-                </div>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <Label className={fieldLabelClass}>Diplôme / Formation</Label>
-                    <Input
-                      placeholder="Master Informatique"
-                      value={edu.degree}
-                      onChange={(evt) =>
-                        patchEducation(edu.id, (current) => ({
-                          ...current,
-                          degree: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                  <div>
-                    <Label className={fieldLabelClass}>Établissement</Label>
-                    <Input
-                      placeholder="Université Paris-Saclay"
-                      value={edu.school}
-                      onChange={(evt) =>
-                        patchEducation(edu.id, (current) => ({
-                          ...current,
-                          school: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <Label className={fieldLabelClass}>Période</Label>
-                    <Input
-                      placeholder="2018 — 2020"
-                      value={edu.period}
-                      onChange={(evt) =>
-                        patchEducation(edu.id, (current) => ({
-                          ...current,
-                          period: evt.target.value,
-                        }))
-                      }
-                      className={`${inputClass} mt-1`}
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            <Button
-              type="button"
-              onClick={addEducation}
-              variant="outline"
-              className="h-10 w-full rounded-xl border-dashed border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
-            >
-              <IconCirclePlus className="mr-2 size-4 text-gold-dark" />
-              Ajouter une formation
-            </Button>
-          </div>
-        );
-
-      case 4:
-        return (
-          <div className="space-y-6">
-            <div>
-              <Label htmlFor="skill-input" className={fieldLabelClass}>
-                Compétences — appuyez sur Entrée pour en ajouter
-              </Label>
-              <Input
-                id="skill-input"
-                placeholder="Ex : TypeScript, React, Gestion de projet…"
-                value={skillInput}
-                onChange={(evt) => setSkillInput(evt.target.value)}
-                onKeyDown={(evt) => {
-                  if (evt.key === "Enter") {
-                    evt.preventDefault();
-                    addSkill(skillInput);
-                  }
-                }}
-                className={`${inputClass} mt-1.5`}
-              />
-              {data.skills.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {data.skills.map((skill, i) => (
-                    <span
-                      key={`${skill}-${i}`}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-ice px-3 py-1.5 text-xs font-medium text-navy"
-                    >
-                      {skill}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          update({
-                            skills: data.skills.filter((_, idx) => idx !== i),
-                          })
-                        }
-                        className="text-slate-400 transition-colors hover:text-red-500"
-                        aria-label={`Retirer la compétence ${skill}`}
-                      >
-                        <IconX className="size-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-              <p className="mt-3 text-[11px] text-slate-400">
-                Conseil : les 5 premières compétences sont les plus visibles par
-                les robots ATS — mettez d&apos;abord celles qui correspondent à
-                vos offres cibles.
-              </p>
-            </div>
-
-            <div className="border-t border-slate-100 pt-5">
-              <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Langues
-              </p>
-              <div className="mt-3 space-y-3">
-                {data.languages.map((lang, index) => (
-                  <div key={lang.id} className="flex items-end gap-3">
-                    <div className="flex-1">
-                      <Label className={fieldLabelClass}>Langue {index + 1}</Label>
-                      <Input
-                        placeholder="Anglais"
-                        value={lang.name}
-                        onChange={(evt) =>
-                          patchLanguage(lang.id, (current) => ({
-                            ...current,
-                            name: evt.target.value,
-                          }))
-                        }
-                        className={`${inputClass} mt-1`}
-                      />
-                    </div>
-                    <div className="w-40 sm:w-44">
-                      <Label className={fieldLabelClass}>Niveau</Label>
-                      <Input
-                        placeholder="C1 — Courant"
-                        value={lang.level}
-                        onChange={(evt) =>
-                          patchLanguage(lang.id, (current) => ({
-                            ...current,
-                            level: evt.target.value,
-                          }))
-                        }
-                        className={`${inputClass} mt-1`}
-                      />
-                    </div>
-                    {data.languages.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          update({
-                            languages: data.languages.filter((item) => item.id !== lang.id),
-                          })
-                        }
-                        className="mb-1 flex size-9 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500"
-                        aria-label={`Supprimer la langue ${index + 1}`}
-                      >
-                        <IconTrash className="size-4" />
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <Button
-                type="button"
-                onClick={addLanguage}
-                variant="outline"
-                className="mt-4 h-10 w-full rounded-xl border-dashed border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50 sm:w-auto sm:px-5"
-              >
-                <IconCirclePlus className="mr-2 size-4 text-gold-dark" />
-                Ajouter une langue
-              </Button>
-            </div>
-          </div>
-        );
-
-      case 5:
-        return (
-          <div className="space-y-7">
-            {/* Modèles */}
-            <div>
-              <p className={fieldLabelClass}>Modèle de CV</p>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                {TEMPLATES.map((tpl) => {
-                  const active = design.template === tpl.id;
-                  return (
-                    <button
-                      key={tpl.id}
-                      type="button"
-                      onClick={() => setDesign((prev) => ({ ...prev, template: tpl.id }))}
-                      className={`relative rounded-xl border p-3 text-left transition-all ${active
-                        ? "border-navy bg-navy/[0.04] ring-2 ring-navy"
-                        : "border-slate-200 bg-white hover:border-navy/40"
-                        }`}
-                      aria-pressed={active}
-                    >
-                      {active && (
-                        <span className="absolute right-2 top-2 flex size-5 items-center justify-center rounded-full bg-navy text-white">
-                          <IconCheck className="size-3" />
-                        </span>
-                      )}
-                      <p className="text-sm font-bold text-navy">{tpl.name}</p>
-                      <p className="mt-0.5 text-[11px] text-slate-500">{tpl.desc}</p>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Couleur d'accent */}
-            <div>
-              <p className={fieldLabelClass}>Couleur d&apos;accent</p>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {ACCENT_PRESETS.map((preset) => {
-                  const active = design.accent.toLowerCase() === preset.hex.toLowerCase();
-                  return (
-                    <button
-                      key={preset.hex}
-                      type="button"
-                      title={preset.name}
-                      onClick={() => setDesign((prev) => ({ ...prev, accent: preset.hex }))}
-                      className={`flex size-9 items-center justify-center rounded-full border-2 transition-all ${active ? "border-navy ring-2 ring-navy/30" : "border-transparent"
-                        }`}
-                      style={{ background: preset.hex }}
-                      aria-label={`Couleur ${preset.name}`}
-                      aria-pressed={active}
-                    >
-                      {active && <IconCheck className={`size-4 ${onColor(preset.hex) === "#ffffff" ? "text-white" : "text-navy"}`} />}
-                    </button>
-                  );
-                })}
-                <label
-                  className="flex h-9 cursor-pointer items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-navy"
-                  title="Choisir une couleur personnalisée"
-                >
-                  Personnalisée
-                  <input
-                    type="color"
-                    value={design.accent}
-                    onChange={(evt) =>
-                      setDesign((prev) => ({ ...prev, accent: evt.target.value }))
-                    }
-                    className="size-6 cursor-pointer rounded-full border-0 bg-transparent p-0"
-                    aria-label="Couleur personnalisée"
-                  />
-                </label>
-                <span className="rounded-full bg-slate-100 px-2.5 py-1 font-mono text-[11px] text-slate-500">
-                  {design.accent.toUpperCase()}
-                </span>
-              </div>
-            </div>
-
-            {/* Polices */}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <Label htmlFor="heading-font" className={fieldLabelClass}>
-                  Police des titres
-                </Label>
-                <select
-                  id="heading-font"
-                  value={design.headingFont}
-                  onChange={(evt) =>
-                    setDesign((prev) => ({
-                      ...prev,
-                      headingFont: evt.target.value as FontKey,
-                    }))
-                  }
-                  className={`${inputClass} mt-1.5 w-full cursor-pointer rounded-xl border border-slate-200 bg-white px-3 text-sm text-navy`}
-                >
-                  {(Object.keys(FONT_FAMILIES) as FontKey[]).map((key) => (
-                    <option key={key} value={key}>
-                      {FONT_FAMILIES[key].label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <Label htmlFor="body-font" className={fieldLabelClass}>
-                  Police du texte
-                </Label>
-                <select
-                  id="body-font"
-                  value={design.bodyFont}
-                  onChange={(evt) =>
-                    setDesign((prev) => ({
-                      ...prev,
-                      bodyFont: evt.target.value as FontKey,
-                    }))
-                  }
-                  className={`${inputClass} mt-1.5 w-full cursor-pointer rounded-xl border border-slate-200 bg-white px-3 text-sm text-navy`}
-                >
-                  {(Object.keys(FONT_FAMILIES) as FontKey[]).map((key) => (
-                    <option key={key} value={key}>
-                      {FONT_FAMILIES[key].label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Taille du texte */}
-            <div>
-              <p className={fieldLabelClass}>Taille du texte</p>
-              <div className="mt-2 inline-flex overflow-hidden rounded-xl border border-slate-200">
-                {SIZES.map((size) => {
-                  const active = design.scale === size.value;
-                  return (
-                    <button
-                      key={size.label}
-                      type="button"
-                      onClick={() => setDesign((prev) => ({ ...prev, scale: size.value }))}
-                      className={`px-5 py-2 text-xs font-semibold transition-colors ${active ? "bg-navy text-white" : "bg-white text-slate-600 hover:bg-slate-50"
-                        }`}
-                      aria-pressed={active}
-                    >
-                      {size.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setDesign(DEFAULT_DESIGN)}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 underline decoration-slate-300 underline-offset-4 hover:text-navy"
-            >
-              Réinitialiser le design
-            </button>
-          </div>
-        );
-
-      default:
-        return null;
+    } catch {
+      setMessagePublication("Réseau indisponible. Vérifiez votre connexion puis réessayez.");
+    } finally {
+      setPublicationEnCours(false);
     }
   }
 
-  /* ---------------------------------------------------------------- */
-  /*  Rendu global                                                     */
-  /* ---------------------------------------------------------------- */
+  async function changerVisibilite(next: boolean) {
+    if (!publicInfo) return;
+    try {
+      const res = await fetch("/api/public-cv", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isPublic: next }),
+      });
+      if (res.ok) setPublicInfo({ ...publicInfo, isPublic: next });
+    } catch {
+      // silencieux : l'interrupteur reste sur son état serveur au prochain chargement
+    }
+  }
 
-  const saveLabel = !loaded
-    ? "Chargement…"
-    : saving
-      ? "Sauvegarde automatique…"
-      : "Sauvegarde automatique activée";
+  async function actualiserVues() {
+    try {
+      const res = await fetch("/api/public-cv");
+      if (!res.ok) return;
+      const data = (await res.json()) as { publicResume?: InfoPublique | null };
+      if (data.publicResume) setPublicInfo(data.publicResume);
+    } catch {
+      // silencieux
+    }
+  }
+
+  async function copierLien() {
+    if (!publicInfo) return;
+    try {
+      await navigator.clipboard.writeText(publicInfo.publicUrl);
+    } catch {
+      const zone = document.createElement("textarea");
+      zone.value = publicInfo.publicUrl;
+      document.body.appendChild(zone);
+      zone.select();
+      document.execCommand("copy");
+      document.body.removeChild(zone);
+    }
+    setCopie(true);
+    window.setTimeout(() => setCopie(false), 2000);
+  }
 
   return (
-    <div className="bg-ice">
-      {/* Styles d'impression : seule la feuille CV (portail) est imprimée, A4 exact.
-          Le portail est un enfant direct de <body> : pagination multi-pages native. */}
-      <style
-        dangerouslySetInnerHTML={{
-          __html: `
-@media print {
-  @page { size: A4; margin: 0; }
-  html, body { background: #ffffff !important; }
-  body > *:not(#cv-print-root) { display: none !important; }
-  #cv-print-root { display: block !important; }
-  #cv-print-sheet, #cv-print-sheet * {
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
-  }
-  #cv-print-sheet {
-    width: 210mm !important;
-    min-height: auto !important;
-    box-shadow: none !important;
-    border: none !important;
-    border-radius: 0 !important;
-  }
-}
-`,
-        }}
-      />
-
-      {/* En-tête */}
-      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3.5 sm:px-6 lg:px-8">
-          <Link
-            href="/dashboard"
-            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-navy transition-colors hover:bg-slate-50"
-          >
-            <IconArrowLeft className="size-3.5" />
-            <span className="hidden sm:inline">Retour au tableau de bord</span>
-            <span className="sm:hidden">Retour</span>
-          </Link>
-
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate font-heading text-base font-extrabold tracking-tight text-navy sm:text-lg">
-              Créateur de CV
-            </h1>
-            <p className="truncate text-[11px] text-slate-400">
-              Étape {step + 1}/{STEPS.length} · {saveLabel}
+    <div className="min-h-screen bg-[#F8FAFC]">
+      <div className="mx-auto w-full max-w-5xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-[#051937]">CV Builder</h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Composez votre CV, publiez-le en ligne et téléchargez le PDF avec QR code.
             </p>
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={runGlobalImprove}
-              disabled={aiLoading}
-              className="inline-flex items-center gap-1.5 rounded-full border border-gold/70 bg-gold-soft px-3 py-2 text-xs font-bold text-accent-foreground transition-colors hover:bg-gold hover:text-navy disabled:cursor-not-allowed disabled:opacity-60"
-              title="L'assistant IA améliore l'ensemble de votre CV"
+          {pdfDocument !== null ? (
+            <PDFDownloadLink
+              document={pdfDocument}
+              fileName={pdfFileName}
+              className="inline-flex items-center gap-2 rounded-xl bg-[#051937] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#0A2A5C]"
             >
-              {aiLoading ? (
-                <IconLoader2 className="size-4 animate-spin" />
-              ) : (
-                <IconSparkles className="size-4" />
+              {({ loading, error }) => (
+                <>
+                  <IconDownload size={18} stroke={1.8} className="text-[#FFC107]" />
+                  {error
+                    ? "Erreur de génération du PDF"
+                    : loading
+                      ? "Génération du PDF…"
+                      : "Télécharger mon CV (PDF)"}
+                </>
               )}
-              <span className="hidden md:inline">Améliorer avec l&apos;IA</span>
-              <span className="md:hidden">IA</span>
-            </button>
+            </PDFDownloadLink>
+          ) : (
+            <span className="inline-flex items-center gap-2 rounded-xl bg-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-500">
+              <IconDownload size={18} stroke={1.8} />
+              Préparation du PDF…
+            </span>
+          )}
+        </header>
 
-            <Button
-              type="button"
-              onClick={handlePrint}
-              className="h-9 rounded-full bg-navy px-4 text-xs font-semibold text-white hover:bg-navy-800"
-            >
-              <IconPrinter className="mr-1.5 size-4 text-gold" />
-              <span className="hidden sm:inline">Télécharger le CV PDF</span>
-              <span className="sm:hidden">PDF</span>
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-        {/* Onglets mobiles : Formulaire / Aperçu */}
-        <div className="mb-4 grid grid-cols-2 overflow-hidden rounded-xl border border-slate-200 bg-white lg:hidden">
-          <button
-            type="button"
-            onClick={() => setMobileTab("form")}
-            className={`py-2.5 text-sm font-semibold transition-colors ${mobileTab === "form" ? "bg-navy text-white" : "text-slate-600"
-              }`}
-            aria-pressed={mobileTab === "form"}
-          >
-            Formulaire
-          </button>
-          <button
-            type="button"
-            onClick={() => setMobileTab("preview")}
-            className={`py-2.5 text-sm font-semibold transition-colors ${mobileTab === "preview" ? "bg-navy text-white" : "text-slate-600"
-              }`}
-            aria-pressed={mobileTab === "preview"}
-          >
-            Aperçu du CV
-          </button>
-        </div>
-
-        <div className="grid min-w-0 gap-6 lg:grid-cols-2">
-          {/* Colonne formulaire */}
-          <div className={`min-w-0 ${mobileTab === "form" ? "" : "hidden lg:block"}`}>
-            {/* Stepper */}
-            <div className="nice-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4 pb-2 sm:mx-0 sm:px-0">
-              {STEPS.map((s) => {
-                const active = s.id === step;
-                const Icon = s.icon;
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => setStep(s.id)}
-                    className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3.5 py-2 text-xs font-semibold transition-all ${active
-                      ? "border-navy bg-navy text-white shadow-[0_8px_20px_-8px_rgba(5,25,55,0.5)]"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-navy/30 hover:text-navy"
-                      }`}
-                    aria-current={active ? "step" : undefined}
-                  >
-                    <span
-                      className={`flex size-5 items-center justify-center rounded-full text-[10px] font-bold ${active ? "bg-gold text-navy" : "bg-slate-100 text-slate-500"
-                        }`}
-                    >
-                      {s.id + 1}
-                    </span>
-                    <Icon className={`size-3.5 ${active ? "text-gold" : "text-gold-dark"}`} />
-                    {s.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Carte étape */}
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-              <h2 className="font-heading text-lg font-bold text-navy">
-                {STEPS[step].label}
-              </h2>
-              <div className="mt-4">{renderStep()}</div>
-
-              {/* Navigation */}
-              <div className="mt-6 flex items-center justify-between border-t border-slate-100 pt-5">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setStep((s) => Math.max(0, s - 1))}
-                  disabled={step === 0}
-                  className="h-10 rounded-full border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
-                >
-                  <IconArrowLeft className="mr-1.5 size-4" />
-                  Précédent
-                </Button>
-
-                <Button
-                  type="button"
-                  onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}
-                  disabled={step === STEPS.length - 1}
-                  className="h-10 rounded-full bg-navy px-5 text-sm font-semibold text-white hover:bg-navy-800"
-                >
-                  {step === STEPS.length - 1 ? "Dernière étape" : "Suivant"}
-                  <IconArrowRight className="ml-1.5 size-4" />
-                </Button>
-              </div>
-            </div>
-
-            {/* Sélecteur de modèle rapide */}
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="flex items-center justify-between">
-                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Modèle de CV
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setStep(5)}
-                  className="text-[11px] font-semibold text-navy underline decoration-gold decoration-2 underline-offset-4"
-                >
-                  Couleurs &amp; polices
-                </button>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {TEMPLATES.map((tpl) => {
-                  const active = design.template === tpl.id;
-                  return (
-                    <button
-                      key={tpl.id}
-                      type="button"
-                      onClick={() => setDesign((prev) => ({ ...prev, template: tpl.id }))}
-                      className={`rounded-xl border px-3 py-2.5 text-left text-[11px] font-semibold transition-all ${active
-                        ? "border-navy bg-navy text-white"
-                        : "border-slate-200 bg-white text-slate-600 hover:border-navy/40"
-                        }`}
-                      aria-pressed={active}
-                    >
-                      {active && <IconCheck className="mb-1 size-3.5 text-gold" />}
-                      <span className="block leading-tight">{tpl.name}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* Colonne aperçu */}
-          <aside
-            className={`min-w-0 lg:sticky lg:top-20 lg:self-start ${mobileTab === "preview" ? "" : "hidden lg:block"
-              }`}
-          >
-            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              {/* Barre d'aperçu */}
-              <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Aperçu temps réel
-                </p>
-                <div className="flex items-center gap-1.5">
-                  <span className="hidden rounded-full bg-gold-soft px-2 py-0.5 text-[10px] font-bold text-accent-foreground sm:inline">
-                    Format A4
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setZoomMode("fit")}
-                    className={`rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${zoomMode === "fit"
-                      ? "bg-navy text-white"
-                      : "bg-slate-200 text-slate-600 hover:bg-slate-300"
-                      }`}
-                    aria-pressed={zoomMode === "fit"}
-                  >
-                    Ajuster
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setZoomMode("actual")}
-                    className={`rounded-full px-2.5 py-1 text-[10px] font-bold transition-colors ${zoomMode === "actual"
-                      ? "bg-navy text-white"
-                      : "bg-slate-200 text-slate-600 hover:bg-slate-300"
-                      }`}
-                    aria-pressed={zoomMode === "actual"}
-                  >
-                    100 %
-                  </button>
-                </div>
-              </div>
-
-              {/* Feuille A4 mise à l'échelle */}
-              <div className="bg-slate-100 p-3 sm:p-4">
-                <div
-                  ref={previewWrapRef}
-                  style={{
-                    height: previewViewportHeight,
-                    overflow: zoomMode === "fit" ? "hidden" : "auto",
-                  }}
-                  className="nice-scrollbar"
-                >
-                  <div
-                    id="cv-print-scale"
-                    style={{
-                      width: "794px",
-                      transform: `scale(${previewScale})`,
-                      transformOrigin: "top left",
-                    }}
-                  >
-                    <div
-                      ref={sheetRef}
-                      className="bg-white"
-                      style={{
-                        width: "794px",
-                        minHeight: "1123px",
-                        fontFamily: FONT_FAMILIES[design.bodyFont].stack,
-                        fontSize: `${13.2 * design.scale}px`,
-                        color: "#1e293b",
-                      }}
-                    >
-                      <CvSheet data={data} design={design} />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <p className="mt-2 px-1 text-[11px] text-slate-400">
-              « Télécharger le CV PDF » ouvre votre navigateur : choisissez la
-              destination « Enregistrer au format PDF » — les couleurs, polices et
-              le modèle choisis sont conservés à l&apos;identique.
-            </p>
-            <button
-              type="button"
-              onClick={handleDownloadPdfServer}
-              disabled={downloading}
-              className="mt-2 inline-flex items-center gap-1.5 px-1 text-[11px] font-semibold text-slate-500 underline decoration-slate-300 underline-offset-4 transition-colors hover:text-navy disabled:opacity-60"
-            >
-              {downloading ? (
-                <IconLoader2 className="size-3.5 animate-spin" />
-              ) : (
-                <IconDownload className="size-3.5" />
-              )}
-              Ou générer la version ATS serveur (PDF simple, sans design)
-            </button>
-          </aside>
-        </div>
-      </div>
-
-      {/* Modale d'amélioration IA globale */}
-      {aiOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Amélioration IA du CV"
-        >
-          <div className="nice-scrollbar max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className="flex size-9 items-center justify-center rounded-full bg-gold-soft text-accent-foreground">
-                  <IconSparkles className="size-5" />
-                </span>
-                <div>
-                  <h2 className="font-heading text-lg font-bold text-navy">
-                    Amélioration de votre CV par l&apos;IA
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Résumé, réalisations, compétences et conseils personnalisés.
-                  </p>
-                </div>
-              </div>
+        {/* ─── Bloc « Lien Web Public & QR Code » ─── */}
+        <Carte icon={IconWorld} titre="Lien Web Public & QR Code" sousTitre="Partagez votre CV en ligne et affichez son QR code sur le PDF.">
+          {chargement ? (
+            <p className="text-sm text-slate-500">Chargement de la configuration…</p>
+          ) : publicInfo === null ? (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-600">
+                Publiez votre CV pour obtenir un lien public du type{" "}
+                <span className="font-semibold text-[#051937]">nexirole.vercel.app/u/votre-nom</span>,
+                avec compteur de vues et QR code intégré au PDF.
+              </p>
               <button
                 type="button"
-                onClick={() => setAiOpen(false)}
-                className="rounded-full p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-navy"
-                aria-label="Fermer"
+                onClick={publierOuMettreAJour}
+                disabled={publicationEnCours}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#FFC107] px-4 py-2.5 text-sm font-semibold text-[#051937] shadow-sm transition hover:bg-[#FFD056] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <IconX className="size-5" />
+                {publicationEnCours ? (
+                  <IconLoader2 size={18} stroke={1.8} className="animate-spin" />
+                ) : (
+                  <IconUpload size={18} stroke={1.8} />
+                )}
+                {publicationEnCours ? "Publication…" : "Publier mon CV en ligne"}
               </button>
             </div>
-
-            {aiLoading && (
-              <div className="mt-8 flex flex-col items-center justify-center py-10 text-center">
-                <IconLoader2 className="size-8 animate-spin text-navy" />
-                <p className="mt-3 text-sm font-semibold text-navy">
-                  L&apos;assistant analyse votre CV…
-                </p>
-                <p className="mt-1 text-xs text-slate-400">
-                  Réécriture du résumé et des réalisations — 10 à 30 secondes.
-                </p>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <IconLink size={16} stroke={1.8} className="shrink-0 text-[#051937]" />
+                <span className="truncate text-sm text-slate-700">{publicInfo.publicUrl}</span>
+                <span className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={copierLien}
+                    className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-semibold text-[#051937] transition hover:bg-slate-200"
+                  >
+                    {copie ? (
+                      <IconCheck size={15} stroke={1.8} className="text-emerald-600" />
+                    ) : (
+                      <IconCopy size={15} stroke={1.8} />
+                    )}
+                    {copie ? "Copié" : "Copier"}
+                  </button>
+                  <a
+                    href={publicInfo.publicUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-semibold text-[#051937] transition hover:bg-slate-200"
+                  >
+                    <IconExternalLink size={15} stroke={1.8} />
+                    Ouvrir
+                  </a>
+                </span>
               </div>
-            )}
 
-            {!aiLoading && aiError && (
-              <div className="mt-6 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                <IconAlertCircle className="mt-0.5 size-4 shrink-0" />
-                <p className="flex-1">{aiError}</p>
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                <span className="inline-flex items-center gap-2 text-sm text-slate-600">
+                  <IconEye size={17} stroke={1.8} className="text-[#051937]" />
+                  {publicInfo.viewsCount} vue{publicInfo.viewsCount > 1 ? "s" : ""}
+                </span>
                 <button
                   type="button"
-                  onClick={() => setAiOpen(false)}
-                  className="rounded p-1 hover:bg-red-100"
-                  aria-label="Fermer"
+                  onClick={actualiserVues}
+                  className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-semibold text-[#051937] transition hover:bg-slate-100"
                 >
-                  <IconX className="size-4" />
+                  <IconRefresh size={15} stroke={1.8} />
+                  Actualiser
+                </button>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={publicInfo.isPublic}
+                  onClick={() => changerVisibilite(!publicInfo.isPublic)}
+                  className="inline-flex items-center gap-2 text-sm font-semibold text-[#051937]"
+                >
+                  {publicInfo.isPublic ? (
+                    <IconEye size={17} stroke={1.8} className="text-emerald-600" />
+                  ) : (
+                    <IconEyeOff size={17} stroke={1.8} className="text-slate-400" />
+                  )}
+                  {publicInfo.isPublic ? "Visible publiquement" : "Masqué (page en 404)"}
                 </button>
               </div>
-            )}
 
-            {!aiLoading && aiResult && (
-              <div className="mt-6 space-y-5">
-                {/* Résumé amélioré */}
-                <section className="rounded-xl border border-slate-200 bg-ice/60 p-4">
-                  <p className="text-xs font-bold uppercase tracking-wider text-navy">
-                    Résumé proposé
-                  </p>
-                  <p className="mt-2 whitespace-pre-line text-sm leading-relaxed text-slate-700">
-                    {aiResult.resume || "—"}
-                  </p>
-                </section>
-
-                {/* Réalisations améliorées */}
-                {aiResult.experiences.length > 0 && (
-                  <section className="rounded-xl border border-slate-200 bg-ice/60 p-4">
-                    <p className="text-xs font-bold uppercase tracking-wider text-navy">
-                      Réalisations réécrites
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 py-3">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#051937]/5 text-[#051937]">
+                    <IconQrcode size={18} stroke={1.8} />
+                  </span>
+                  <div>
+                    <p className="text-sm font-semibold text-[#051937]">
+                      Afficher le QR Code sur mon PDF
                     </p>
-                    <div className="mt-2 space-y-3">
-                      {aiResult.experiences.map((imp) => {
-                        const exp = data.experiences[imp.index];
-                        return (
-                          <div key={imp.index}>
-                            <p className="text-xs font-semibold text-navy">
-                              {exp ? `${exp.role || "Poste"} — ${exp.company || "Entreprise"}` : `Expérience ${imp.index + 1}`}
-                            </p>
-                            <ul className="mt-1 space-y-1">
-                              {imp.realisations.map((r, i) => (
-                                <li key={i} className="flex gap-2 text-[13px] leading-relaxed text-slate-600">
-                                  <span className="text-gold-dark">•</span>
-                                  <span>{r}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-                )}
-
-                {/* Compétences suggérées */}
-                {aiResult.competences.length > 0 && (
-                  <section className="rounded-xl border border-slate-200 bg-ice/60 p-4">
-                    <p className="text-xs font-bold uppercase tracking-wider text-navy">
-                      Compétences suggérées — cliquez pour inclure / exclure
+                    <p className="text-xs text-slate-500">
+                      Un QR « Version en ligne » apparaîtra dans l&apos;en-tête du CV A4.
                     </p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {aiResult.competences.map((skill) => {
-                        const active = selectedSkills.includes(skill);
-                        return (
-                          <button
-                            key={skill}
-                            type="button"
-                            onClick={() => toggleSelectedSkill(skill)}
-                            className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${active
-                              ? "border-navy bg-navy text-white"
-                              : "border-slate-200 bg-white text-slate-500 line-through opacity-60"
-                              }`}
-                            aria-pressed={active}
-                          >
-                            {active && <IconCheck className="size-3" />}
-                            {skill}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-                )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={draft.showQrOnPdf}
+                  onClick={() => setDraft((actuel) => ({ ...actuel, showQrOnPdf: !actuel.showQrOnPdf }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition ${
+                    draft.showQrOnPdf ? "bg-[#051937]" : "bg-slate-300"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+                      draft.showQrOnPdf ? "translate-x-5" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </div>
 
-                {/* Conseils */}
-                {aiResult.conseils.length > 0 && (
-                  <section className="rounded-xl border border-gold/50 bg-gold-soft/50 p-4">
-                    <p className="text-xs font-bold uppercase tracking-wider text-accent-foreground">
-                      Conseils du coach
+              {draft.showQrOnPdf ? (
+                qrCodeDataUrl !== null ? (
+                  <div className="flex items-center gap-4">
+                    <img
+                      src={qrCodeDataUrl}
+                      alt="QR code du CV public"
+                      className="h-24 w-24 rounded-xl border border-slate-200"
+                    />
+                    <p className="text-xs text-slate-500">
+                      Ce QR code est automatiquement intégré au PDF téléchargé.
                     </p>
-                    <ul className="mt-2 space-y-1.5">
-                      {aiResult.conseils.map((conseil, i) => (
-                        <li key={i} className="flex gap-2 text-[13px] leading-relaxed text-slate-700">
-                          <IconCheck className="mt-0.5 size-3.5 shrink-0 text-gold-dark" />
-                          <span>{conseil}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">Génération du QR code…</p>
+                )
+              ) : null}
 
-                <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setAiOpen(false)}
-                    className="h-10 rounded-full border-slate-300 bg-white px-5 text-sm font-semibold text-navy hover:bg-slate-50"
-                  >
-                    Annuler
-                  </Button>
-                  <Button
-                    type="button"
-                    onClick={applyGlobalImprovement}
-                    className="h-10 rounded-full bg-navy px-5 text-sm font-semibold text-white hover:bg-navy-800"
-                  >
-                    <IconDeviceFloppy className="mr-1.5 size-4 text-gold" />
-                    Tout appliquer à mon CV
-                  </Button>
+              <button
+                type="button"
+                onClick={publierOuMettreAJour}
+                disabled={publicationEnCours}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#FFC107] px-4 py-2.5 text-sm font-semibold text-[#051937] shadow-sm transition hover:bg-[#FFD056] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {publicationEnCours ? (
+                  <IconLoader2 size={18} stroke={1.8} className="animate-spin" />
+                ) : (
+                  <IconRefresh size={18} stroke={1.8} />
+                )}
+                {publicationEnCours ? "Mise à jour…" : "Mettre à jour mon CV en ligne"}
+              </button>
+            </div>
+          )}
+          {messagePublication !== "" ? (
+            <p className="mt-3 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {messagePublication}
+            </p>
+          ) : null}
+        </Carte>
+
+        {/* ─── Identité ─── */}
+        <Carte icon={IconUser} titre="Identité" sousTitre="Nom, titre professionnel et coordonnées.">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Champ label="Nom complet" value={draft.fullName} onChange={(v) => majChamp("fullName", v)} placeholder="Clément Kouton" />
+            <Champ label="Titre professionnel" value={draft.jobTitle} onChange={(v) => majChamp("jobTitle", v)} placeholder="Développeur Full-Stack" />
+            <Champ label="E-mail" type="email" value={draft.email} onChange={(v) => majChamp("email", v)} placeholder="clement@exemple.com" />
+            <Champ label="Téléphone" value={draft.phone} onChange={(v) => majChamp("phone", v)} placeholder="+229 00 00 00 00" />
+            <Champ label="Ville / Pays" value={draft.location} onChange={(v) => majChamp("location", v)} placeholder="Cotonou, Bénin" />
+            <Champ label="Site web / LinkedIn" value={draft.website} onChange={(v) => majChamp("website", v)} placeholder="linkedin.com/in/clementkouton" />
+            <div className="sm:col-span-2">
+              <Champ label="URL de la photo" value={draft.photoUrl} onChange={(v) => majChamp("photoUrl", v)} placeholder="https://…/photo.jpg (ou data:image/…)" />
+            </div>
+          </div>
+        </Carte>
+
+        {/* ─── Résumé ─── */}
+        <Carte icon={IconFileText} titre="Résumé" sousTitre="Le profil en quelques lignes, en haut du CV.">
+          <Zone
+            value={draft.resume}
+            onChange={(v) => majChamp("resume", v)}
+            rows={5}
+            placeholder="Développeur full-stack passionné par les produits SaaS…"
+          />
+        </Carte>
+
+        {/* ─── Expériences ─── */}
+        <Carte icon={IconBriefcase} titre="Expériences professionnelles" sousTitre="Les plus récentes d'abord.">
+          <div className="space-y-3">
+            {draft.experiences.map((experience, index) => (
+              <div key={index} className="relative rounded-xl border border-slate-200 p-4">
+                <button
+                  type="button"
+                  onClick={() => supprimerExperience(index)}
+                  aria-label="Supprimer cette expérience"
+                  className="absolute right-2 top-2 rounded-lg p-1.5 text-rose-500 transition hover:bg-rose-50"
+                >
+                  <IconTrash size={16} stroke={1.8} />
+                </button>
+                <div className="grid grid-cols-1 gap-3 pr-8 sm:grid-cols-2">
+                  <Champ value={experience.poste} onChange={(v) => majExperience(index, "poste", v)} placeholder="Poste — Développeur Full-Stack" />
+                  <Champ value={experience.entreprise} onChange={(v) => majExperience(index, "entreprise", v)} placeholder="Entreprise — NexiRole" />
+                  <Champ value={experience.periode} onChange={(v) => majExperience(index, "periode", v)} placeholder="Période — 2025 — Aujourd'hui" />
+                </div>
+                <div className="mt-3 pr-8">
+                  <Zone value={experience.description} onChange={(v) => majExperience(index, "description", v)} rows={3} placeholder="Missions, résultats, technologies…" />
                 </div>
               </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Portail d'impression : rendu A4 dédié, enfant direct de <body>.
-          Invisible à l'écran, affiché seul pendant l'impression. */}
-      {mounted &&
-        createPortal(
-          <div id="cv-print-root" className="hidden" aria-hidden>
-            <div
-              id="cv-print-sheet"
-              style={{
-                width: "210mm",
-                fontFamily: FONT_FAMILIES[design.bodyFont].stack,
-                fontSize: `${13.2 * design.scale}px`,
-                color: "#1e293b",
-                background: "#ffffff",
-              }}
+            ))}
+            <button
+              type="button"
+              onClick={ajouterExperience}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[#051937]/30 px-3 py-2 text-sm font-semibold text-[#051937] transition hover:bg-[#FFC107]/10"
             >
-              <CvSheet data={data} design={design} />
-            </div>
-          </div>,
-          document.body
-        )}
+              <IconPlus size={16} stroke={1.8} />
+              Ajouter une expérience
+            </button>
+          </div>
+        </Carte>
+
+        {/* ─── Formations ─── */}
+        <Carte icon={IconSchool} titre="Formations" sousTitre="Diplômes et établissements.">
+          <div className="space-y-3">
+            {draft.formations.map((formation, index) => (
+              <div key={index} className="relative rounded-xl border border-slate-200 p-4">
+                <button
+                  type="button"
+                  onClick={() => supprimerFormation(index)}
+                  aria-label="Supprimer cette formation"
+                  className="absolute right-2 top-2 rounded-lg p-1.5 text-rose-500 transition hover:bg-rose-50"
+                >
+                  <IconTrash size={16} stroke={1.8} />
+                </button>
+                <div className="grid grid-cols-1 gap-3 pr-8 sm:grid-cols-2">
+                  <Champ value={formation.diplome} onChange={(v) => majFormation(index, "diplome", v)} placeholder="Diplôme — Master Génie Logiciel" />
+                  <Champ value={formation.etablissement} onChange={(v) => majFormation(index, "etablissement", v)} placeholder="Établissement — Université" />
+                  <Champ value={formation.periode} onChange={(v) => majFormation(index, "periode", v)} placeholder="Période — 2022 — 2024" />
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={ajouterFormation}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[#051937]/30 px-3 py-2 text-sm font-semibold text-[#051937] transition hover:bg-[#FFC107]/10"
+            >
+              <IconPlus size={16} stroke={1.8} />
+              Ajouter une formation
+            </button>
+          </div>
+        </Carte>
+
+        {/* ─── Compétences ─── */}
+        <Carte icon={IconAward} titre="Compétences" sousTitre="Elles s'affichent en badges sur le CV.">
+          <Zone
+            value={draft.competencesTexte}
+            onChange={(v) => majChamp("competencesTexte", v)}
+            rows={3}
+            placeholder="Next.js, TypeScript, Prisma, Tailwind CSS"
+            hint="Séparez chaque compétence par une virgule."
+          />
+        </Carte>
+
+        {/* ─── Langues ─── */}
+        <Carte icon={IconLanguage} titre="Langues" sousTitre="Langue et niveau de maîtrise.">
+          <div className="space-y-3">
+            {draft.langues.map((langue, index) => (
+              <div key={index} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-center">
+                <Champ value={langue.nom} onChange={(v) => majLangue(index, "nom", v)} placeholder="Langue — Français" />
+                <Champ value={langue.niveau} onChange={(v) => majLangue(index, "niveau", v)} placeholder="Niveau — Courant" />
+                <button
+                  type="button"
+                  onClick={() => supprimerLangue(index)}
+                  aria-label="Supprimer cette langue"
+                  className="justify-self-start rounded-lg p-2 text-rose-500 transition hover:bg-rose-50 sm:justify-self-center"
+                >
+                  <IconTrash size={16} stroke={1.8} />
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={ajouterLangue}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[#051937]/30 px-3 py-2 text-sm font-semibold text-[#051937] transition hover:bg-[#FFC107]/10"
+            >
+              <IconPlus size={16} stroke={1.8} />
+              Ajouter une langue
+            </button>
+          </div>
+        </Carte>
+      </div>
     </div>
   );
 }

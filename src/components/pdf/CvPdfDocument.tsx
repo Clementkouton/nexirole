@@ -1,368 +1,328 @@
-import React from "react";
-import { Document, Page, Text, View, StyleSheet, Image } from "@react-pdf/renderer";
-import type { DossierData } from "@/lib/types";
-import { getTemplate, type TemplateId } from "@/lib/cv-templates";
+import { Document, Image, Page, StyleSheet, Text, View } from "@react-pdf/renderer";
 
-/**
- * Document PDF du CV — 4 templates ATS (A4), avec ou sans photo.
- * Chargé UNIQUEMENT côté client (import dynamique depuis src/lib/pdf-client.tsx) :
- * aucune erreur SSR au build.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// CvPdfDocument — CV A4 « modern-accent » (charte NexiRole : #051937 / #FFC107)
+// Props :
+//   cvData        → données structurées du CV (voir interface CvData)
+//   templateId    → gabarit demandé (seul « modern-accent » est actif aujourd'hui ;
+//                   la prop est acceptée pour les gabarits futurs)
+//   qrCodeDataUrl → Data URL du QR code (générée par le cv-builder via « qrcode »)
+//   publicUrl     → URL publique du CV (affichée sous le QR et en pied de page)
+// ─────────────────────────────────────────────────────────────────────────────
 
-interface CvPdfDocumentProps {
-  data: DossierData;
-  templateId: TemplateId;
-  photo?: string | null;
+const NAVY = "#051937";
+const GOLD = "#FFC107";
+const SLATE = "#475569";
+const LIGHT_SLATE = "#CBD5E1";
+
+export interface CvIdentite {
+  fullName: string;
+  jobTitle: string;
+  email: string;
+  phone: string;
+  location: string;
+  website: string;
+  photoUrl: string;
+}
+export interface CvExperience {
+  poste: string;
+  entreprise: string;
+  periode: string;
+  description: string;
+}
+export interface CvFormation {
+  diplome: string;
+  etablissement: string;
+  periode: string;
+}
+export interface CvLangue {
+  nom: string;
+  niveau: string;
+}
+export interface CvData {
+  identite: CvIdentite;
+  resume: string;
+  experiences: CvExperience[];
+  formations: CvFormation[];
+  competences: string[];
+  langues: CvLangue[];
+  showQrOnPdf?: boolean;
+}
+export interface CvPdfDocumentProps {
+  cvData: CvData;
+  templateId?: string;
+  qrCodeDataUrl?: string | null;
+  publicUrl?: string | null;
 }
 
-function contactItems(data: DossierData): string[] {
-  const items: string[] = [];
-  if (data.identite.email) items.push(data.identite.email);
-  if (data.identite.telephone) items.push(data.identite.telephone);
-  if (data.identite.ville) items.push(data.identite.ville);
-  if (data.identite.linkedin) items.push(data.identite.linkedin);
-  return items;
+function texte(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+function objet(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+function liste(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
-function Photo({
-  photo,
-  shape,
-  size,
-}: {
-  photo: string | null | undefined;
-  shape: "circle" | "rounded" | "square";
-  size: number;
-}) {
-  if (!photo) return null;
-  const radius =
-    shape === "circle" ? size / 2 : shape === "rounded" ? size * 0.18 : 0;
-  return (
-    <Image
-      src={photo}
-      style={{
-        width: size,
-        height: size,
-        borderRadius: radius,
-        objectFit: "cover",
-      }}
-    />
-  );
+/** Tolère la forme canonique du builder ET un cvData brut (JSON de PublicResume). */
+function normaliserCv(raw: unknown): CvData {
+  const source = objet(raw) ?? {};
+  const identiteBrut = objet(source.identite) ?? objet(source.identity);
+  const identite: CvIdentite = {
+    fullName: texte(identiteBrut?.fullName ?? identiteBrut?.nom ?? source.fullName),
+    jobTitle: texte(identiteBrut?.jobTitle ?? identiteBrut?.titre ?? source.jobTitle),
+    email: texte(identiteBrut?.email),
+    phone: texte(identiteBrut?.phone ?? identiteBrut?.telephone),
+    location: texte(identiteBrut?.location ?? identiteBrut?.ville),
+    website: texte(identiteBrut?.website ?? identiteBrut?.siteWeb),
+    photoUrl: texte(identiteBrut?.photoUrl ?? identiteBrut?.photo),
+  };
+
+  const experiences: CvExperience[] = liste(source.experiences ?? source.experience)
+    .map((item) => {
+      const entry = objet(item);
+      return {
+        poste: texte(entry?.poste ?? entry?.titre ?? entry?.title),
+        entreprise: texte(entry?.entreprise ?? entry?.company),
+        periode: texte(entry?.periode ?? entry?.dates ?? entry?.period),
+        description: texte(entry?.description ?? entry?.details),
+      };
+    })
+    .filter((item) => item.poste !== "" || item.entreprise !== "" || item.description !== "");
+
+  const formations: CvFormation[] = liste(source.formations ?? source.education)
+    .map((item) => {
+      const entry = objet(item);
+      return {
+        diplome: texte(entry?.diplome ?? entry?.titre ?? entry?.degree),
+        etablissement: texte(entry?.etablissement ?? entry?.school ?? entry?.ecole),
+        periode: texte(entry?.periode ?? entry?.dates ?? entry?.period),
+      };
+    })
+    .filter((item) => item.diplome !== "" || item.etablissement !== "");
+
+  const competencesBrut = source.competences ?? source.skills;
+  const competences: string[] = Array.isArray(competencesBrut)
+    ? competencesBrut.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean)
+    : typeof competencesBrut === "string"
+      ? competencesBrut
+          .split(/[,;]/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [];
+
+  const langues: CvLangue[] = liste(source.langues ?? source.languages)
+    .map((item) => {
+      const entry = objet(item);
+      if (!entry) return { nom: "", niveau: "" };
+      return {
+        nom: texte(entry.nom ?? entry.name ?? entry.langue),
+        niveau: texte(entry.niveau ?? entry.level),
+      };
+    })
+    .filter((item) => item.nom !== "");
+
+  const flagQr: unknown = source.showQrOnPdf;
+  return {
+    identite,
+    resume: texte(source.resume ?? source["résumé"] ?? source.summary ?? source.profil),
+    experiences,
+    formations,
+    competences,
+    langues,
+    showQrOnPdf: typeof flagQr === "boolean" ? flagQr : true,
+  };
 }
 
-export function CvPdfDocument({ data, templateId, photo }: CvPdfDocumentProps) {
-  const t = getTemplate(templateId);
-  const contacts = contactItems(data);
-  const isSwiss = t.headerVariant === "swiss";
-  const isCompact = t.headerVariant === "linear";
+const styles = StyleSheet.create({
+  page: { backgroundColor: "#FFFFFF", fontFamily: "Helvetica" },
+  header: {
+    backgroundColor: NAVY,
+    paddingHorizontal: 32,
+    paddingTop: 26,
+    paddingBottom: 22,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+  },
+  photo: { width: 62, height: 62, marginRight: 14, borderRadius: 8 },
+  headerLeft: { flex: 1, paddingRight: 12 },
+  name: { fontSize: 21, fontWeight: "bold", color: "#FFFFFF" },
+  jobTitle: { fontSize: 12, color: GOLD, marginTop: 4, fontWeight: "bold" },
+  contactLine: { fontSize: 8.5, color: LIGHT_SLATE, marginTop: 8, lineHeight: 1.5 },
+  qrBox: { backgroundColor: "#FFFFFF", padding: 6, borderRadius: 6, alignItems: "center" },
+  qrImage: { width: 54, height: 54 },
+  qrCaption: { fontSize: 6.5, color: NAVY, marginTop: 3, fontWeight: "bold" },
+  qrUrl: { fontSize: 5.5, color: SLATE, marginTop: 1 },
+  body: { paddingHorizontal: 32, paddingTop: 20 },
+  section: { marginBottom: 14 },
+  sectionTitle: {
+    fontSize: 10.5,
+    fontWeight: "bold",
+    color: NAVY,
+    letterSpacing: 1,
+    paddingBottom: 3,
+    marginBottom: 7,
+    borderBottomWidth: 1.5,
+    borderBottomColor: GOLD,
+  },
+  summaryText: { fontSize: 9, color: SLATE, lineHeight: 1.55 },
+  item: { marginBottom: 9, paddingLeft: 8, borderLeftWidth: 2, borderLeftColor: GOLD },
+  itemTitle: { fontSize: 10, fontWeight: "bold", color: NAVY },
+  itemMeta: { fontSize: 8.5, color: SLATE, marginTop: 1 },
+  itemDesc: { fontSize: 8.5, color: SLATE, marginTop: 2.5, lineHeight: 1.45 },
+  chipsWrap: { flexDirection: "row", flexWrap: "wrap" },
+  chip: {
+    fontSize: 8,
+    color: NAVY,
+    backgroundColor: "#FFC10733",
+    paddingHorizontal: 7,
+    paddingVertical: 3.5,
+    borderRadius: 9,
+    marginRight: 4,
+    marginBottom: 4,
+  },
+  langueText: { fontSize: 9, color: SLATE, marginBottom: 3 },
+  langueNom: { fontWeight: "bold", color: NAVY },
+  footer: {
+    position: "absolute",
+    bottom: 20,
+    left: 32,
+    right: 32,
+    borderTopWidth: 1.5,
+    borderTopColor: GOLD,
+    paddingTop: 6,
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  footerText: { fontSize: 7, color: SLATE },
+});
 
-  const styles = StyleSheet.create({
-    page: {
-      paddingTop: isCompact ? 28 : t.headerVariant === "banner" ? 0 : 38,
-      paddingHorizontal: isCompact ? 32 : 44,
-      paddingBottom: isCompact ? 26 : 34,
-      fontFamily: t.fontFamily,
-      fontSize: isCompact ? 9.5 : 10,
-      color: t.text,
-      lineHeight: 1.45,
-    },
-    /* ── En-têtes ─────────────────────────────────────────────── */
-    bannerHeader: {
-      backgroundColor: t.navy,
-      paddingHorizontal: 44,
-      paddingTop: 34,
-      paddingBottom: 26,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      marginBottom: 14,
-      borderBottomWidth: 4,
-      borderBottomColor: t.accent,
-    },
-    bannerName: {
-      fontSize: t.nameSize,
-      fontWeight: "bold",
-      color: "#ffffff",
-      marginBottom: 4,
-    },
-    bannerTitle: {
-      fontSize: 11.5,
-      color: t.accent,
-      marginBottom: 8,
-      fontWeight: "bold",
-    },
-    bannerContact: {
-      fontSize: 8.5,
-      color: "#dbe3ee",
-    },
-    centeredHeader: {
-      alignItems: "center",
-      marginBottom: 14,
-      paddingBottom: 12,
-      borderBottomWidth: 1,
-      borderBottomColor: t.line,
-    },
-    centeredName: {
-      fontSize: t.nameSize,
-      fontWeight: "bold",
-      color: t.navy,
-      marginBottom: 3,
-    },
-    centeredTitle: {
-      fontSize: 11,
-      color: t.muted,
-      marginBottom: 6,
-    },
-    centeredContact: {
-      fontSize: 8.5,
-      color: t.muted,
-    },
-    swissHeader: {
-      marginBottom: 20,
-      paddingBottom: 14,
-      borderBottomWidth: 2,
-      borderBottomColor: "#111827",
-      flexDirection: "row",
-      alignItems: "flex-end",
-      justifyContent: "space-between",
-    },
-    swissName: {
-      fontSize: t.nameSize,
-      fontWeight: "bold",
-      color: "#111827",
-      letterSpacing: 1,
-      marginBottom: 4,
-    },
-    swissTitle: {
-      fontSize: 11,
-      color: t.muted,
-      letterSpacing: 1.5,
-    },
-    swissContact: {
-      fontSize: 8.5,
-      color: t.muted,
-      textAlign: "right",
-    },
-    linearHeader: {
-      marginBottom: 10,
-      paddingBottom: 8,
-      borderBottomWidth: 2,
-      borderBottomColor: t.accent,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-    },
-    linearName: {
-      fontSize: t.nameSize,
-      fontWeight: "bold",
-      color: t.navy,
-      marginBottom: 2,
-    },
-    linearTitle: {
-      fontSize: 10,
-      color: t.muted,
-    },
-    linearContact: {
-      fontSize: 8,
-      color: t.muted,
-      textAlign: "right",
-    },
-    /* ── Sections ─────────────────────────────────────────────── */
-    section: {
-      marginBottom: t.sectionGap,
-    },
-    sectionTitle: {
-      fontSize: isCompact ? 9.5 : 11,
-      fontWeight: "bold",
-      color: isSwiss ? "#111827" : t.navy,
-      textTransform: t.uppercaseSections ? "uppercase" : "none",
-      letterSpacing: t.sectionLetterSpacing,
-      marginBottom: 5,
-      paddingBottom: 3,
-      borderBottomWidth: isSwiss ? 0 : 1,
-      borderBottomColor: t.line,
-    },
-    summary: {
-      fontSize: isCompact ? 9 : 9.5,
-      color: t.text,
-      textAlign: "justify",
-    },
-    experience: { marginBottom: isCompact ? 6 : 8 },
-    experienceHeader: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      marginBottom: 1,
-    },
-    role: { fontSize: isCompact ? 9.5 : 10.5, fontWeight: "bold", color: t.navy },
-    period: { fontSize: 8.5, color: t.muted },
-    companyLine: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      marginBottom: 3,
-    },
-    company: { fontSize: 9.5, color: t.accent, fontWeight: "bold" },
-    location: { fontSize: 8.5, color: t.muted },
-    bulletRow: { flexDirection: "row", marginBottom: 2, paddingRight: 6 },
-    bulletDot: { fontSize: 9, color: t.accent, marginRight: 5 },
-    bulletText: { fontSize: 9.2, color: t.text, flex: 1 },
-    skillBadge: {
-      backgroundColor: t.headerVariant === "banner" ? "#f1f5f9" : "#f8fafc",
-      borderWidth: 0.7,
-      borderColor: t.line,
-      borderRadius: 3,
-      paddingHorizontal: 6,
-      paddingVertical: 2.5,
-      marginRight: 4,
-      marginBottom: 4,
-    },
-    skillBadgeText: { fontSize: 8.6, color: t.navy },
-    skillLine: { fontSize: 9.2, color: t.text, marginBottom: 2 },
-    langLine: { fontSize: 9.2, color: t.text, marginBottom: 2 },
-  });
-
-  function SectionTitle({ children }: { children: React.ReactNode }) {
-    return <Text style={styles.sectionTitle}>{children}</Text>;
-  }
-
-  function renderSkills() {
-    if (t.skillBadges) {
-      return (
-        <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
-          {data.competences.map((skill) => (
-            <View key={skill} style={styles.skillBadge}>
-              <Text style={styles.skillBadgeText}>{skill}</Text>
-            </View>
-          ))}
-        </View>
-      );
-    }
-    return (
-      <Text style={styles.skillLine}>
-        {data.competences.join("   •   ")}
-      </Text>
-    );
-  }
+export default function CvPdfDocument({
+  cvData,
+  qrCodeDataUrl = null,
+  publicUrl = null,
+}: CvPdfDocumentProps) {
+  const cv = normaliserCv(cvData);
+  const afficherQr = qrCodeDataUrl !== null && qrCodeDataUrl !== "" && cv.showQrOnPdf !== false;
+  const contactParts = [
+    cv.identite.email,
+    cv.identite.phone,
+    cv.identite.location,
+    cv.identite.website,
+  ].filter(Boolean);
+  const urlCourte = publicUrl ? publicUrl.replace(/^https?:\/\//, "") : null;
 
   return (
     <Document
-      title={`CV ${data.identite.nom_complet}`}
-      author={data.identite.nom_complet}
+      title={cv.identite.fullName !== "" ? `CV — ${cv.identite.fullName}` : "CV"}
+      author={cv.identite.fullName !== "" ? cv.identite.fullName : "NexiRole"}
     >
       <Page size="A4" style={styles.page}>
-        {/* ── EN-TÊTE selon template ─────────────────────────────── */}
-        {t.headerVariant === "banner" && (
-          <View style={styles.bannerHeader} wrap={false}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.bannerName}>{data.identite.nom_complet}</Text>
-              <Text style={styles.bannerTitle}>{data.titre}</Text>
-              <Text style={styles.bannerContact}>{contacts.join("  •  ")}</Text>
+        <View style={styles.header} fixed>
+          {cv.identite.photoUrl !== "" ? (
+            <Image src={cv.identite.photoUrl} style={styles.photo} />
+          ) : null}
+          <View style={styles.headerLeft}>
+            <Text style={styles.name}>
+              {cv.identite.fullName !== "" ? cv.identite.fullName : "CV"}
+            </Text>
+            {cv.identite.jobTitle !== "" ? (
+              <Text style={styles.jobTitle}>{cv.identite.jobTitle}</Text>
+            ) : null}
+            {contactParts.length > 0 ? (
+              <Text style={styles.contactLine}>{contactParts.join("    ·    ")}</Text>
+            ) : null}
+          </View>
+          {afficherQr ? (
+            <View style={styles.qrBox}>
+              <Image src={qrCodeDataUrl ?? ""} style={styles.qrImage} />
+              <Text style={styles.qrCaption}>Version en ligne</Text>
+              {urlCourte !== null ? <Text style={styles.qrUrl}>{urlCourte}</Text> : null}
             </View>
-            <Photo photo={photo} shape={t.photoShape} size={64} />
-          </View>
-        )}
+          ) : null}
+        </View>
 
-        {t.headerVariant === "centered-rule" && (
-          <View style={styles.centeredHeader}>
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
-              <View style={{ flex: 1, alignItems: "center" }}>
-                <Text style={styles.centeredName}>{data.identite.nom_complet}</Text>
-                <Text style={styles.centeredTitle}>{data.titre}</Text>
-                <Text style={styles.centeredContact}>{contacts.join("  •  ")}</Text>
-              </View>
-              {photo ? <Photo photo={photo} shape={t.photoShape} size={58} /> : null}
+        <View style={styles.body}>
+          {cv.resume !== "" ? (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>RÉSUMÉ</Text>
+              <Text style={styles.summaryText}>{cv.resume}</Text>
             </View>
-          </View>
-        )}
+          ) : null}
 
-        {t.headerVariant === "swiss" && (
-          <View style={styles.swissHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.swissName}>{data.identite.nom_complet.toUpperCase()}</Text>
-              <Text style={styles.swissTitle}>{data.titre.toUpperCase()}</Text>
-              <Text style={styles.swissContact}>{contacts.join("  •  ")}</Text>
-            </View>
-            {photo ? <Photo photo={photo} shape={t.photoShape} size={56} /> : null}
-          </View>
-        )}
-
-        {t.headerVariant === "linear" && (
-          <View style={styles.linearHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.linearName}>{data.identite.nom_complet}</Text>
-              <Text style={styles.linearTitle}>{data.titre}</Text>
-              <Text style={styles.linearContact}>{contacts.join("  •  ")}</Text>
-            </View>
-            {photo ? <Photo photo={photo} shape={t.photoShape} size={44} /> : null}
-          </View>
-        )}
-
-        {/* ── RÉSUMÉ ─────────────────────────────────────────────── */}
-        {data.resume ? (
-          <View style={styles.section}>
-            <SectionTitle>Profil</SectionTitle>
-            <Text style={styles.summary}>{data.resume}</Text>
-          </View>
-        ) : null}
-
-        {/* ── EXPÉRIENCES ────────────────────────────────────────── */}
-        {data.experiences.length > 0 && (
-          <View style={styles.section}>
-            <SectionTitle>Expérience professionnelle</SectionTitle>
-            {data.experiences.map((exp, i) => (
-              <View key={`exp-${i}`} style={styles.experience} wrap={false}>
-                <View style={styles.experienceHeader}>
-                  <Text style={styles.role}>{exp.poste}</Text>
-                  <Text style={styles.period}>{exp.periode}</Text>
+          {cv.experiences.length > 0 ? (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>EXPÉRIENCES PROFESSIONNELLES</Text>
+              {cv.experiences.map((experience, index) => (
+                <View key={index} style={styles.item} wrap={false}>
+                  <Text style={styles.itemTitle}>
+                    {experience.poste !== "" ? experience.poste : "Expérience"}
+                  </Text>
+                  {experience.entreprise !== "" || experience.periode !== "" ? (
+                    <Text style={styles.itemMeta}>
+                      {[experience.entreprise, experience.periode].filter(Boolean).join("  ·  ")}
+                    </Text>
+                  ) : null}
+                  {experience.description !== "" ? (
+                    <Text style={styles.itemDesc}>{experience.description}</Text>
+                  ) : null}
                 </View>
-                <View style={styles.companyLine}>
-                  <Text style={styles.company}>{exp.entreprise}</Text>
-                  <Text style={styles.location}>{exp.lieu}</Text>
+              ))}
+            </View>
+          ) : null}
+
+          {cv.formations.length > 0 ? (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>FORMATIONS</Text>
+              {cv.formations.map((formation, index) => (
+                <View key={index} style={styles.item} wrap={false}>
+                  <Text style={styles.itemTitle}>
+                    {formation.diplome !== "" ? formation.diplome : "Formation"}
+                  </Text>
+                  {formation.etablissement !== "" || formation.periode !== "" ? (
+                    <Text style={styles.itemMeta}>
+                      {[formation.etablissement, formation.periode].filter(Boolean).join("  ·  ")}
+                    </Text>
+                  ) : null}
                 </View>
-                {exp.missions.map((mission, j) => (
-                  <View key={`m-${i}-${j}`} style={styles.bulletRow}>
-                    <Text style={styles.bulletDot}>•</Text>
-                    <Text style={styles.bulletText}>{mission}</Text>
-                  </View>
+              ))}
+            </View>
+          ) : null}
+
+          {cv.competences.length > 0 ? (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>COMPÉTENCES</Text>
+              <View style={styles.chipsWrap}>
+                {cv.competences.map((competence, index) => (
+                  <Text key={index} style={styles.chip}>
+                    {competence}
+                  </Text>
                 ))}
               </View>
-            ))}
-          </View>
-        )}
+            </View>
+          ) : null}
 
-        {/* ── FORMATIONS ─────────────────────────────────────────── */}
-        {data.formations.length > 0 && (
-          <View style={styles.section}>
-            <SectionTitle>Formation</SectionTitle>
-            {data.formations.map((edu, i) => (
-              <View key={`edu-${i}`} style={styles.experience} wrap={false}>
-                <View style={styles.experienceHeader}>
-                  <Text style={styles.role}>{edu.diplome}</Text>
-                  <Text style={styles.period}>{edu.periode}</Text>
-                </View>
-                <Text style={styles.location}>{edu.etablissement}</Text>
-              </View>
-            ))}
-          </View>
-        )}
+          {cv.langues.length > 0 ? (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>LANGUES</Text>
+              {cv.langues.map((langue, index) => (
+                <Text key={index} style={styles.langueText}>
+                  <Text style={styles.langueNom}>{langue.nom}</Text>
+                  {langue.niveau !== "" ? `  —  ${langue.niveau}` : ""}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+        </View>
 
-        {/* ── COMPÉTENCES ────────────────────────────────────────── */}
-        {data.competences.length > 0 && (
-          <View style={styles.section}>
-            <SectionTitle>Compétences</SectionTitle>
-            {renderSkills()}
-          </View>
-        )}
-
-        {/* ── LANGUES ────────────────────────────────────────────── */}
-        {data.langues.length > 0 && (
-          <View style={styles.section}>
-            <SectionTitle>Langues</SectionTitle>
-            {data.langues.map((lang, i) => (
-              <Text key={`lang-${i}`} style={styles.langLine}>
-                {lang.nom} — {lang.niveau}
-              </Text>
-            ))}
-          </View>
-        )}
+        <View style={styles.footer} fixed>
+          <Text style={styles.footerText}>CV généré avec NexiRole</Text>
+          {urlCourte !== null ? <Text style={styles.footerText}>{urlCourte}</Text> : null}
+        </View>
       </Page>
     </Document>
   );
