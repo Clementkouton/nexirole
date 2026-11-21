@@ -40,7 +40,7 @@ import { Button, Input, Label, Textarea } from "@/components/ui";
 import { downloadPdf } from "@/lib/download-client";
 import { toast } from "sonner";
 import type { CvBuilderData } from "@/lib/types";
-import { PublicCvStudio } from "@/components/dashboard/PublicCvStudio";
+import { PublicCvStudio } from "@/components/PublicCvStudio";
 
 /* ------------------------------------------------------------------ */
 /*  Types & constantes                                                 */
@@ -3051,5 +3051,6 @@ export default function CvBuilderPage() {
         : null}
     </div>
       <PublicCvStudio />
+    </>
   );
 }

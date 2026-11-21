@@ -8,6 +8,9 @@ import type { NormalizedCv } from "@/lib/cv-normalize";
 import {
   IconPrinter, IconQrcode, IconEye, IconWorld, IconMail, IconPhone, IconMapPin, IconLink,
 } from "@tabler/icons-react";
+import { NextResponse } from "next/server";
+
+
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +25,14 @@ function mix(hex: string, target: number, ratio: number): string {
 const darken = (hex: string, r = 0.25) => mix(hex, 0, r);
 
 /* ---------------- briques communes ---------------- */
+export async function GET(request: Request) {
+  const slug = new URL(request.url).searchParams.get("slug");
+  if (!slug) return NextResponse.json({ error: "Parametre slug requis." }, { status: 400 });
+  const record = await prisma.publicResume.findUnique({ where: { slug } });
+  if (!record || !record.isPublic) return NextResponse.json({ error: "Introuvable ou prive" }, { status: 404 });
+  const cvData = (record.cvData ?? {}) as unknown as Record<string, unknown>;
+  return NextResponse.json({ slug: record.slug, topKeys: Object.keys(cvData), raw: cvData /* ... */ });
+}
 
 function Photo({ src, size, ring }: { src: string | null; size: number; ring?: string }) {
   if (!src) return null;
