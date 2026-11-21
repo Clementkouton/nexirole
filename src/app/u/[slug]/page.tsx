@@ -101,22 +101,28 @@ function buildPeriode(record: Record<string, unknown>): string {
 
 function normalizeCvData(raw: unknown): NormalizedCv {
   const record = asRecord(raw) ?? {};
+  /* Enveloppe du CV Builder : { cv: {...}, candidateName, contact } */
+  const root = asRecord(record.cv) ?? record;
   const identity =
-    asRecord(record.identite) ?? asRecord(record.identity) ?? asRecord(record.contact) ?? record;
+    asRecord(root.identite) ?? asRecord(root.identity) ?? asRecord(root.contact) ?? root;
 
-  let fullName = pickString(identity, ["fullName", "nomComplet", "nom", "name", "fullname"]);
+  let fullName = pickString(identity, ["fullName", "nomComplet", "nom_complet", "nom", "name", "fullname"]);
   if (fullName === "") {
     const prenom = pickString(identity, ["prenom", "firstName"]);
     const nom = pickString(identity, ["nomFamille", "lastName"]);
     fullName = [prenom, nom].filter(Boolean).join(" ").trim();
   }
+  if (fullName === "") {
+    /* Enveloppe du builder : le nom complet peut venir de candidateName. */
+    fullName = pickString(record, ["candidateName", "nomCandidat"]);
+  }
 
   const jobTitle =
     pickString(identity, ["jobTitle", "titre", "poste", "title"]) ||
     pickString(record, ["jobTitle", "titre", "poste", "title"]);
-  const summary = pickString(record, ["resume", "résumé", "summary", "profil", "about", "resumePro"]);
+  const summary = pickString(root, ["resume", "résumé", "summary", "profil", "about", "resumePro"]);
 
-  const contact = asRecord(identity.contact) ?? identity;
+  const contact = asRecord(identity.contact) ?? asRecord(record.contact) ?? identity;
   const email = pickString(contact, ["email", "mail"]);
   const phone = pickString(contact, ["phone", "telephone", "téléphone", "tel"]);
   const location = pickString(contact, ["location", "adresse", "ville", "city"]);
@@ -126,7 +132,7 @@ function normalizeCvData(raw: unknown): NormalizedCv {
     pickString(record, ["photoUrl", "photo", "avatar"]);
 
   const experiences: ExperienceNorm[] = asArray(
-    record.experiences ?? record.experience ?? record.experiencesPro,
+    root.experiences ?? root.experience ?? record.experiencesPro,
   )
     .map((item) => {
       const entry = asRecord(item);
@@ -138,12 +144,18 @@ function normalizeCvData(raw: unknown): NormalizedCv {
         poste: pickString(entry, ["poste", "titre", "title", "role", "jobTitle", "fonction"]),
         entreprise: pickString(entry, ["entreprise", "company", "societe", "employeur"]),
         periode: pickString(entry, ["periode", "période", "dates", "period"]) || buildPeriode(entry),
-        description: asTextOrList(entry.description ?? entry.details ?? entry.detail),
+        description: asTextOrList(
+        entry.description ??
+          entry.details ??
+          entry.detail ??
+          entry.achievements ??
+          entry.missions,
+      ),
       };
     })
     .filter((item) => item.poste !== "" || item.entreprise !== "" || item.description !== "");
 
-  const formations: FormationNorm[] = asArray(record.formations ?? record.education ?? record.etudes)
+  const formations: FormationNorm[] = asArray(root.formations ?? root.education ?? record.etudes)
     .map((item) => {
       const entry = asRecord(item);
       if (!entry) {
@@ -160,7 +172,7 @@ function normalizeCvData(raw: unknown): NormalizedCv {
     })
     .filter((item) => item.diplome !== "" || item.etablissement !== "");
 
-  const rawCompetences = record.competences ?? record.skills ?? record.competencesCles ?? [];
+  const rawCompetences = root.competences ?? root.skills ?? record.competencesCles ?? [];
   let competences: string[] = [];
   if (typeof rawCompetences === "string") {
     competences = rawCompetences.split(/[,;]/).map((item) => item.trim()).filter(Boolean);
@@ -178,7 +190,7 @@ function normalizeCvData(raw: unknown): NormalizedCv {
       .filter(Boolean);
   }
 
-  const langues: LangueNorm[] = asArray(record.langues ?? record.languages)
+  const langues: LangueNorm[] = asArray(root.langues ?? root.languages)
     .map((item) => {
       if (typeof item === "string") {
         const parts = item.split(/[:\-–—]/).map((part) => part.trim());
