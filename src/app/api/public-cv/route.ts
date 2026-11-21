@@ -1,252 +1,242 @@
-import { NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-// Type JSON de Prisma — si VS Code signale ce chemin, remplacez-le par le chemin
-// utilisé à la 1re ligne de src/lib/prisma.ts (import du client généré).
-import type { Prisma } from "@/generated/prisma/client";
+import { auth } from "@/auth";
+import { pdf } from "@react-pdf/renderer";
+import QRCode from "qrcode";
+import { renderQrCvDocument } from "@/components/pdf/CvPdfQrTemplates";
+import type { PdfCv } from "@/components/pdf/CvPdfQrTemplates";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CONTRAT D'API — CV EN LIGNE PARTAGEABLE
-// GET   /api/public-cv  → { publicResume | null }  (config de l'utilisateur connecté)
-// POST  /api/public-cv  → publie / met à jour le CV public
-//                         corps : { cvData, slug?, isPublic?, templateId? }
-//                         → slug auto-propre depuis le nom, unicité vérifiée,
-//                           renvoie publicUrl complète
-// PATCH /api/public-cv  → { isPublic?, templateId? } (bascule rapide sans renvoyer cvData)
-//
-// NB : le drapeau « showQrOnPdf » (affichage du QR code sur le PDF) transite À
-// L'INTÉRIEUR de cvData — le modèle PublicResume reste conforme à la spec.
-// ─────────────────────────────────────────────────────────────────────────────
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-interface PublicResumeRow {
-  id: string;
-  userId: string;
-  slug: string;
-  isPublic: boolean;
-  templateId: string;
-  cvData: unknown;
-  viewsCount: number;
-  createdAt: Date;
-  updatedAt: Date;
+/* ---------------- utilitaires ---------------- */
+
+function asRec(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+function asText(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+function asArr(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
 }
 
-// Stratégie JWT de next-auth v5 : session.user ne contient par défaut que
-// name/email/image — PAS d'id. Id s'il existe, sinon repli par email.
-async function requireUserId(): Promise<string | null> {
-  const session = await auth();
-  const sessionUser = (session?.user ?? null) as unknown as
-    | { id?: string; email?: string | null }
-    | null;
+type PublicResumeLike = {
+  id: string; slug: string; isPublic: boolean; templateId: string | null;
+  viewsCount: number; cvData: unknown; updatedAt: Date;
+};
 
-  const directId = typeof sessionUser?.id === "string" ? sessionUser.id.trim() : "";
-  if (directId !== "") return directId;
+type JsonInputValue = string | number | boolean | JsonInputValue[] | { [key: string]: JsonInputValue | null };
 
-  const email = typeof sessionUser?.email === "string" ? sessionUser.email.trim() : "";
-  if (email !== "") {
-    try {
-      const found = await prisma.user.findUnique({ where: { email }, select: { id: true } });
-      return found?.id ?? null;
-    } catch (error) {
-      console.error("[api/public-cv] Résolution utilisateur par email impossible :", error);
-      return null;
-    }
-  }
-  return null;
-}
-
-function unauthorized(): NextResponse {
-  return NextResponse.json(
-    { error: "Session invalide. Reconnectez-vous puis réessayez." },
-    { status: 401 },
-  );
-}
-
-async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
-  try {
-    const body: unknown = await request.json();
-    return body && typeof body === "object" ? (body as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-function readStringField(record: Record<string, unknown> | null, keys: string[]): string {
-  if (!record) return "";
-  for (const key of keys) {
-    const value: unknown = record[key];
-    if (typeof value === "string" && value.trim() !== "") return value.trim();
-  }
-  return "";
-}
-
-function getOrigin(request: Request): string {
-  const configured = process.env.NEXT_PUBLIC_APP_URL ?? process.env.NEXT_PUBLIC_SITE_URL ?? "";
-  if (configured.trim() !== "") return configured.trim().replace(/\/+$/, "");
-  return new URL(request.url).origin;
-}
-
-/** Slug propre : minuscules, sans accents, tirets uniques, max 60 caractères. */
-function sanitizeSlug(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60)
-    .replace(/-+$/g, "");
-}
-
-function toJsonInput(value: unknown): Prisma.InputJsonValue {
-  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
-}
-
-/** Génère un slug unique : base, puis base-2, base-3… puis filet horodaté. */
-async function generateUniqueSlug(base: string): Promise<string> {
-  const cleaned = sanitizeSlug(base);
-  const clean = cleaned !== "" ? cleaned : "candidat";
-  for (let attempt = 1; attempt <= 50; attempt += 1) {
-    const candidate = attempt === 1 ? clean : `${clean}-${attempt}`;
-    const clash = await prisma.publicResume.findUnique({
-      where: { slug: candidate },
-      select: { id: true },
-    });
-    if (!clash) return candidate;
-  }
-  return `${clean}-${Date.now().toString(36)}`;
-}
-
-function serializePublicResume(row: PublicResumeRow, origin: string) {
-  const updatedAt =
-    row.updatedAt instanceof Date && !Number.isNaN(row.updatedAt.getTime())
-      ? row.updatedAt.toISOString()
-      : new Date().toISOString();
+function serializePublicResume(row: PublicResumeLike, url: string) {
   return {
-    id: row.id,
-    slug: row.slug,
-    isPublic: row.isPublic,
-    templateId: row.templateId,
-    viewsCount: row.viewsCount,
-    publicUrl: `${origin}/u/${row.slug}`,
-    cvData: row.cvData ?? null,
-    updatedAt,
+    id: row.id, slug: row.slug, isPublic: row.isPublic === true,
+    templateId: row.templateId ?? null, viewsCount: row.viewsCount ?? 0,
+    cvData: row.cvData ?? {}, updatedAt: row.updatedAt, publicUrl: url,
   };
 }
 
-/* ─────────── GET : configuration du CV public de l'utilisateur connecté ─────────── */
+function publicUrlFromRequest(req: NextRequest, slug: string): string {
+  const envUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  const base = envUrl
+    ? envUrl.replace(/\/$/, "")
+    : `${req.headers.get("x-forwarded-proto") ?? "http"}://${req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "localhost:3000"}`;
+  return `${base}/u/${slug}`;
+}
 
-export async function GET(request: Request) {
-  const userId = await requireUserId();
-  if (!userId) return unauthorized();
+function sanitizeSlug(input: string): string {
+  const s = input.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/g, "");
+  return s || "cv";
+}
+
+async function generateUniqueSlug(base: string, userId: string): Promise<string> {
+  const clean = sanitizeSlug(base);
+  for (let i = 1; i <= 50; i++) {
+    const candidate = i === 1 ? clean : `${clean}-${i + 1}`;
+    const existing = await prisma.publicResume.findUnique({ where: { slug: candidate }, select: { userId: true } });
+    if (!existing) return candidate;
+    if (existing.userId === userId) return candidate;
+  }
+  return `${clean}-${Date.now()}`;
+}
+
+function sanitizeCvData(v: unknown): JsonInputValue {
+  if (v === null || v === undefined) return {};
   try {
+    const parsed: unknown = JSON.parse(JSON.stringify(v));
+    return parsed === null ? {} : parsed as JsonInputValue;
+  } catch { return {}; }
+}
+
+async function requireUserId(): Promise<string | null> {
+  const session = await auth();
+  const u = session?.user as { id?: string; email?: string } | undefined;
+  if (u?.id) return u.id;
+  const email = u?.email;
+  if (!email) return null;
+  const row = await prisma.user.findUnique({ where: { email }, select: { id: true } });
+  return row?.id ?? null;
+}
+
+function errorResponse(err: unknown, tag: string): NextResponse {
+  const e = err as { code?: string; message?: string };
+  console.error(`${tag} Error`, e?.code ?? "", e?.message ?? err);
+  if (e?.code === "P2021") {
+    return NextResponse.json(
+      { error: "La table PublicResume n'existe pas encore. Execute publier-public-resume.ps1 (npx prisma db push).", code: "P2021" },
+      { status: 503 },
+    );
+  }
+  return NextResponse.json({ error: "Erreur interne du serveur." }, { status: 500 });
+}
+
+/* ---------------- normalisation CV ---------------- */
+
+function pickPeriod(o: Record<string, unknown>): string {
+  const start = asText(o.startDate) || asText(o.start) || asText(o.from) || asText(o.dateDebut);
+  const end = asText(o.endDate) || asText(o.end) || asText(o.to) || asText(o.dateFin) || (o.current === true ? "Aujourd'hui" : "");
+  if (start && end) return `${start} — ${end}`;
+  return start || end || asText(o.period) || asText(o.periode);
+}
+
+function normalizeCvForPdf(raw: unknown): PdfCv {
+  const root = asRec(raw) ?? {};
+  const personal = asRec(root.personal) ?? {};
+  const name = asText(personal.fullName) || asText(root.fullName) || asText(personal.name) || asText(root.name) || asText(root.title2) || "CV";
+  const title = asText(personal.title) || asText(root.title) || asText(personal.jobTitle) || asText(root.jobTitle);
+  const photoRaw = asText(personal.photo) || asText(root.photo) || asText(root.avatar);
+  const photo = /^data:image\/(png|jpe?g|webp);base64,/.test(photoRaw) || /^https?:\/\//.test(photoRaw) ? photoRaw : null;
+  const experiences = asArr(root.experiences ?? root.experience ?? root.work).map((x) => {
+    const o = asRec(x) ?? {};
+    return {
+      role: asText(o.role) || asText(o.position) || asText(o.title) || asText(o.poste),
+      company: asText(o.company) || asText(o.employer) || asText(o.entreprise),
+      period: pickPeriod(o),
+      description: asText(o.description) || asArr(o.bullets).filter((b) => typeof b === "string").join("\n"),
+    };
+  }).filter((e) => e.role || e.company);
+  const educations = asArr(root.educations ?? root.education ?? root.formations).map((x) => {
+    const o = asRec(x) ?? {};
+    return {
+      degree: asText(o.degree) || asText(o.diploma) || asText(o.diplome) || asText(o.title),
+      school: asText(o.school) || asText(o.institution) || asText(o.ecole),
+      period: pickPeriod(o),
+    };
+  }).filter((d) => d.degree || d.school);
+  const skills = asArr(root.skills ?? root.competences).map((s) => (typeof s === "string" ? s : asText(asRec(s)?.name))).filter(Boolean);
+  const languages = asArr(root.languages ?? root.langues).map((l) => (typeof l === "string" ? l : asText(asRec(l)?.name))).filter(Boolean);
+  return {
+    name, title, photo,
+    email: asText(personal.email) || asText(root.email),
+    phone: asText(personal.phone) || asText(root.phone),
+    location: asText(personal.location) || asText(personal.city) || asText(root.location),
+    website: asText(personal.website) || asText(root.website) || asText(root.linkedin),
+    summary: asText(root.summary) || asText(root.objective) || asText(root.profile) || asText(root.profil),
+    experiences, educations, skills, languages,
+  };
+}
+
+function extractTheme(raw: unknown): { webTemplate: string; qrTemplate: string; accentColor: string } {
+  const root = asRec(raw) ?? {};
+  const theme = asRec(root.theme) ?? {};
+  const accent = typeof theme.accentColor === "string" && /^#[0-9a-fA-F]{6}$/.test(theme.accentColor) ? theme.accentColor : "#FFC107";
+  const web = typeof theme.webTemplate === "string" && theme.webTemplate ? theme.webTemplate : "classique";
+  const qr = typeof theme.qrTemplate === "string" && theme.qrTemplate ? theme.qrTemplate : "executif";
+  return { webTemplate: web, qrTemplate: qr, accentColor: accent };
+}
+
+/* ---------------- PDF public (QR) ---------------- */
+
+async function servePublicCvPdf(req: NextRequest, slugParam: string): Promise<NextResponse | Response> {
+  const row = await prisma.publicResume.findUnique({ where: { slug: sanitizeSlug(slugParam) } });
+  if (!row || row.isPublic !== true) {
+    return NextResponse.json({ error: "CV introuvable ou privé." }, { status: 404 });
+  }
+  const publicUrl = publicUrlFromRequest(req, row.slug);
+  const theme = extractTheme(row.cvData);
+  let qrDataUrl: string | null = null;
+  try {
+    qrDataUrl = await QRCode.toDataURL(publicUrl, { width: 512, margin: 1, color: { dark: "#051937", light: "#FFFFFF" } });
+  } catch { qrDataUrl = null; }
+  const cv = normalizeCvForPdf(row.cvData);
+  const doc = renderQrCvDocument({ cv, accent: theme.accentColor, qrDataUrl, publicUrl, template: theme.qrTemplate });
+  const stream = await pdf(doc).toBuffer();
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) {
+    chunks.push(chunk);
+  }
+  const buffer = Buffer.concat(chunks);
+  return new Response(new Uint8Array(buffer), {
+    status: 200,
+    headers: { "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="cv-${row.slug}.pdf"` },
+  });
+}
+
+/* ---------------- handlers ---------------- */
+
+export async function GET(req: NextRequest) {
+  try {
+    const sp = req.nextUrl.searchParams;
+    const slugParam = sp.get("slug");
+    if (slugParam && sp.get("format") === "pdf") {
+      return await servePublicCvPdf(req, slugParam);
+    }
+    const userId = await requireUserId();
+    if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
     const row = await prisma.publicResume.findUnique({ where: { userId } });
     return NextResponse.json({
-      publicResume: row ? serializePublicResume(row, getOrigin(request)) : null,
+      publicResume: row ? serializePublicResume(row, publicUrlFromRequest(req, row.slug)) : null,
     });
-  } catch (error) {
-    console.error("[api/public-cv][GET]", error);
-    return NextResponse.json(
-      { error: "Impossible de charger la configuration du CV public." },
-      { status: 500 },
-    );
+  } catch (err) {
+    return errorResponse(err, "[api/public-cv][GET]");
   }
 }
 
-/* ─────────── POST : publication / mise à jour du CV public ─────────── */
-
-export async function POST(request: Request) {
-  const userId = await requireUserId();
-  if (!userId) return unauthorized();
-  const body = await readJsonBody(request);
-  if (!body) return NextResponse.json({ error: "Corps de requête JSON invalide." }, { status: 400 });
-
-  const cvDataValue: unknown = body.cvData;
-  if (cvDataValue === null || typeof cvDataValue !== "object" || Array.isArray(cvDataValue)) {
-    return NextResponse.json(
-      { error: "Le champ cvData (objet du CV structuré) est obligatoire." },
-      { status: 400 },
-    );
-  }
-
+export async function POST(req: NextRequest) {
   try {
+    const userId = await requireUserId();
+    if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
+    const body = (await req.json().catch(() => ({}))) as { cvData?: unknown; isPublic?: boolean; templateId?: string };
+    const cvData = sanitizeCvData(body.cvData);
+    const isPublic = body.isPublic !== false;
+    const templateId = typeof body.templateId === "string" && body.templateId ? body.templateId.slice(0, 40) : null;
     const [userRow, existing] = await Promise.all([
       prisma.user.findUnique({ where: { id: userId }, select: { name: true } }),
       prisma.publicResume.findUnique({ where: { userId } }),
     ]);
-
-    const requestedSlug = sanitizeSlug(readStringField(body, ["slug"]));
-    let slug: string;
-
-    if (requestedSlug !== "") {
-      const clash = await prisma.publicResume.findUnique({
-        where: { slug: requestedSlug },
-        select: { userId: true },
+    if (existing) {
+      const updated = await prisma.publicResume.update({
+        where: { id: existing.id },
+        data: { cvData, isPublic, ...(templateId ? { templateId } : {}) },
       });
-      if (clash && clash.userId !== userId) {
-        return NextResponse.json(
-          { error: "Ce lien public est déjà utilisé par un autre profil. Choisissez un autre identifiant." },
-          { status: 409 },
-        );
-      }
-      slug = requestedSlug;
-    } else if (existing) {
-      slug = existing.slug;
-    } else {
-      slug = await generateUniqueSlug(userRow?.name ?? "");
+      return NextResponse.json({ publicResume: serializePublicResume(updated, publicUrlFromRequest(req, updated.slug)) });
     }
-
-    const isPublic = typeof body.isPublic === "boolean" ? body.isPublic : existing?.isPublic ?? true;
-    const templateId = readStringField(body, ["templateId"]) || existing?.templateId || "modern-accent";
-
-    const row = await prisma.publicResume.upsert({
-      where: { userId },
-      update: { slug, isPublic, templateId, cvData: toJsonInput(cvDataValue) },
-      create: { userId, slug, isPublic, templateId, cvData: toJsonInput(cvDataValue) },
-    });
-
-    return NextResponse.json(
-      { publicResume: serializePublicResume(row, getOrigin(request)) },
-      { status: existing ? 200 : 201 },
-    );
-  } catch (error) {
-    console.error("[api/public-cv][POST]", error);
-    return NextResponse.json({ error: "La publication du CV en ligne a échoué." }, { status: 500 });
+    const slug = await generateUniqueSlug(userRow?.name || "cv", userId);
+    const created = await prisma.publicResume.create({ data: { userId, slug, isPublic, ...(templateId ? { templateId } : {}), cvData } });
+    return NextResponse.json({ publicResume: serializePublicResume(created, publicUrlFromRequest(req, created.slug)) }, { status: 201 });
+  } catch (err) {
+    return errorResponse(err, "[api/public-cv][POST]");
   }
 }
 
-/* ─────────── PATCH : bascule rapide (visibilité / template) ─────────── */
-
-export async function PATCH(request: Request) {
-  const userId = await requireUserId();
-  if (!userId) return unauthorized();
-  const body = await readJsonBody(request);
-  if (!body) return NextResponse.json({ error: "Corps de requête JSON invalide." }, { status: 400 });
-
+export async function PATCH(req: NextRequest) {
   try {
+    const userId = await requireUserId();
+    if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
+    const body = (await req.json().catch(() => ({}))) as { cvData?: unknown; isPublic?: boolean; templateId?: string };
     const existing = await prisma.publicResume.findUnique({ where: { userId } });
-    if (!existing) {
-      return NextResponse.json(
-        { error: "Aucun CV public enregistré. Publiez d'abord votre CV." },
-        { status: 404 },
-      );
-    }
-
-    const data: { isPublic?: boolean; templateId?: string } = {};
-    if (typeof body.isPublic === "boolean") data.isPublic = body.isPublic;
-    const templateId = readStringField(body, ["templateId"]);
-    if (templateId !== "") data.templateId = templateId;
-    if (Object.keys(data).length === 0) {
-      return NextResponse.json(
-        { error: "Aucun champ à mettre à jour (isPublic ou templateId attendu)." },
-        { status: 400 },
-      );
-    }
-
-    const updated = await prisma.publicResume.update({ where: { userId }, data });
-    return NextResponse.json({ publicResume: serializePublicResume(updated, getOrigin(request)) });
-  } catch (error) {
-    console.error("[api/public-cv][PATCH]", error);
-    return NextResponse.json({ error: "La mise à jour du CV public a échoué." }, { status: 500 });
+    if (!existing) return NextResponse.json({ error: "Aucun CV publié. Publie d'abord." }, { status: 404 });
+    const updated = await prisma.publicResume.update({
+      where: { id: existing.id },
+      data: {
+        ...(body.cvData !== undefined ? { cvData: sanitizeCvData(body.cvData) } : {}),
+        ...(typeof body.isPublic === "boolean" ? { isPublic: body.isPublic } : {}),
+        ...(typeof body.templateId === "string" && body.templateId ? { templateId: body.templateId.slice(0, 40) } : {}),
+      },
+    });
+    return NextResponse.json({ publicResume: serializePublicResume(updated, publicUrlFromRequest(req, updated.slug)) });
+  } catch (err) {
+    return errorResponse(err, "[api/public-cv][PATCH]");
   }
 }

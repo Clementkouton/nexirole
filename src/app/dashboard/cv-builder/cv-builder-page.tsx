@@ -2716,12 +2716,12 @@ export default function CvBuilderPage() {
                   type="button"
                   onClick={handleDownloadPdfWithQr}
                   disabled={qrDownloading}
-                  className="mt-2 h-10 w-full rounded-xl border border-gold bg-white px-4 text-sm font-bold text-navy hover:bg-gold-soft disabled:cursor-not-allowed disabled:opacity-60"
+                  className="mt-2 h-10 w-full rounded-xl border text-navy border-navy bg-gold px-4 text-sm font-bold hover:bg-gold-soft disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {qrDownloading ? (
                     <IconLoader2 className="mr-1.5 size-4 animate-spin" />
                   ) : (
-                    <IconQrcode className="mr-1.5 size-4 text-accent-foreground" />
+                    <IconQrcode className="mr-1.5 size-4 text-accent " />
                   )}
                   {qrDownloading ? "Génération du PDF…" : "Télécharger le PDF avec QR code"}
                 </Button>
