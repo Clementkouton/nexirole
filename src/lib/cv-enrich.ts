@@ -1,16 +1,24 @@
 /**
  * cv-enrich.ts - couche de tolerance pour l affichage public des CV.
  *
- * enrichCv() complete la sortie du normalisateur existant (src/lib/cv-normalize.ts) :
- *  1. il retrouve les sections manquantes (experiences, formations, competences,
- *     langues) dans la donnee brute, en acceptant les cles anglaises et francaises,
- *     le singulier et le pluriel, ainsi que les formes imbriquees
- *     ({ items: [...] }, carte nom -> niveau, carte d objets, objet unique) ;
+ * Contrat du consommateur (page /u/[slug] et PDF public) :
+ *   name, title, photo, email, phone, location, website, summary : chaines
+ *   experiences : { role, company, period, description }[]
+ *   educations  : { degree, school, period }[]
+ *   skills, languages : string[]  <- les chaines doivent RESTER des chaines
+ *
+ * enrichCv(cv, raw) complete la sortie du normalisateur :
+ *  1. il retrouve les sections manquantes (experiences, formations,
+ *     competences, langues) dans la donnee brute, en acceptant les cles
+ *     anglaises et francaises, le singulier et le pluriel, ainsi que les
+ *     formes imbriquees ({ items: [...] }, carte nom -> niveau, carte
+ *     d objets, objet unique) ;
  *  2. il expose chaque champ sous tous ses alias habituels (title/poste/role,
- *     company/entreprise, period/dates/periode...) afin que les 7 templates web
- *     et les 5 templates PDF affichent le contenu quel que soit le nom de cle
- *     utilise a la source ;
- *  3. il ne modifie jamais les donnees stockees : tout se fait en memoire.
+ *     company/entreprise, period/dates/periode...) sans jamais ecraser une
+ *     valeur existante ;
+ *  3. il ajoute les alias de premier niveau (name, title, email, phone,
+ *     location, website, photo) SEULEMENT s ils sont absents ;
+ *  4. il ne modifie jamais les donnees stockees : tout se fait en memoire.
  */
 
 type Dict = Record<string, unknown>;
@@ -87,6 +95,20 @@ const SUMMARY_KEYS: readonly string[] = [
 
 const PERSONAL_KEYS: readonly string[] = [
   "personal", "infosPersonnelles", "identite", "contact", "contacts", "profile",
+];
+
+/**
+ * Alias de premier niveau utilises par la page publique et le PDF.
+ * Remplis uniquement quand la cle est absente ou vide.
+ */
+const TOP_LEVEL_ALIASES: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["name", ["name", "fullName", "nom", "nomComplet"]],
+  ["title", ["title", "jobTitle", "poste", "fonction", "titre"]],
+  ["email", ["email", "mail", "courriel"]],
+  ["phone", ["phone", "telephone", "tel", "mobile", "portable"]],
+  ["location", ["location", "ville", "city"]],
+  ["website", ["website", "siteWeb", "site", "url", "portfolio"]],
+  ["photo", ["photo", "photoUrl", "avatar", "image", "photoProfil"]],
 ];
 
 /**
@@ -248,7 +270,7 @@ function joinPeriod(start: string | undefined, end: string | undefined): string 
   return [start, end].filter((part): part is string => part !== undefined).join(" - ");
 }
 
-/** Expose un element d experience sous tous ses alias usuels. */
+/** Expose un element d experience sous tous ses alias usuels (role/company/period/description). */
 export function enrichExperienceItem(item: unknown): Dict {
   if (!isDict(item)) {
     const text = str(item);
@@ -284,7 +306,7 @@ const DEGREE_KEYS: readonly string[] = ["degree", "diplome", "diploma", "title",
 const SCHOOL_KEYS: readonly string[] = ["school", "etablissement", "institution", "university", "universite", "ecole", "college", "lycee", "organisation", "structure"];
 const FIELD_KEYS: readonly string[] = ["field", "fieldOfStudy", "specialite", "domaine", "filiere", "study"];
 
-/** Expose un element de formation sous tous ses alias usuels. */
+/** Expose un element de formation sous tous ses alias usuels (degree/school/period). */
 export function enrichEducationItem(item: unknown): Dict {
   if (!isDict(item)) {
     const text = str(item);
@@ -316,14 +338,13 @@ export function enrichEducationItem(item: unknown): Dict {
 const LANGUAGE_NAME_KEYS: readonly string[] = ["name", "langue", "language", "title", "label", "intitule"];
 const LEVEL_KEYS: readonly string[] = ["level", "niveau", "proficiency", "certification"];
 
-/** Expose un element de langue sous tous ses alias usuels. */
-export function enrichLanguageItem(item: unknown): Dict {
-  if (!isDict(item)) {
-    const text = str(item);
-    const out: Dict = {};
-    fillAliases(out, text, LANGUAGE_NAME_KEYS);
-    return out;
-  }
+/**
+ * Expose un element de langue. Les chaines restent des chaines : le contrat
+ * de la page et du PDF attend languages: string[], et convertir en objets
+ * provoquerait une erreur React (Objects are not valid as a React child).
+ */
+export function enrichLanguageItem(item: unknown): unknown {
+  if (!isDict(item)) return item;
   const out: Dict = { ...item };
   const name = firstString(item, LANGUAGE_NAME_KEYS);
   const level = firstString(item, LEVEL_KEYS);
@@ -332,7 +353,7 @@ export function enrichLanguageItem(item: unknown): Dict {
   return out;
 }
 
-/** Expose un element de competence ; les chaines simples restent inchangees. */
+/** Expose un element de competence ; les chaines restent des chaines. */
 export function enrichSkillItem(item: unknown): unknown {
   if (!isDict(item)) return item;
   const out: Dict = { ...item };
@@ -376,12 +397,14 @@ export function enrichPersonal(personal: Dict): Dict {
  * Enrichit le CV normalise. raw (donnee brute d origine) est facultatif :
  * quand la sortie du normalisateur a perdu une section, elle est recheree
  * dans raw avant d etre exposee sous toutes ses formes d alias.
+ * Les chaines de skills et languages ne sont jamais converties en objets.
  */
 export function enrichCv<T>(cv: T, raw?: unknown): T {
   if (!isDict(cv)) return cv;
   const base: Dict = cv;
   const origin: Dict | undefined = isDict(raw) ? raw : undefined;
   const sources: Dict[] = origin ? [base, origin] : [base];
+  const merged: Dict = origin ? { ...origin, ...base } : { ...base };
   const out: Dict = { ...base };
 
   const experiences =
@@ -439,10 +462,17 @@ export function enrichCv<T>(cv: T, raw?: unknown): T {
   if (personalDict !== undefined) {
     out["personal"] = enrichPersonal(personalDict);
   } else {
-    const merged: Dict = origin ? { ...origin, ...base } : { ...base };
     const name = firstString(merged, ["name", "fullName", "nom"]);
     const email = firstString(merged, ["email", "mail"]);
     if (name !== undefined || email !== undefined) out["personal"] = enrichPersonal(merged);
+  }
+  const profileSrc: Dict = personalDict ?? merged;
+  for (const [key, keys] of TOP_LEVEL_ALIASES) {
+    const current = out[key];
+    if (current === undefined || current === null || (typeof current === "string" && current.trim().length === 0)) {
+      const value = firstString(profileSrc, keys);
+      if (value !== undefined) out[key] = value;
+    }
   }
 
   return out as unknown as T;

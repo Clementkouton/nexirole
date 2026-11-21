@@ -1,3 +1,4 @@
+import { enrichCv } from "@/lib/cv-enrich";
 /* ============================================================
    NexiRole - Normalisation tolerante des donnees de CV
    Partage : /u/[slug]/page.tsx + api/public-cv/route.ts
