@@ -12,7 +12,9 @@
  *     competences, langues) dans la donnee brute, en acceptant les cles
  *     anglaises et francaises, le singulier et le pluriel, ainsi que les
  *     formes imbriquees ({ items: [...] }, carte nom -> niveau, carte
- *     d objets, objet unique) ;
+ *     d objets, objet unique) ; une section reinjectee ne conserve que
+ *     ses elements portant un contenu reel : une coquille vide creee par
+ *     un bouton Ajouter et jamais remplie n est jamais republiee ;
  *  2. il expose chaque champ sous tous ses alias habituels (title/poste/role,
  *     company/entreprise, period/dates/periode...) sans jamais ecraser une
  *     valeur existante ;
@@ -353,11 +355,13 @@ export function enrichLanguageItem(item: unknown): unknown {
   return out;
 }
 
+const SKILL_NAME_KEYS: readonly string[] = ["name", "label", "title", "text", "competence", "skill", "intitule", "value"];
+
 /** Expose un element de competence ; les chaines restent des chaines. */
 export function enrichSkillItem(item: unknown): unknown {
   if (!isDict(item)) return item;
   const out: Dict = { ...item };
-  const name = firstString(item, ["name", "label", "title", "text", "competence", "skill", "intitule", "value"]);
+  const name = firstString(item, SKILL_NAME_KEYS);
   fillAliases(out, name, ["name", "label", "title", "competence"]);
   const level = firstString(item, LEVEL_KEYS);
   fillAliases(out, level, ["level", "niveau"]);
@@ -390,6 +394,50 @@ export function enrichPersonal(personal: Dict): Dict {
 }
 
 /* ------------------------------------------------------------------ */
+/* Garde-fous anti coquilles vides                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Vrai si un element d experience porte un contenu affichable : poste,
+ * entreprise, periode ou description (achievements inclus). Un element
+ * cree vide par un bouton Ajouter (tous les champs a chaine vide) est
+ * rejete et n est donc jamais republie par enrichCv.
+ */
+export function hasExperienceContent(item: unknown): boolean {
+  if (!isDict(item)) return str(item) !== undefined;
+  return (
+    firstString(item, TITLE_KEYS) !== undefined ||
+    firstString(item, COMPANY_KEYS) !== undefined ||
+    firstString(item, PERIOD_KEYS) !== undefined ||
+    readDescription(item).description !== undefined
+  );
+}
+
+/** Vrai si un element de formation porte un contenu affichable. */
+export function hasEducationContent(item: unknown): boolean {
+  if (!isDict(item)) return str(item) !== undefined;
+  return (
+    firstString(item, DEGREE_KEYS) !== undefined ||
+    firstString(item, FIELD_KEYS) !== undefined ||
+    firstString(item, SCHOOL_KEYS) !== undefined ||
+    firstString(item, PERIOD_KEYS) !== undefined ||
+    readDescription(item).description !== undefined
+  );
+}
+
+/**
+ * Vrai si un element de competences ou de langues porte un contenu
+ * affichable. Les chaines restent acceptees si elles sont non vides.
+ */
+export function hasNamedItemContent(item: unknown, nameKeys: readonly string[]): boolean {
+  if (!isDict(item)) return str(item) !== undefined;
+  return (
+    firstString(item, nameKeys) !== undefined ||
+    firstString(item, LEVEL_KEYS) !== undefined
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Enrichissement global                                              */
 /* ------------------------------------------------------------------ */
 
@@ -398,6 +446,8 @@ export function enrichPersonal(personal: Dict): Dict {
  * quand la sortie du normalisateur a perdu une section, elle est recheree
  * dans raw avant d etre exposee sous toutes ses formes d alias.
  * Les chaines de skills et languages ne sont jamais converties en objets.
+ * Les elements sans contenu reel (coquilles vides) sont ecartes des
+ * sections reconstruites depuis la donnee brute.
  */
 export function enrichCv<T>(cv: T, raw?: unknown): T {
   if (!isDict(cv)) return cv;
@@ -414,7 +464,7 @@ export function enrichCv<T>(cv: T, raw?: unknown): T {
     shapedPick(base, looksLikeExperienceItem, 3) ??
     (origin ? shapedPick(origin, looksLikeExperienceItem, 3) : undefined);
   if (experiences !== undefined) {
-    const items = experiences.map(enrichExperienceItem);
+    const items = experiences.map(enrichExperienceItem).filter(hasExperienceContent);
     out["experiences"] = items;
     out["experience"] = items;
     if (out["workExperiences"] === undefined) out["workExperiences"] = items;
@@ -425,7 +475,7 @@ export function enrichCv<T>(cv: T, raw?: unknown): T {
     deepPick(base, EDUCATION_KEYS, 3) ??
     (origin ? deepPick(origin, EDUCATION_KEYS, 3) : undefined);
   if (educations !== undefined) {
-    const items = educations.map(enrichEducationItem);
+    const items = educations.map(enrichEducationItem).filter(hasEducationContent);
     out["educations"] = items;
     out["education"] = items;
     if (out["formations"] === undefined) out["formations"] = items;
@@ -436,7 +486,7 @@ export function enrichCv<T>(cv: T, raw?: unknown): T {
     deepPick(base, SKILL_KEYS, 3) ??
     (origin ? deepPick(origin, SKILL_KEYS, 3) : undefined);
   if (skills !== undefined) {
-    const items = skills.map(enrichSkillItem);
+    const items = skills.map(enrichSkillItem).filter((item) => hasNamedItemContent(item, SKILL_NAME_KEYS));
     out["skills"] = items;
     if (out["competences"] === undefined) out["competences"] = items;
   }
@@ -446,7 +496,7 @@ export function enrichCv<T>(cv: T, raw?: unknown): T {
     deepPick(base, LANGUAGE_KEYS, 3) ??
     (origin ? deepPick(origin, LANGUAGE_KEYS, 3) : undefined);
   if (languages !== undefined) {
-    const items = languages.map(enrichLanguageItem);
+    const items = languages.map(enrichLanguageItem).filter((item) => hasNamedItemContent(item, LANGUAGE_NAME_KEYS));
     out["languages"] = items;
     if (out["langues"] === undefined) out["langues"] = items;
   }

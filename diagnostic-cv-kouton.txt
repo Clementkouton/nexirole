@@ -1,0 +1,5 @@
+=== NexiRole - diagnostic cvData (LECTURE SEULE) ===
+execute le: 2026-11-21T20:32:07.516Z
+slug: kouton-clement
+
+[!] client Prisma non charge (relancez npx prisma generate) - diagnostic impossible

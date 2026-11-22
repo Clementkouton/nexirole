@@ -1,0 +1,244 @@
+/* =====================================================================
+   diagnostic-cv-data.cjs  -  NexiRole  -  LECTURE SEULE (aucune ecriture)
+   ---------------------------------------------------------------------
+   But : montrer EXACTEMENT ce que contient PublicResume.cvData pour le
+   slug kouton-clement, pour localiser pourquoi la page publique n affiche
+   plus toutes les sections (experiences / formations / competences).
+
+   Le script :
+     1. charge DATABASE_URL depuis .env.local / .env (aucune modif)
+     2. charge le client Prisma genere (aucune modif)
+     3. lit la ligne PublicResume du slug (findUnique - lecture seule)
+     4. affiche les metadonnees (templateId, vues, updatedAt = date de la
+        derniere ecriture en base - decisive pour dater un changement)
+     5. affiche cvData complet en JSON
+     6. scanne cvData et liste TOUS les tableaux candidats pour les
+        sections experiences / formations / competences / langues, avec
+        leur chemin JSON exact, leur taille et leur 1er item
+     7. enregistre tout dans diagnostic-cv-kouton.txt (UTF-8)
+
+   Usage :   node diagnostic-cv-data.cjs
+   ===================================================================== */
+
+const fs = require("fs");
+const path = require("path");
+
+const SLUG = "kouton-clement";
+const OUT_FILE = "diagnostic-cv-kouton.txt";
+
+const lines = [];
+
+function out(text) {
+    const line = text === undefined ? "" : String(text);
+    lines.push(line);
+    console.log(line);
+}
+
+function trunc(value, max) {
+    const text = String(value);
+    return text.length > max ? text.slice(0, max) + "..." : text;
+}
+
+function readEnvFile(file) {
+    const result = {};
+    if (!fs.existsSync(file)) return result;
+    const linesFile = fs.readFileSync(file, "utf8").split(/\r?\n/);
+    for (const line of linesFile) {
+        const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
+        if (!match) continue;
+        let value = match[2];
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        result[match[1]] = value;
+    }
+    return result;
+}
+
+/* Cles de sections - EXACTEMENT les memes listes que src/lib/cv-enrich.ts */
+const SECTION_KEYS = {
+    EXPERIENCES: [
+        "experiences", "experience", "workExperiences", "workExperience", "work",
+        "jobs", "job", "emplois", "emploi", "professionalExperiences",
+        "experiencesProfessionnelles", "experiencesPro", "parcours",
+        "parcoursProfessionnel", "positions", "career",
+    ],
+    EDUCATIONS: [
+        "educations", "education", "formations", "formation", "studies", "study",
+        "academicBackground", "academics", "diplomas", "diplomes", "schools",
+    ],
+    SKILLS: [
+        "skills", "skill", "competences", "competence", "competencies", "competency",
+        "technicalSkills", "hardSkills", "softSkills", "technologies", "tools",
+    ],
+    LANGUAGES: [
+        "languages", "language", "langues", "langue", "spokenLanguages",
+    ],
+};
+
+function describeCandidate(value) {
+    if (Array.isArray(value)) {
+        if (value.length === 0) return { shape: "array VIDE", count: 0, preview: "[]" };
+        return { shape: "array", count: value.length, preview: trunc(JSON.stringify(value.slice(0, 2)), 400) };
+    }
+    if (value !== null && typeof value === "object") {
+        const keys = Object.keys(value);
+        if (keys.length === 0) return null;
+        const values = Object.values(value);
+        const dicts = values.filter((v) => v !== null && typeof v === "object" && !Array.isArray(v));
+        const strs = values.filter((v) => typeof v === "string" && v.trim().length > 0);
+        if (dicts.length === values.length && values.length >= 2) {
+            return { shape: "dict d objets", count: values.length, preview: trunc(JSON.stringify(value), 500) };
+        }
+        if (strs.length === values.length && values.length >= 2) {
+            return { shape: "dict nom -> texte", count: values.length, preview: trunc(JSON.stringify(value), 500) };
+        }
+        if (keys.length === 1) {
+            return { shape: "dict {1 cle: " + keys[0] + "}", count: keys.length, preview: trunc(JSON.stringify(value), 400) };
+        }
+        return { shape: "dict (" + keys.length + " cles)", count: keys.length, preview: trunc(JSON.stringify(value), 400) };
+    }
+    if (typeof value === "string" && value.trim().length > 0) {
+        return { shape: "string", count: 1, preview: trunc(value, 200) };
+    }
+    return null;
+}
+
+function scanNode(node, jsonPath, depth, hits) {
+    if (depth > 4) return;
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+        for (let i = 0; i < node.length; i += 1) {
+            scanNode(node[i], jsonPath + "[" + i + "]", depth + 1, hits);
+        }
+        return;
+    }
+    for (const sectionName of Object.keys(SECTION_KEYS)) {
+        for (const key of SECTION_KEYS[sectionName]) {
+            if (!Object.prototype.hasOwnProperty.call(node, key)) continue;
+            const info = describeCandidate(node[key]);
+            if (info) {
+                hits.push({ section: sectionName, path: jsonPath + "." + key, shape: info.shape, count: info.count, preview: info.preview });
+            }
+        }
+    }
+    for (const key of Object.keys(node)) {
+        scanNode(node[key], jsonPath + "." + key, depth + 1, hits);
+    }
+}
+
+(async() => {
+    out("=== NexiRole - diagnostic cvData (LECTURE SEULE) ===");
+    out("execute le: " + new Date().toISOString());
+    out("slug: " + SLUG);
+    out("");
+
+    const envLocal = readEnvFile(path.join(process.cwd(), ".env.local"));
+    const env = readEnvFile(path.join(process.cwd(), ".env"));
+    const databaseUrl = process.env.DATABASE_URL || envLocal.DATABASE_URL || env.DATABASE_URL;
+    if (!databaseUrl) {
+        out("[!] DATABASE_URL introuvable dans .env.local / .env - diagnostic impossible");
+        fs.writeFileSync(OUT_FILE, lines.join("\r\n"), "utf8");
+        return;
+    }
+    process.env.DATABASE_URL = databaseUrl;
+
+    let PrismaClient = null;
+    const candidates = [
+        "./src/generated/prisma",
+        "./src/generated/prisma/index.js",
+        "./src/generated/prisma/client",
+        "@prisma/client",
+    ];
+    for (const candidate of candidates) {
+        try {
+            const mod = require(candidate);
+            const Client = mod.PrismaClient || (mod.default && mod.default.PrismaClient);
+            if (Client) {
+                PrismaClient = Client;
+                out("[i] client Prisma charge via: " + candidate);
+                break;
+            }
+        } catch (error) {
+            /* candidat suivant */
+        }
+    }
+    if (!PrismaClient) {
+        out("[!] client Prisma non charge (relancez npx prisma generate) - diagnostic impossible");
+        fs.writeFileSync(OUT_FILE, lines.join("\r\n"), "utf8");
+        return;
+    }
+
+    let prisma;
+    try {
+        prisma = new PrismaClient();
+    } catch (error) {
+        out("[!] initialisation Prisma impossible: " + trunc(error && error.message ? error.message : error, 200));
+        fs.writeFileSync(OUT_FILE, lines.join("\r\n"), "utf8");
+        return;
+    }
+
+    try {
+        let row = null;
+        try {
+            row = await prisma.publicResume.findUnique({ where: { slug: SLUG } });
+        } catch (errorUnique) {
+            const rows = await prisma.$queryRawUnsafe('SELECT * FROM "PublicResume" WHERE slug = $1 LIMIT 1', SLUG);
+            row = rows && rows.length > 0 ? rows[0] : null;
+        }
+        if (!row) {
+            out("[!] aucune ligne PublicResume pour ce slug");
+            return;
+        }
+
+        out("");
+        out("----------- METADONNEES DE LA LIGNE -----------");
+        out("slug        : " + row.slug);
+        out("isPublic    : " + row.isPublic);
+        out("templateId  : " + row.templateId);
+        out("vues        : " + row.viewsCount);
+        out("createdAt   : " + (row.createdAt ? new Date(row.createdAt).toISOString() : "?"));
+        out("updatedAt   : " + (row.updatedAt ? new Date(row.updatedAt).toISOString() : "?") + "   <- date de la DERNIERE ecriture en base");
+        out("");
+
+        let parsed = null;
+        try {
+            parsed = typeof row.cvData === "string" ? JSON.parse(row.cvData) : row.cvData;
+        } catch (error) {
+            out("[!] cvData: JSON invalide");
+            return;
+        }
+        if (!parsed || typeof parsed !== "object") {
+            out("[!] cvData: vide");
+            return;
+        }
+
+        out("----------- CVDATA COMPLET (JSON) -----------");
+        out(JSON.stringify(parsed, null, 2));
+        out("");
+
+        const hits = [];
+        scanNode(parsed, "$", 0, hits);
+        out("----------- CANDIDATS DE SECTIONS TROUVES DANS cvData -----------");
+        if (hits.length === 0) {
+            out("(aucun candidat trouve)");
+        } else {
+            for (const hit of hits) {
+                out("");
+                out("section attendue : " + hit.section);
+                out("  chemin JSON    : " + hit.path);
+                out("  forme          : " + hit.shape + " (" + hit.count + " element(s))");
+                out("  apercu         : " + hit.preview);
+            }
+        }
+        out("");
+        out("---------------------------------------------------------------");
+        out("Copiez le contenu du fichier " + OUT_FILE + " et collez-le a l assistant.");
+    } catch (error) {
+        out("[!] erreur pendant la lecture: " + trunc(error && error.message ? error.message : error, 300));
+        out("    (si 'Can't reach database server' : reessayez, c est le reseau/Neon)");
+    } finally {
+        try { await prisma.$disconnect(); } catch (errorClose) { /* ignore */ }
+        fs.writeFileSync(OUT_FILE, lines.join("\r\n"), "utf8");
+    }
+})();

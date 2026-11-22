@@ -1081,6 +1081,12 @@ export default function CvBuilderPage() {
 
   useEffect(() => setMounted(true), []);
 
+  /* CV public : publication du builder vers la page /u/[slug] */
+  const [pubSlug, setPubSlug] = useState<string | null>(null);
+  const [pubUrl, setPubUrl] = useState<string | null>(null);
+  const [pubViews, setPubViews] = useState<number | null>(null);
+  const [pubLoading, setPubLoading] = useState(false);
+
   /* Chargement (migration v1 → v2 incluse) */
   useEffect(() => {
     try {
@@ -1153,6 +1159,127 @@ export default function CvBuilderPage() {
   /* ---------------------------------------------------------------- */
   /*  Mise à jour de l'état (toujours fonctionnel = jamais bloqué)     */
   /* ---------------------------------------------------------------- */
+
+  /* -------------------------------------------------------------- */
+  /*  CV public - publication du builder vers /u/[slug]              */
+  /* -------------------------------------------------------------- */
+
+  /* Configuration existante (slug, lien, vues) au chargement. */
+  useEffect(() => {
+    if (!loaded) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/public-cv/builder", { cache: "no-store" });
+        if (!res.ok) return;
+        const json = (await res.json().catch(() => null)) as
+          | { publicResume?: { slug?: string; publicUrl?: string; viewsCount?: number } | null }
+          | null;
+        if (cancelled || !json?.publicResume?.slug) return;
+        setPubSlug(json.publicResume.slug);
+        setPubUrl(json.publicResume.publicUrl ?? null);
+        setPubViews(
+          typeof json.publicResume.viewsCount === "number"
+            ? json.publicResume.viewsCount
+            : 0
+        );
+      } catch {
+        /* serveur injoignable : bloc en mode non publie */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded]);
+
+  /* Design du builder -> templateId comprehensible par la page publique. */
+  function mapDesignTemplate(id: "modern" | "sleek" | "bold" | "clean"): string {
+    if (id === "sleek") return "sleek-executive";
+    if (id === "bold") return "bold-minimalism";
+    if (id === "clean") return "clean-ats";
+    return "modern-accent";
+  }
+
+  async function handlePublishPublicCv() {
+    if (!data.personal.fullName.trim()) {
+      toast.error("Renseignez votre nom complet (etape 1) avant la publication.");
+      setStep(0);
+      setMobileTab("form");
+      return;
+    }
+    setPubLoading(true);
+    try {
+      const res = await fetch("/api/public-cv/builder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slug: pubSlug ?? undefined,
+          theme: {
+            webTemplate: mapDesignTemplate(design.template),
+            accentColor: design.accent,
+            qrTemplate: "executif",
+          },
+          data: {
+            personal: {
+              fullName: data.personal.fullName.trim(),
+              title: data.personal.title.trim(),
+              email: data.personal.email.trim(),
+              phone: data.personal.phone.trim(),
+              location: data.personal.location.trim(),
+              linkedin: data.personal.linkedin.trim(),
+            },
+            summary: data.summary.trim(),
+            experiences: data.experiences
+              .map((e) => ({
+                role: e.role.trim(),
+                company: e.company.trim(),
+                period: e.period.trim(),
+                location: e.location.trim(),
+                achievements: e.achievements.map((a) => a.trim()).filter(Boolean),
+              }))
+              .filter(
+                (e) => e.role !== "" || e.company !== "" || e.achievements.length > 0
+              ),
+            education: data.education
+              .map((e) => ({
+                degree: e.degree.trim(),
+                school: e.school.trim(),
+                period: e.period.trim(),
+              }))
+              .filter((e) => e.degree !== "" || e.school !== ""),
+            skills: data.skills.map((s) => s.trim()).filter(Boolean),
+            languages: data.languages
+              .map((l) => ({ name: l.name.trim(), level: l.level.trim() }))
+              .filter((l) => l.name !== ""),
+          },
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | {
+            publicResume?: { slug?: string; publicUrl?: string; viewsCount?: number };
+            error?: string;
+          }
+        | null;
+      if (!res.ok || !json?.publicResume?.slug) {
+        toast.error(
+          json?.error ?? `Publication impossible (code ${res.status}). Reessayez.`
+        );
+        return;
+      }
+      setPubSlug(json.publicResume.slug);
+      setPubUrl(json.publicResume.publicUrl ?? null);
+      setPubViews(
+        typeof json.publicResume.viewsCount === "number"
+          ? json.publicResume.viewsCount
+          : 0
+      );
+      toast.success("CV publie en ligne ! Le lien Voir en ligne est actif dans l'en-tete.");
+    } catch {
+      toast.error("Impossible de joindre le serveur. Verifiez votre connexion et reessayez.");
+    } finally {
+      setPubLoading(false);
+    }
+  }
 
   function update(patch: Partial<CvBuilderData>) {
     setData((prev) => ({ ...prev, ...patch }));
@@ -2468,6 +2595,41 @@ export default function CvBuilderPage() {
               )}
               <span className="hidden md:inline">Améliorer avec l&apos;IA</span>
               <span className="md:hidden">IA</span>
+            </button>
+
+            {pubSlug !== null && (
+              <a
+                href={pubUrl ?? `/u/${pubSlug}`}
+                target="_blank"
+                rel="noreferrer"
+                title="Ouvrir votre CV public dans un nouvel onglet"
+                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3.5 text-xs font-bold text-navy transition-colors hover:bg-slate-50"
+              >
+                <IconWorld className="size-4 text-gold" />
+                <span className="hidden sm:inline">
+                  Voir en ligne
+                  {typeof pubViews === "number" && pubViews > 0
+                    ? ` - ${pubViews} vue(s)`
+                    : null}
+                </span>
+                <span className="sm:hidden">En ligne</span>
+              </a>
+            )}
+
+            <button
+              type="button"
+              onClick={handlePublishPublicCv}
+              disabled={pubLoading}
+              className="inline-flex h-9 items-center gap-1.5 rounded-full bg-gold px-4 text-xs font-semibold text-navy transition-colors hover:bg-[#FFD056] disabled:cursor-not-allowed disabled:opacity-60"
+              title="Publier la version actuelle du CV sur votre page publique"
+            >
+              {pubLoading ? (
+                <IconLoader2 className="size-4 animate-spin" />
+              ) : (
+                <IconWorld className="size-4" />
+              )}
+              <span className="hidden sm:inline">Publier en ligne</span>
+              <span className="sm:hidden">Publier</span>
             </button>
 
             <Button

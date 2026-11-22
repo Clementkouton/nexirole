@@ -1,0 +1,1103 @@
+=== NexiRole - extraction des sections CV (LECTURE SEULE) ===
+
+=== CVDATA BRUT - cles de premier niveau ==========================
+  photo : string(31359)
+  theme : object
+  skills : array(1)
+  summary : string(379)
+  personal : object
+  education : array(2)
+  languages : array(2)
+  experiences : array(1)
+
+=== CVDATA BRUT - sections (experiences / educations / skills / languages) =
+brut.experiences :
+{
+ "type": "array",
+ "longueur": 1,
+ "elements": [
+  {
+   "type": "object",
+   "id": {
+    "type": "string",
+    "longueur": 36,
+    "apercu": "412cf553-b556-4570-82a3-b58f0de3e1f6",
+    "objectObject": false
+   },
+   "role": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "target": {
+    "type": "null",
+    "valeur": null
+   },
+   "company": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "location": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "achievements": {
+    "type": "array",
+    "longueur": 1,
+    "elements": [
+     {
+      "type": "string",
+      "longueur": 0,
+      "apercu": "",
+      "objectObject": false
+     }
+    ]
+   }
+  }
+ ]
+}
+brut.educations : (absent)
+brut.skills :
+{
+ "type": "array",
+ "longueur": 1,
+ "elements": [
+  {
+   "type": "string",
+   "longueur": 4,
+   "apercu": "Ajou",
+   "objectObject": false
+  }
+ ]
+}
+brut.languages :
+{
+ "type": "array",
+ "longueur": 2,
+ "elements": [
+  {
+   "type": "object",
+   "id": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": "lang-1",
+    "objectObject": false
+   },
+   "name": {
+    "type": "string",
+    "longueur": 8,
+    "apercu": "français",
+    "objectObject": false
+   },
+   "level": {
+    "type": "string",
+    "longueur": 7,
+    "apercu": "Courant",
+    "objectObject": false
+   }
+  },
+  {
+   "type": "object",
+   "id": {
+    "type": "string",
+    "longueur": 36,
+    "apercu": "0f58e003-c474-44aa-9a5d-505b5eb145b6",
+    "objectObject": false
+   },
+   "name": {
+    "type": "string",
+    "longueur": 7,
+    "apercu": "Anglais",
+    "objectObject": false
+   },
+   "level": {
+    "type": "string",
+    "longueur": 7,
+    "apercu": "Courant",
+    "objectObject": false
+   }
+  }
+ ]
+}
+brut.education :
+{
+ "type": "array",
+ "longueur": 2,
+ "elements": [
+  {
+   "type": "object",
+   "id": {
+    "type": "string",
+    "longueur": 5,
+    "apercu": "edu-1",
+    "objectObject": false
+   },
+   "degree": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "school": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   }
+  },
+  {
+   "type": "object",
+   "id": {
+    "type": "string",
+    "longueur": 36,
+    "apercu": "1555838e-a651-4284-9486-bef3ddcb4041",
+    "objectObject": false
+   },
+   "degree": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "school": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   }
+  }
+ ]
+}
+
+=== PIPELINE normalizeCvBase (sortie 'base') ======================
+base.name : {"type":"string","longueur":14,"apercu":"KOUTON CLÉMENT","objectObject":false}
+base.title : {"type":"string","longueur":12,"apercu":"Développeurs","objectObject":false}
+base.photo : {"type":"string","longueur":31359,"apercu":"<valeur longue omise (31359 caracteres)>","objectObject":false}
+base.email : {"type":"string","longueur":25,"apercu":"clementkouton33@gmail.com","objectObject":false}
+base.phone : {"type":"string","longueur":14,"apercu":"+2290169405198","objectObject":false}
+base.location : {"type":"string","longueur":6,"apercu":"Calavi","objectObject":false}
+base.website : {"type":"string","longueur":34,"apercu":"inkedIn linkedin.com/in/jeandupont","objectObject":false}
+base.summary : {"type":"string","longueur":379,"apercu":"Développeur web confirmé (4 ans) spécialisé en optimisation de performances, profilage d’applications et gestion SQL. Pilote l’amélioration ...","objectObject":false}
+base.experiences :
+{
+ "type": "array",
+ "longueur": 0,
+ "elements": []
+}
+base.educations :
+{
+ "type": "array",
+ "longueur": 2,
+ "elements": [
+  {
+   "type": "object",
+   "degree": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "school": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   }
+  },
+  {
+   "type": "object",
+   "degree": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "school": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   }
+  }
+ ]
+}
+base.skills :
+{
+ "type": "array",
+ "longueur": 1,
+ "elements": [
+  {
+   "type": "string",
+   "longueur": 4,
+   "apercu": "Ajou",
+   "objectObject": false
+  }
+ ]
+}
+base.languages :
+{
+ "type": "array",
+ "longueur": 2,
+ "elements": [
+  {
+   "type": "string",
+   "longueur": 8,
+   "apercu": "français",
+   "objectObject": false
+  },
+  {
+   "type": "string",
+   "longueur": 7,
+   "apercu": "Anglais",
+   "objectObject": false
+  }
+ ]
+}
+base.isEmpty : {"type":"boolean","valeur":false}
+
+=== PIPELINE normalizeCv (wrapper enrichi - CE QUE LA PAGE AFFICHE) =
+wrapper.name : {"type":"string","longueur":14,"apercu":"KOUTON CLÉMENT","objectObject":false}
+wrapper.title : {"type":"string","longueur":12,"apercu":"Développeurs","objectObject":false}
+wrapper.photo : {"type":"string","longueur":31359,"apercu":"<valeur longue omise (31359 caracteres)>","objectObject":false}
+wrapper.email : {"type":"string","longueur":25,"apercu":"clementkouton33@gmail.com","objectObject":false}
+wrapper.phone : {"type":"string","longueur":14,"apercu":"+2290169405198","objectObject":false}
+wrapper.location : {"type":"string","longueur":6,"apercu":"Calavi","objectObject":false}
+wrapper.website : {"type":"string","longueur":34,"apercu":"inkedIn linkedin.com/in/jeandupont","objectObject":false}
+wrapper.summary : {"type":"string","longueur":379,"apercu":"Développeur web confirmé (4 ans) spécialisé en optimisation de performances, profilage d’applications et gestion SQL. Pilote l’amélioration ...","objectObject":false}
+wrapper.experiences :
+{
+ "type": "array",
+ "longueur": 1,
+ "elements": [
+  {
+   "type": "object",
+   "id": {
+    "type": "string",
+    "longueur": 36,
+    "apercu": "412cf553-b556-4570-82a3-b58f0de3e1f6",
+    "objectObject": false
+   },
+   "role": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "target": {
+    "type": "null",
+    "valeur": null
+   },
+   "company": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "location": {
+    "type": "string",
+    "longueur": 0,
+    "apercu": "",
+    "objectObject": false
+   },
+   "achievements": {
+    "type": "array",
+    "longueur": 1,
+    "elements": [
+     {
+      "type": "string",
+      "longueur": 0,
+      "apercu": "",
+      "objectObject": false
+     }
+    ]
+   }
+  }
+ ]
+}
+wrapper.educations :
+{
+ "type": "array",
+ "longueur": 2,
+ "elements": [
+  {
+   "type": "object",
+   "degree": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "school": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "diplome": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "diploma": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "title": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "formation": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "intitule": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "qualification": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "programme": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "mention": {
+    "type": "string",
+    "longueur": 6,
+    "apercu": ",k,,;,",
+    "objectObject": false
+   },
+   "etablissement": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "institution": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "university": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "universite": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "ecole": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "college": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "lycee": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "organisation": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "structure": {
+    "type": "string",
+    "longueur": 3,
+    "apercu": "nnn",
+    "objectObject": false
+   },
+   "dates": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "dateLabel": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "periode": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "duree": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "duration": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   },
+   "dateRange": {
+    "type": "string",
+    "longueur": 2,
+    "apercu": "12",
+    "objectObject": false
+   }
+  },
+  {
+   "type": "object",
+   "degree": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "school": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "period": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "diplome": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "diploma": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "title": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "formation": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "intitule": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "qualification": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "programme": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "mention": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "2D3D",
+    "objectObject": false
+   },
+   "etablissement": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "institution": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "university": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "universite": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "ecole": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "college": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "lycee": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "organisation": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "structure": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "DE34",
+    "objectObject": false
+   },
+   "dates": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "dateLabel": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "periode": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "duree": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "duration": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   },
+   "dateRange": {
+    "type": "string",
+    "longueur": 4,
+    "apercu": "4DED",
+    "objectObject": false
+   }
+  }
+ ]
+}
+wrapper.skills :
+{
+ "type": "array",
+ "longueur": 1,
+ "elements": [
+  {
+   "type": "string",
+   "longueur": 4,
+   "apercu": "Ajou",
+   "objectObject": false
+  }
+ ]
+}
+wrapper.languages :
+{
+ "type": "array",
+ "longueur": 2,
+ "elements": [
+  {
+   "type": "string",
+   "longueur": 8,
+   "apercu": "français",
+   "objectObject": false
+  },
+  {
+   "type": "string",
+   "longueur": 7,
+   "apercu": "Anglais",
+   "objectObject": false
+  }
+ ]
+}
+wrapper.isEmpty : {"type":"boolean","valeur":false}
+wrapper.experience (alias) : identique a experiences
+wrapper.workExperiences (alias) : identique a experiences
+wrapper.education (alias) : identique a educations
+wrapper.formations (alias) : identique a educations
+wrapper.competences (alias) : identique a skills
+wrapper.langues (alias) : identique a languages
+wrapper.profil (alias) : identique a summary
+wrapper.profile (alias) : identique a summary
+wrapper.personal :
+{
+ "type": "object",
+ "email": {
+  "type": "string",
+  "longueur": 25,
+  "apercu": "clementkouton33@gmail.com",
+  "objectObject": false
+ },
+ "phone": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "+2290169405198",
+  "objectObject": false
+ },
+ "photo": {
+  "type": "string",
+  "longueur": 31359,
+  "apercu": "<valeur longue omise (31359 caracteres)>",
+  "objectObject": false
+ },
+ "title": {
+  "type": "string",
+  "longueur": 13,
+  "apercu": "Développeurs ",
+  "objectObject": false
+ },
+ "fullName": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "KOUTON CLÉMENT",
+  "objectObject": false
+ },
+ "linkedin": {
+  "type": "string",
+  "longueur": 34,
+  "apercu": "inkedIn linkedin.com/in/jeandupont",
+  "objectObject": false
+ },
+ "location": {
+  "type": "string",
+  "longueur": 6,
+  "apercu": "Calavi",
+  "objectObject": false
+ },
+ "name": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "KOUTON CLÉMENT",
+  "objectObject": false
+ },
+ "nom": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "KOUTON CLÉMENT",
+  "objectObject": false
+ },
+ "nomComplet": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "KOUTON CLÉMENT",
+  "objectObject": false
+ },
+ "displayName": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "KOUTON CLÉMENT",
+  "objectObject": false
+ },
+ "jobTitle": {
+  "type": "string",
+  "longueur": 12,
+  "apercu": "Développeurs",
+  "objectObject": false
+ },
+ "poste": {
+  "type": "string",
+  "longueur": 12,
+  "apercu": "Développeurs",
+  "objectObject": false
+ },
+ "titre": {
+  "type": "string",
+  "longueur": 12,
+  "apercu": "Développeurs",
+  "objectObject": false
+ },
+ "mail": {
+  "type": "string",
+  "longueur": 25,
+  "apercu": "clementkouton33@gmail.com",
+  "objectObject": false
+ },
+ "courriel": {
+  "type": "string",
+  "longueur": 25,
+  "apercu": "clementkouton33@gmail.com",
+  "objectObject": false
+ },
+ "telephone": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "+2290169405198",
+  "objectObject": false
+ },
+ "tel": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "+2290169405198",
+  "objectObject": false
+ },
+ "mobile": {
+  "type": "string",
+  "longueur": 14,
+  "apercu": "+2290169405198",
+  "objectObject": false
+ },
+ "ville": {
+  "type": "string",
+  "longueur": 6,
+  "apercu": "Calavi",
+  "objectObject": false
+ },
+ "city": {
+  "type": "string",
+  "longueur": 6,
+  "apercu": "Calavi",
+  "objectObject": false
+ },
+ "photoUrl": {
+  "type": "string",
+  "longueur": 31359,
+  "apercu": "<valeur longue omise (31359 caracteres)>",
+  "objectObject": false
+ },
+ "avatar": {
+  "type": "string",
+  "longueur": 31359,
+  "apercu": "<valeur longue omise (31359 caracteres)>",
+  "objectObject": false
+ },
+ "image": {
+  "type": "string",
+  "longueur": 31359,
+  "apercu": "<valeur longue omise (31359 caracteres)>",
+  "objectObject": false
+ },
+ "linkedinUrl": {
+  "type": "string",
+  "longueur": 34,
+  "apercu": "inkedIn linkedin.com/in/jeandupont",
+  "objectObject": false
+ }
+}
+
+=== ANALYSE FINES =================================================
+cvData brut : experiences = array(1)  <- normalizeCvBase en rend 0
+  brut.experiences[0] : objet { id, role, period, target, company, location, achievements }
+[!] brut.skills[0] est une STRING: "Ajou"
+    si c'est une liste separee par des virgules, la page n'affiche qu'une competence geante
+experience AFFICHEE (wrapper.experiences[0]) : id=string(36), role=string(0), period=string(0), target=?, company=string(0), location=string(0), achievements=array(1)
+  [!] champs VIDES dans l'experience affichee: role, period, company, location
+[OK] aucun [object Object] dans base/wrapper
+
+=== CONTENU DE src/lib/cv-normalize.ts (numerote) =================
+   1 | import { enrichCv } from "@/lib/cv-enrich";
+   2 | /* ============================================================
+   3 |    NexiRole - Normalisation tolerante des donnees de CV
+   4 |    Partage : /u/[slug]/page.tsx + api/public-cv/route.ts
+   5 |    Double export : normalizeCv (nomme) + default
+   6 |    ============================================================ */
+   7 | 
+   8 | export type NormalizedCvExperience = { role: string; company: string; period: string; description: string };
+   9 | export type NormalizedCvEducation = { degree: string; school: string; period: string };
+  10 | 
+  11 | export type NormalizedCv = {
+  12 |   name: string;
+  13 |   title: string;
+  14 |   photo: string | null;
+  15 |   email: string;
+  16 |   phone: string;
+  17 |   location: string;
+  18 |   website: string;
+  19 |   summary: string;
+  20 |   experiences: NormalizedCvExperience[];
+  21 |   educations: NormalizedCvEducation[];
+  22 |   skills: string[];
+  23 |   languages: string[];
+  24 |   isEmpty: boolean;
+  25 | };
+  26 | 
+  27 | function asRec(v: unknown): Record<string, unknown> | null {
+  28 |   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  29 | }
+  30 | function asText(v: unknown): string {
+  31 |   if (typeof v === "string") return v.trim();
+  32 |   if (typeof v === "number" || typeof v === "boolean") return String(v);
+  33 |   return "";
+  34 | }
+  35 | function asArr(v: unknown): unknown[] {
+  36 |   return Array.isArray(v) ? v : [];
+  37 | }
+  38 | function tryParseJson(s: string): unknown {
+  39 |   try { return JSON.parse(s); } catch { return null; }
+  40 | }
+  41 | function get(o: Record<string, unknown>, keys: string[]): unknown {
+  42 |   for (const k of keys) {
+  43 |     const v = o[k];
+  44 |     if (v !== undefined && v !== null && v !== "") return v;
+  45 |   }
+  46 |   return undefined;
+  47 | }
+  48 | function firstVal(...vals: unknown[]): unknown {
+  49 |   for (const v of vals) if (v !== undefined && v !== null && v !== "") return v;
+  50 |   return undefined;
+  51 | }
+  52 | 
+  53 | const WRAPPER_KEYS = ["cv", "cvData", "resume", "data", "payload", "content", "parsed", "value"];
+  54 | 
+  55 | function unwrapRoot(v: unknown, depth = 0): Record<string, unknown> {
+  56 |   if (depth > 4) return {};
+  57 |   if (typeof v === "string") {
+  58 |     const parsed = tryParseJson(v);
+  59 |     return parsed && typeof parsed === "object" ? unwrapRoot(parsed, depth + 1) : {};
+  60 |   }
+  61 |   const o = asRec(v);
+  62 |   if (!o) return {};
+  63 |   for (const k of WRAPPER_KEYS) {
+  64 |     const inner = asRec(o[k]);
+  65 |     if (!inner) continue;
+  66 |     const outerOthers = Object.keys(o).filter((x) => x !== k && o[x] !== undefined && o[x] !== null && o[x] !== "");
+  67 |     const innerKeys = Object.keys(inner).filter((x) => inner[x] !== undefined && inner[x] !== null && inner[x] !== "");
+  68 |     if (innerKeys.length >= 3 && outerOthers.length <= 3) {
+  69 |       const unwrapped = unwrapRoot(inner, depth + 1);
+  70 |       const merged: Record<string, unknown> = { ...unwrapped };
+  71 |       for (const k2 of Object.keys(o)) {
+  72 |         if (k2 === k) continue;
+  73 |         if (merged[k2] === undefined) merged[k2] = o[k2];
+  74 |       }
+  75 |       return merged;
+  76 |     }
+  77 |   }
+  78 |   return o;
+  79 | }
+  80 | 
+  81 | function pickPeriod(o: Record<string, unknown>): string {
+  82 |   const start = asText(get(o, ["startDate", "start", "from", "dateDebut", "beginDate", "debut"]));
+  83 |   const current = o.current === true || o.currently === true || o.ongoing === true || o.present === true;
+  84 |   const end = asText(get(o, ["endDate", "end", "to", "dateFin", "fin"])) || (current ? "Aujourd'hui" : "");
+  85 |   if (start && end) return `${start} — ${end}`;
+  86 |   return start || end || asText(get(o, ["period", "periode", "dates", "duration", "duree"]));
+  87 | }
+  88 | 
+  89 | function collectBullets(o: Record<string, unknown>): string[] {
+  90 |   const out: string[] = [];
+  91 |   for (const key of ["bullets", "highlights", "missions", "tasks", "responsibilities", "responsabilites", "achievements", "points"]) {
+  92 |     for (const b of asArr(o[key])) {
+  93 |       const t = typeof b === "string" ? b.trim() : asText(get(asRec(b) ?? {}, ["text", "label", "value", "content"]));
+  94 |       if (t) out.push(t);
+  95 |     }
+  96 |   }
+  97 |   return out;
+  98 | }
+  99 | 
+ 100 | function toExperiences(v: unknown): NormalizedCvExperience[] {
+ 101 |   return asArr(v)
+ 102 |     .map((x): NormalizedCvExperience | null => {
+ 103 |       const o = asRec(x);
+ 104 |       if (!o) {
+ 105 |         const s = typeof x === "string" ? x.trim() : "";
+ 106 |         return s ? { role: s, company: "", period: "", description: "" } : null;
+ 107 |       }
+ 108 |       const bullets = collectBullets(o);
+ 109 |       let description = asText(get(o, ["description", "summary", "details", "text", "contenu"]));
+ 110 |       if (bullets.length) {
+ 111 |         const block = bullets.map((b) => `• ${b}`).join("\n");
+ 112 |         description = description ? `${description}\n${block}` : block;
+ 113 |       }
+ 114 |       return {
+ 115 |         role: asText(get(o, ["role", "position", "jobTitle", "title", "poste", "intitule", "metier"])),
+ 116 |         company: asText(get(o, ["company", "employer", "entreprise", "societe", "organisation", "structure"])),
+ 117 |         period: pickPeriod(o),
+ 118 |         description,
+ 119 |       };
+ 120 |     })
+ 121 |     .filter((e): e is NormalizedCvExperience => Boolean(e && (e.role || e.company || e.description)));
+ 122 | }
+ 123 | 
+ 124 | function toEducations(v: unknown): NormalizedCvEducation[] {
+ 125 |   return asArr(v)
+ 126 |     .map((x): NormalizedCvEducation | null => {
+ 127 |       const o = asRec(x);
+ 128 |       if (!o) {
+ 129 |         const s = typeof x === "string" ? x.trim() : "";
+ 130 |         return s ? { degree: s, school: "", period: "" } : null;
+ 131 |       }
+ 132 |       return {
+ 133 |         degree: asText(get(o, ["degree", "diploma", "diplome", "title", "titre", "formation", "field", "domaine", "study"])),
+ 134 |         school: asText(get(o, ["school", "institution", "ecole", "universite", "university", "organisme"])),
+ 135 |         period: pickPeriod(o),
+ 136 |       };
+ 137 |     })
+ 138 |     .filter((d): d is NormalizedCvEducation => Boolean(d && (d.degree || d.school)));
+ 139 | }
+ 140 | 
+ 141 | function toNameList(v: unknown): string[] {
+ 142 |   return asArr(v)
+ 143 |     .map((x) => (typeof x === "string" ? x.trim() : asText(get(asRec(x) ?? {}, ["name", "label", "title", "value", "skill", "langue", "language"]))))
+ 144 |     .filter(Boolean);
+ 145 | }
+ 146 | 
+ 147 | function isImageSrc(v: string): boolean {
+ 148 |   return /^data:image\/(png|jpe?g|jpeg|webp|gif);base64,/.test(v) || /^https?:\/\/\S+$/i.test(v);
+ 149 | }
+ 150 | 
+ 151 | export function normalizeCv(...args: Parameters<typeof normalizeCvBase>) {
+ 152 |   return enrichCv(normalizeCvBase(...args), args[0]);
+ 153 | }
+ 154 | export function normalizeCvBase(raw: unknown): NormalizedCv {
+ 155 |   const root = unwrapRoot(raw);
+ 156 |   const personal = asRec(get(root, ["personal", "personnel", "personalInfo", "informationsPersonnelles", "infos", "identity", "identite"])) ?? {};
+ 157 |   const contact = asRec(get(root, ["contact", "contacts", "coordonnees"])) ?? {};
+ 158 |   const scalars = { ...root, ...personal, ...contact };
+ 159 | 
+ 160 |   const firstName = asText(get(scalars, ["firstName", "prenom", "first_name"]));
+ 161 |   const lastName = asText(get(scalars, ["lastName", "nom", "last_name", "familyName"]));
+ 162 |   const directName = asText(get(scalars, ["fullName", "name", "completeName", "candidateName", "displayName"]));
+ 163 |   const resolvedName = directName || [firstName, lastName].filter(Boolean).join(" ").trim();
+ 164 | 
+ 165 |   const title = asText(get(scalars, ["jobTitle", "title", "headline", "poste", "titre", "position", "role"]));
+ 166 |   const photoRaw = asText(get(scalars, ["photo", "photoUrl", "profilePhoto", "avatar", "image", "photoDeProfil"]));
+ 167 |   const photo = isImageSrc(photoRaw) ? photoRaw : null;
+ 168 | 
+ 169 |   const experiences = toExperiences(firstVal(
+ 170 |     root.experiences, root.experience, root.work, root.workExperience, root.workExperiences,
+ 171 |     root.professionalExperiences, root.jobs, root.employment, personal.experiences, personal.experience,
+ 172 |   ));
+ 173 |   const educations = toEducations(firstVal(
+ 174 |     root.educations, root.education, root.formations, root.academicBackground, root.studies, root.formation,
+ 175 |     personal.educations, personal.education,
+ 176 |   ));
+ 177 |   const skills = toNameList(firstVal(root.skills, root.competences, root.skillSet, root.technicalSkills, root.hardSkills, personal.skills));
+ 178 |   const languages = toNameList(firstVal(root.languages, root.langues, root.languageList, personal.languages));
+ 179 |   const summary = asText(get(scalars, ["summary", "profil", "profile", "about", "bio", "objective", "objectif", "professionalSummary", "accroche", "presentation"]));
+ 180 |   const email = asText(get(scalars, ["email", "mail", "courriel"]));
+ 181 |   const phone = asText(get(scalars, ["phone", "telephone", "tel", "mobile", "whatsapp"]));
+ 182 |   const location = asText(get(scalars, ["location", "city", "ville", "address", "adresse", "localisation"]));
+ 183 |   const website = asText(get(scalars, ["website", "url", "site", "portfolio", "linkedin", "github", "siteWeb"]));
+ 184 | 
+ 185 |   const hasContent = Boolean(resolvedName || summary || email || phone || experiences.length || educations.length || skills.length || languages.length);
+ 186 | 
+ 187 |   return {
+ 188 |     name: resolvedName || "CV",
+ 189 |     title, photo, email, phone, location, website, summary,
+ 190 |     experiences, educations, skills, languages,
+ 191 |     isEmpty: !hasContent,
+ 192 |   };
+ 193 | }
+ 194 | 
+ 195 | export function extractTheme(raw: unknown, templateColumn?: string | null): { webTemplate: string; qrTemplate: string; accentColor: string } {
+ 196 |   const direct = asRec(raw) ?? {};
+ 197 |   const directTheme = asRec(direct.theme) ?? {};
+ 198 |   const root = unwrapRoot(raw);
+ 199 |   const innerTheme = asRec(get(root, ["theme", "publicTheme", "design"])) ?? {};
+ 200 |   const theme = Object.keys(directTheme).length ? directTheme : innerTheme;
+ 201 |   const accentRaw = asText(get(theme, ["accentColor", "accent", "color", "couleur"]));
+ 202 |   const accent = /^#[0-9a-fA-F]{6}$/.test(accentRaw) ? accentRaw : "#FFC107";
+ 203 |   const webRaw = asText(get(theme, ["webTemplate", "web", "template"]));
+ 204 |   const qrRaw = asText(get(theme, ["qrTemplate", "qr", "pdfTemplate"]));
+ 205 |   return {
+ 206 |     webTemplate: webRaw || templateColumn || "classique",
+ 207 |     qrTemplate: qrRaw || "executif",
+ 208 |     accentColor: accent,
+ 209 |   };
+ 210 | }
+ 211 | 
+ 212 | export default normalizeCv;
+ 213 | 
+
+[OK] copie de secours creee: cv-enrich-copie.txt (l'assistant la demandera si besoin)
