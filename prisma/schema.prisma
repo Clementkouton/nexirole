@@ -35,6 +35,7 @@ model User {
   usagePeriodStart DateTime? @default(now())
 
   savedResumes          SavedResume[]
+  cvDocuments          CvDocument[]
   generatedApplications GeneratedApplication[]
   jobApplications       JobApplicationTracker[]
 
@@ -195,4 +196,26 @@ model PublicResume {
   updatedAt  DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ── Bibliothèque de CV du créateur (PARTIE CV BUILDER) ──────
+// Un CvDocument = un CV de la bibliothèque : contenu (data),
+// design, étape courante, état de publication et corbeille 30 j.
+model CvDocument {
+  id            String    @id @default(cuid())
+  userId        String
+  name          String    @default("Mon CV")
+  data          Json      // contenu complet du CV (CvBuilderData)
+  design        Json      // design du CV (CvDesign)
+  step          Int       @default(0) // étape courante du créateur (0-5)
+  isPublic      Boolean   @default(false) // CV actuellement en ligne
+  publishedSlug String?   // slug de la page /u/<slug> quand publié
+  trashedAt     DateTime? // corbeille : date de suppression (purge à 30 jours)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("cv_documents")
 }
