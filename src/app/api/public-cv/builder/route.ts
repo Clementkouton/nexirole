@@ -7,9 +7,18 @@ import { prisma } from "@/lib/prisma";
  * Publication du CV Builder vers la page publique /u/[slug].
  * GET  : etat de publication (slug, lien public, nombre de vues)
  *        pour l'utilisateur connecte.
- * POST : ecriture des donnees du builder dans PublicResume
- *        (recherche par slug, mise a jour sinon creation, photo
- *        existante preservee, isPublic force a true).
+ * POST : ecriture des donnees dans PublicResume (upsert par slug,
+ *        photo existante preservee, isPublic force a true).
+ *
+ * SOURCE-DE-VERITE-CVDOCUMENT :
+ * quand un CV de la bibliotheque (CvDocument) est lie au slug
+ * publie, son champ data fait foi : les ameliorations IA et les
+ * dernieres modifications enregistrees en base sont toujours
+ * publiees, meme si le client envoie un instantane ancien (cas
+ * "Mettre a jour la publication" de l'espace Lien Web Public).
+ * Le theme recu reste applique ; la photo existante est conservee.
+ * Sans CvDocument lie (CV local hors bibliotheque), le contenu recu
+ * du createur est utilise, comme avant.
  * Ce fichier ne modifie aucune autre route, page ou modele.
  */
 
@@ -82,6 +91,8 @@ const publishSchema = z.object({
   }),
 });
 
+type PublishData = z.infer<typeof publishSchema>["data"];
+
 async function resolveSlug(
   preferred: string | undefined,
   fallbackName: string
@@ -110,6 +121,42 @@ function resumeJson(
     publicUrl: publicUrlFrom(request, row.slug),
     viewsCount: typeof row.viewsCount === "number" ? row.viewsCount : 0,
   };
+}
+
+/**
+ * Contenu effectif publie. Si un CV de la bibliotheque est lie a ce
+ * slug (publishedSlug) et n'est pas dans la corbeille, son contenu
+ * enregistre (data, ameliorations IA incluses) remplace celui du
+ * payload. En cas d'echec de lecture ou de donnees non conformes, on
+ * retombe sans erreur sur le contenu recu du createur.
+ */
+async function contenuSourceDeVerite(
+  slug: string,
+  dataRecu: PublishData
+): Promise<PublishData> {
+  try {
+    const cv = await prisma.cvDocument.findFirst({
+      where: { publishedSlug: slug, trashedAt: null },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (!cv || cv.data === null || typeof cv.data !== "object") {
+      return dataRecu;
+    }
+    const parsedCv = publishSchema.shape.data.safeParse(cv.data);
+    if (!parsedCv.success) {
+      console.warn(
+        "[public-cv/builder][POST] CvDocument.data non conforme - contenu recu utilise."
+      );
+      return dataRecu;
+    }
+    return parsedCv.data;
+  } catch (error) {
+    console.error(
+      "[public-cv/builder][POST] Lecture du CvDocument impossible :",
+      error
+    );
+    return dataRecu;
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -162,8 +209,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { slug: slugDemande, theme, data } = parsed.data;
-  const slug = await resolveSlug(slugDemande, data.personal.fullName);
+  const { slug: slugDemande, theme } = parsed.data;
+  const slug = await resolveSlug(
+    slugDemande,
+    parsed.data.data.personal.fullName
+  );
   if (!slug) {
     return NextResponse.json(
       {
@@ -173,6 +223,9 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   }
+
+  /* Contenu effectif : CvDocument lie au slug, sinon payload recu. */
+  const data = await contenuSourceDeVerite(slug, parsed.data.data);
 
   const experiences = data.experiences.filter(
     (e) => e.role !== "" || e.company !== "" || e.achievements.length > 0

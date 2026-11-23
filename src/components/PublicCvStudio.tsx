@@ -211,7 +211,7 @@ export function PublicCvStudio({ cvData }: { cvData?: unknown }) {
   }
 
   const publicLink = row?.slug && typeof window !== "undefined" ? `${window.location.origin}/u/${row.slug}` : "";
-  const pdfQrUrl = row?.slug ? `/api/public-cv?slug=${encodeURIComponent(row.slug)}&format=pdf` : "";
+  const pdfQrUrl = row?.slug ? `/api/public-cv/pdf?slug=${encodeURIComponent(row.slug)}` : "";
 
   return (
     <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">

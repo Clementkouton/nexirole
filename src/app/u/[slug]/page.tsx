@@ -327,7 +327,7 @@ export default async function PublicCvPage({ params }: { params: Promise<{ slug:
 
   const cv = normalizeCv(row.cvData);
   const theme = extractTheme(row.cvData, row.templateId);
-  const pdfUrl = `/api/public-cv?slug=${encodeURIComponent(row.slug)}&format=pdf`;
+  const pdfUrl = `/api/public-cv/pdf?slug=${encodeURIComponent(row.slug)}`;
 
   return (
     <div id="nr-public-root" className="min-h-screen bg-slate-100 pb-24">

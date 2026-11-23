@@ -11,7 +11,7 @@ import { mapDesignTemplate } from "@/lib/cv-publish-payload";
    GET /api/public-cv/pdf?slug=<slug>  → accès public (CV publié)
    GET /api/public-cv/pdf?cv=<id>      → propriétaire connecté (aperçu
                                          téléchargeable même non publié)
-   Remplace l'appel historique /api/public-cv?slug=...&format=pdf qui
+   Remplace l'appel historique /api/public-cv/pdf?slug=... qui
    renvoyait « Erreur interne du serveur. » : cette route est
    autonome (QR serveur via qrcode, rendu via @react-pdf/renderer,
    patterns identiques à /api/download-pdf déjà en production).

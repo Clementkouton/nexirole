@@ -2,7 +2,7 @@
 // src/lib/normalize-cv.ts - NexiRole
 // Normalisation tolerante des donnees CV pour la page publique /u/[slug].
 //
-// Contexte : le PDF public (/api/public-cv?format=pdf) affiche deja le CV
+// Contexte : le PDF public (/api/public-cv/pdf) affiche deja le CV
 // complet, mais la page web affichait une version tronquee (titre errone,
 // aucune experience, une seule competence, formation partielle). Les deux
 // lisent le MEME enregistrement Prisma : le probleme venait de la fonction
