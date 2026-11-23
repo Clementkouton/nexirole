@@ -1,35 +1,61 @@
+﻿# =============================================================================
+# NEXIROLE - sync-publication-cv.ps1  -  VERSION 3 FINALE (remplace v1 et v2)
 # =============================================================================
-# NEXIROLE - sync-publication-cv.ps1  -  VERSION 2 COMPLETE (remplace la v1)
-# =============================================================================
-# Objectif : chaque clic des boutons de publication / PDF ecrit les
-#            modifications dans la base (route atomique /api/cv/<id>/publier)
-#            AVANT toute action. Le publie et l export restent donc identiques.
+# CAUSE RACINE DU BUG « chaque bouton affiche un contenu vide ou different »
+# (prouvee en lisant le code reel du projet) :
 #
-# Corrections V2 par rapport a la V1 :
-#   1. Le controle "FONCTIONS EN DOUBLON" ne compte plus les APPELS :
-#      seules les DEFINITIONS (function X / const X =) sont comptees.
-#      C etait la cause du blocage "publierCvActuel x2" (faux positif).
-#   2. Idempotent : marqueurs [SYNC-PUBLICATION V2] - relancer ne duplique rien.
-#   3. La route atomique existante est NORMALISEE vers la version V2
-#      (contrat garanti entre la route et les fonctions injectees).
-#   4. Detection automatique du payload et de l endpoint PDF dans le code
-#      existant (JSON.stringify / fetch) : plus aucun libelle suppose.
-#   5. Encodage UTF-8 gere en interne (BOM preserve) :
-#      la commande externe "encodage lock" est OBSOLETE.
-#   6. Diagnostic du schema Prisma (modeles + champs) sans client genere.
+#   1. DEUX chemins de publication ecrivent la MEME ligne PublicResume
+#      (upsert par userId) avec DEUX FORMES de cvData differentes :
+#        - createur  : POST /api/public-cv  { cvData: { cv, candidateName,
+#          contact, showQrOnPdf }, templateId }        -> forme « wrapper »
+#        - hub       : POST /api/public-cv/builder { theme, data } -> forme « spec »
+#      La page /u/<slug> tolere les deux formes, mais la route
+#      /api/public-cv/pdf?slug= (toDossier) ne comprend que la forme spec :
+#      apres une publication depuis le createur, le PDF ?slug= ne trouve
+#      aucun champ -> PDF « Candidat » quasi vide (capture d'ecran n2).
+#
+#   2. Le bouton « Mettre a jour la publication » du hub republie le
+#      CvDocument relu en base. Si le createur etait ouvert sur un autre CV
+#      (ou si l autosauvegarde debounce 900 ms n etait pas encore passee),
+#      la page /u/<slug> est ECRASEE avec un contenu plus ancien
+#      (capture n4 : KOUGJO John -> KOUTON Clement).
+#
+#   3. Les ameliorations IA vivent dans l etat local du createur ; elles ne
+#      sont ecrites en base que par l autosauvegarde (debounce) et jamais de
+#      facon garantie au moment du clic.
+#
+# CORRECTIONS V3 :
+#   [2/6] createur : UNE fonction unique publierCvActuel() =
+#           - PATCH /api/cv/<cvId> { data, design, step }   (ecriture base)
+#           - POST /api/public-cv { cvData: buildPublicCvPayload(), ... }
+#             (publication, meme appel que le bouton qui fonctionnait)
+#           - PATCH drapeaux { isPublic: true, publishedSlug: slug }
+#           - renvoie le slug public.
+#         E-C : handlePublishPublicCv sauvegarde en base AVANT de publier.
+#         E-D : handleDownloadPdfWithQr (3 boutons « PDF avec QR ») publie
+#               puis ouvre /api/public-cv/pdf?slug=<slug frais> -> le PDF
+#               correspond TOUJOURS a la page /u/.
+#         E-E : le gestionnaire PDF simple ecrit en base avant l export.
+#   [4/6] /api/public-cv/pdf : normalizeCvData() accepte les DEUX formes de
+#         cvData (wrapper et spec) -> plus jamais de « Candidat » vide, quel
+#         que soit le chemin de publication utilise.
+#   [3/6] hub : DIAGNOSTIC UNIQUEMENT (il relit deja CvDocument a chaud ; il
+#         devient coherent des que le createur sauvegarde avant de publier).
+#   [1/6] la route /api/cv/[id]/publier existante est CONSERVEE telle quelle.
+#
+# Idempotent : marqueurs [SYNC V3]. Nettoie d abord les blocs des versions
+# precedentes ([SYNC-PUBLICATION V2] / [SYNC v2 E-x]) avant d inserer.
 #
 # Usage :
 #   powershell -ExecutionPolicy Bypass -File .\sync-publication-cv.ps1
 #   powershell -ExecutionPolicy Bypass -File .\sync-publication-cv.ps1 -DiagnostiqueSeul
-#   Options : -SkipTsc (saute npx tsc)   -FermerAnciennesLignes (rapport anciens endpoints)
-#
+#   Option : -SkipTsc  (saute npx tsc --noEmit)
 # NB : patcher-sync-publication-v2.ps1 est OBSOLETE (ne plus l utiliser).
 # =============================================================================
 
 param(
     [switch]$DiagnostiqueSeul,
-    [switch]$SkipTsc,
-    [switch]$FermerAnciennesLignes
+    [switch]$SkipTsc
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,6 +89,7 @@ function Test-DansCommentaire([string]$Content, [int]$Index) {
     $avant = ''
     if ($Index -gt $lineStart) { $avant = $Content.Substring($lineStart, $Index - $lineStart) }
     $t = $avant.TrimStart()
+    if ($t.Length -eq 0) { return $false }  # match en debut de ligne : hors commentaire
     if ($t.StartsWith('//')) { return $true }
     if ($t.StartsWith('/*') -or $t.StartsWith('*')) { return $true }
     return $false
@@ -90,29 +117,51 @@ function Get-CountLabel([string]$Content, [string]$Label) {
 function Find-HandlerForLabel([string]$Content, [string]$Label) {
     $idx = $Content.IndexOf($Label, [System.StringComparison]::Ordinal)
     if ($idx -lt 0) { return '' }
-    $from = [Math]::Max(0, $idx - 300)
-    $len = [Math]::Min(700, $Content.Length - $from)
+    $from = [Math]::Max(0, $idx - 400)
+    $len = [Math]::Min(900, $Content.Length - $from)
     $slice = $Content.Substring($from, $len)
     $labelPos = $idx - $from
+    # forme 1 : onClick={() => void publier(cv)} / onClick={() => foo()}
+    $best = ''
+    foreach ($m in [regex]::Matches($slice, 'onClick\s*=\{[^}]{0,120}?([\w$]+)\s*\(')) {
+        if ($m.Index -lt $labelPos) { $best = $m.Groups[1].Value }
+    }
+    if ($best -and $best -ne 'void') { return $best }
+    # forme 2 : onClick={handleX} / onClick={() => handleX}
     $best = ''
     foreach ($m in [regex]::Matches($slice, 'onClick\s*=\{\s*(?:\(\)\s*=>\s*)?([\w$]+)')) {
         if ($m.Index + $m.Length -le $labelPos) { $best = $m.Groups[1].Value }
     }
-    if ($best) { return $best }
-    $after = $slice.Substring([Math]::Min($labelPos, $slice.Length))
-    $mAfter = [regex]::Match($after, 'onClick\s*=\{\s*(?:\(\)\s*=>\s*)?([\w$]+)')
-    if ($mAfter.Success) { return $mAfter.Groups[1].Value }
-    return ''
+    if (-not $best) {
+        $after = $slice.Substring([Math]::Min($labelPos, $slice.Length))
+        $mAfter = [regex]::Match($after, 'onClick\s*=\{\s*(?:\(\)\s*=>\s*)?([\w$]+)')
+        if ($mAfter.Success) { $best = $mAfter.Groups[1].Value }
+    }
+    if ($best -eq 'void') { return '' }
+    return $best
 }
 function Test-HandlerDefined([string]$Content, [string]$Name) {
     if (-not $Name) { return $false }
     $esc = [regex]::Escape($Name)
     return ([regex]::Matches($Content, "(?m)\b(?:function|const|let|var)\s+$esc\b").Count -gt 0)
 }
-function Get-Balance([string]$S) {
-    $o = [regex]::Matches($S, '\(').Count
-    $c = [regex]::Matches($S, '\)').Count
-    return ($o - $c)
+function Get-HandlerSlice([string]$Content, [string]$Name) {
+    $esc = [regex]::Escape($Name)
+    $m = [regex]::Match($Content, "(?m)\b(?:async\s+)?function\s+$esc\b|\bconst\s+$esc\b")
+    if (-not $m.Success) { return '' }
+    $start = $m.Index
+    $maxLen = [Math]::Min(1800, $Content.Length - $start)
+    $slice = $Content.Substring($start, $maxLen)
+    $cuts = @()
+    $c1 = [regex]::Match($slice.Substring([Math]::Min(40, $slice.Length)), "(?m)^[ \t]{0,6}(?:async\s+)?function\s+\w+\b")
+    if ($c1.Success) { $cuts += ($c1.Index + 40) }
+    $c2 = [regex]::Match($slice.Substring([Math]::Min(40, $slice.Length)), "(?m)^[ \t]{0,6}const\s+handle\w+\s*=")
+    if ($c2.Success) { $cuts += ($c2.Index + 40) }
+    if ($cuts.Count -gt 0) {
+        $cut = ($cuts | Measure-Object -Minimum).Minimum
+        if ($cut -gt 120) { $slice = $slice.Substring(0, $cut) }
+    }
+    return $slice
 }
 function Get-StringifyExpr([string]$Slice) {
     $m = [regex]::Match($Slice, 'JSON\.stringify\(')
@@ -140,29 +189,6 @@ function Get-StringifyExpr([string]$Slice) {
     $e = $Slice.Substring($start, $len).Trim()
     while ($e.EndsWith(';')) { $e = $e.Substring(0, $e.Length - 1).Trim() }
     return $e
-}
-function Get-FetchEndpoint([string]$Slice) {
-    $m = [regex]::Match($Slice, 'fetch\(\s*[\x60\x27\x22]([^\x60\x27\x22]+)')
-    if (-not $m.Success) { return '' }
-    return $m.Groups[1].Value
-}
-function Get-HandlerSlice([string]$Content, [string]$Name) {
-    $esc = [regex]::Escape($Name)
-    $m = [regex]::Match($Content, "(?m)\b(?:async\s+)?function\s+$esc\b|\bconst\s+$esc\b")
-    if (-not $m.Success) { return '' }
-    $start = $m.Index
-    $maxLen = [Math]::Min(1500, $Content.Length - $start)
-    $slice = $Content.Substring($start, $maxLen)
-    $cuts = @()
-    $c1 = [regex]::Match($slice.Substring([Math]::Min(40, $slice.Length)), "(?m)^[ \t]{0,6}(?:async\s+)?function\s+\w+\b")
-    if ($c1.Success) { $cuts += ($c1.Index + 40) }
-    $c2 = [regex]::Match($slice.Substring([Math]::Min(40, $slice.Length)), "(?m)^[ \t]{0,6}const\s+handle\w+\s*=")
-    if ($c2.Success) { $cuts += ($c2.Index + 40) }
-    if ($cuts.Count -gt 0) {
-        $cut = ($cuts | Measure-Object -Minimum).Minimum
-        if ($cut -gt 120) { $slice = $slice.Substring(0, $cut) }
-    }
-    return $slice
 }
 function Get-HandlerInsert([string]$Content, [string]$Name) {
     $esc = [regex]::Escape($Name)
@@ -214,407 +240,138 @@ function Add-AsyncToDecl([string]$Content, [string]$Name) {
     }
     return @{ Content = $Content; Changed = $false }
 }
-function Get-EffectsStats([string]$C) {
-    $n = 0; $w = 0
-    foreach ($m in [regex]::Matches($C, 'useEffect\s*\(')) {
-        $n++
-        $len = [Math]::Min(1500, $C.Length - $m.Index)
-        $s = $C.Substring($m.Index, $len)
-        if ($s -match "method\s*:\s*[\x27\x22](POST|PUT|PATCH)") { $w++ }
-    }
-    return @{ Total = $n; Writes = $w }
+# Nettoyage des blocs des versions precedentes (v1 / brouillon v2).
+function Remove-LegacySyncBlocks([string]$Content) {
+    $rx = '(?ms)^[ \t]*// \[SYNC(-PUBLICATION V2| v2 E-[A-Z])\][^\r\n]*debut[^\r\n]*\r?\n.*?^[ \t]*// \[SYNC(-PUBLICATION V2| v2 E-[A-Z])\][^\r\n]*fin[^\r\n]*\r?\n'
+    return [regex]::Replace($Content, $rx, '')
 }
-function Show-EffectsReport([string]$C) {
-    $count = 0
-    foreach ($m in [regex]::Matches($C, 'useEffect\s*\(')) {
-        $count++
-        $len = [Math]::Min(1500, $C.Length - $m.Index)
-        $s = $C.Substring($m.Index, $len)
-        $ep = ''
-        $mm = [regex]::Match($s, 'fetch\(\s*[\x60\x27\x22]([^\x60\x27\x22]+)')
-        if ($mm.Success) { $ep = $mm.Groups[1].Value }
-        $isWrite = ($s -match "method\s*:\s*[\x27\x22](POST|PUT|PATCH)")
-        $type = 'lecture'
-        if ($isWrite) { $type = 'ECRITURE AUTOMATIQUE' }
-        $suffix = ''
-        if ($ep) { $suffix = ' (' + $ep + ')' }
-        Write-Host ('  - effet #' + $count + ' : ' + $type + $suffix)
-    }
-    if ($count -eq 0) { Write-Host '  - aucun useEffect detecte' }
+function Test-LegacyMarkers([string]$Content) {
+    return ([regex]::Matches($Content, '\[SYNC-PUBLICATION V2\]|\[SYNC v2 E-')).Count
 }
-function Show-DiagCreateur([string]$C) {
-    Write-Host '  --- rapport diagnostic (createur) ---'
-    Write-Host ('  cvId (patch bibliotheque) : ' + ([regex]::Matches($C, '\bcvId\b').Count -gt 0))
-    $defsPublier = Get-DefinitionCount $C 'publierCvActuel'
-    Write-Host ('  publierCvActuel deja present : ' + ($defsPublier -gt 0))
-    $hasHP = [regex]::Matches($C, '\bhandlePublishPublicCv\b').Count -gt 0
-    Write-Host ('  handlePublishPublicCv present : ' + $hasHP)
-    $L_MAJ = 'Mettre ' + [char]0x00E0 + ' jour la publication'
-    $L_TELECH = 'T' + [char]0x00E9 + 'l' + [char]0x00E9 + 'charger le CV PDF'
-    foreach ($lbl in @($L_MAJ, 'Publier en ligne', 'Publier mon CV en ligne', 'PDF (QR)', 'PDF avec QR', $L_TELECH, 'Terminer')) {
-        $n = Get-CountLabel $C $lbl
-        Write-Host ("  libelle '" + $lbl + "' : " + $n + " occurrence(s)")
-        if ($n -gt 0) {
-            $h = Find-HandlerForLabel $C $lbl
-            if ($h) {
-                Write-Host ('      -> onClick={ ' + $h + ' } (fonction definie : ' + (Test-HandlerDefined $C $h) + ')')
-            }
-        }
-    }
-    $cvVar = ''
-    foreach ($m in [regex]::Matches($C, '(?m)const\s+\[\s*(\w+)\s*,\s*set\w+\s*\]\s*=\s*useState')) {
-        if ($m.Groups[1].Value -match '^(cv|cvData|cvDocument|cvActif|resume|formData|contenu)$') { $cvVar = $m.Groups[1].Value; break }
-    }
-    $aff = $cvVar
-    if (-not $aff) { $aff = '(non trouvee)' }
-    Write-Host ('  variable d etat CV detectee : ' + $aff)
-    return $cvVar
-}
-
-# ------------------------------------------------------- blocs de code inseres
-$ROUTE_TS = @'
-// =============================================================
-// [SYNC-PUBLICATION V2] Route atomique de publication du CV.
-// POST /api/cv/<id>/publier : chaque clic d un bouton (publication,
-// PDF avec QR, PDF simple) ecrit les modifications dans la base
-// AVANT toute action. Le publie et l export restent identiques.
-// GET  /api/cv/<id>/publier : diagnostic (existe ? publie ? cles ?)
-// Body accepte : { cv: ... } | { data: ... } | { payload: ... } | brut
-// Si "cv" est absent, la version stockee dans CvDocument est reprise.
-// =============================================================
-import { PrismaClient } from '@prisma/client';
-
-const g = globalThis as any;
-if (!g.__nexirolePrismaV2) {
-  g.__nexirolePrismaV2 = new PrismaClient();
-}
-const prisma: any = g.__nexirolePrismaV2;
-
-function errMsg(e: unknown): string {
-  const anyE = e as any;
-  return String((anyE && anyE.message) || e);
-}
-
-function jsonRes(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
-}
-
-async function getCvId(ctx: any): Promise<string> {
-  let p: any = (ctx && ctx.params) || {};
-  if (p && typeof p.then === 'function') {
-    p = await p;
-  }
-  return String((p && p.id) || '').trim();
-}
-
-const ID_KEYS = ['cvId', 'documentId', 'cvDocumentId', 'id'];
-const JSON_KEYS = ['data', 'contenu', 'content', 'payload', 'cv', 'cvData', 'resume', 'json'];
-
-export async function POST(req: Request, ctx?: any) {
-  try {
-    const cvId = await getCvId(ctx);
-    if (!cvId) {
-      return jsonRes({ ok: false, error: 'cvId manquant dans l URL de la route' }, 400);
-    }
-
-    let body: any = {};
+# ------------------------------------------------- blocs de code inseres (V3)
+# Helper unique : sauvegarde base + publication + renvoi du slug public.
+$HELPER_JS = @'
+  // [SYNC V3] debut - helper : ecriture base puis publication avant chaque action
+  async function publierCvActuel(): Promise<string | null> {
     try {
-      body = await req.json();
-    } catch {
-      body = {};
-    }
-    if (body && typeof body === 'object' && body.source !== undefined) {
-      delete body.source;
-    }
-    const hasCvKey = !!(body && typeof body === 'object' && ('cv' in body || 'data' in body || 'payload' in body));
-    let raw: any = null;
-    if (hasCvKey) {
-      raw = body.cv !== undefined ? body.cv : (body.data !== undefined ? body.data : body.payload);
-    } else if (body && typeof body === 'object') {
-      raw = { ...body };
-    }
-    const hasData = !!(raw && typeof raw === 'object' && Object.keys(raw).length > 0);
-
-    const writes: string[] = [];
-    const errors: string[] = [];
-
-    // 1) version stockee actuelle
-    let stored: any = null;
-    try {
-      stored = await prisma.cvDocument.findUnique({ where: { id: cvId } });
-    } catch (e) {
-      errors.push('cvDocument.findUnique: ' + errMsg(e));
-    }
-
-    // 2) ecriture CvDocument
-    let docData: any = null;
-    if (hasData) {
-      docData = raw;
-    } else if (stored) {
-      const c: any = { ...stored };
-      delete c.id;
-      docData = c;
-    }
-    if (docData) {
-      try {
-        await prisma.cvDocument.update({ where: { id: cvId }, data: docData });
-        writes.push('cvDocument.update');
-      } catch (e) {
-        errors.push('cvDocument.update: ' + errMsg(e));
-        try {
-          await prisma.cvDocument.update({ where: { id: cvId }, data: {} });
-          writes.push('cvDocument.touch');
-        } catch (e2) {
-          errors.push('cvDocument.touch: ' + errMsg(e2));
-        }
-      }
-    } else {
-      errors.push('cvDocument: aucune donnee a ecrire (cv absent et version stockee introuvable)');
-    }
-
-    // 3) PublicResume (copie publique) - essais multiples sur formes de schema
-    const pubContent: any = hasData ? raw : (docData || stored || {});
-    let pubDone = false;
-    for (const ik of ID_KEYS) {
-      if (pubDone) break;
-      for (const jk of JSON_KEYS) {
-        try {
-          await prisma.publicResume.upsert({
-            where: { [ik]: cvId },
-            update: { [jk]: pubContent },
-            create: { [ik]: cvId, [jk]: pubContent },
-          });
-          writes.push('publicResume.upsert(' + ik + ',' + jk + ')');
-          pubDone = true;
-          break;
-        } catch (e) {
-          if (errors.length < 16) {
-            errors.push('publicResume.upsert(' + ik + ',' + jk + '): ' + errMsg(e));
-          }
-        }
-      }
-    }
-    if (!pubDone) {
-      errors.push('publicResume: aucune forme de schema n a fonctionne (voir erreurs)');
-    }
-
-    // 4) relecture pour renvoyer le lien public
-    let pubRow: any = null;
-    for (const ik of ID_KEYS) {
-      try {
-        pubRow = await prisma.publicResume.findFirst({ where: { [ik]: cvId } });
-        if (pubRow) break;
-      } catch {
-        // forme non supportee : essai suivant
-      }
-    }
-    const slug: string = String((pubRow && (pubRow.slug || pubRow.url || pubRow.publicSlug)) || '');
-
-    const ok = writes.some((w) => w !== 'cvDocument.touch');
-    return jsonRes({
-      ok,
-      publicOk: pubDone,
-      cvId,
-      writes,
-      errors,
-      slug,
-      url: slug ? '/u/' + slug : '',
-      cv: pubContent,
-      storedKeys: Object.keys(stored || {}),
-      pubKeys: pubRow ? Object.keys(pubRow) : [],
-    });
-  } catch (e) {
-    return jsonRes({ ok: false, error: errMsg(e) }, 500);
-  }
-}
-
-export async function GET(_req: Request, ctx?: any) {
-  try {
-    const cvId = await getCvId(ctx);
-    if (!cvId) {
-      return jsonRes({ ok: false, error: 'cvId manquant' }, 400);
-    }
-    let stored: any = null;
-    let err = '';
-    try {
-      stored = await prisma.cvDocument.findUnique({ where: { id: cvId } });
-    } catch (e) {
-      err = errMsg(e);
-    }
-    let pubRow: any = null;
-    for (const ik of ID_KEYS) {
-      try {
-        pubRow = await prisma.publicResume.findFirst({ where: { [ik]: cvId } });
-        if (pubRow) break;
-      } catch {
-        // essai suivant
-      }
-    }
-    return jsonRes({
-      ok: !!stored,
-      cvId,
-      exists: !!stored,
-      published: !!pubRow,
-      storedKeys: Object.keys(stored || {}),
-      pubKeys: pubRow ? Object.keys(pubRow) : [],
-      error: err,
-    });
-  } catch (e) {
-    return jsonRes({ ok: false, error: errMsg(e) }, 500);
-  }
-}
-'@
-
-$HELPERS_JS = @'
-  // [SYNC-PUBLICATION V2] debut - helpers : ecriture base avant chaque clic
-  async function publierCvActuel(opts?: any): Promise<any> {
-    try {
-      const __cvIdSafe = String((cvId as any) || '');
-      if (!__cvIdSafe) {
-        console.error('[SYNC v2] cvId manquant - publication impossible');
-        return { ok: false, error: 'cvId manquant' };
-      }
-      const __res = await fetch('/api/cv/' + encodeURIComponent(__cvIdSafe) + '/publier', {
+@@PATCH_SAVE@@      const __res = await fetch('/api/public-cv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(@@PUBLISH_BODY@@),
       });
-      const __out: any = await __res.json().catch(() => null);
-      if (!__res.ok || !__out || __out.ok === false) {
-        const __detail = (__out && (__out.error || (__out.errors && __out.errors.join(' | ')))) || 'HTTP ' + __res.status;
-        console.error('[SYNC v2] ecriture base echouee :', __detail, __out);
-        return { ok: false, error: __detail, data: __out };
+      const __json = (await __res.json().catch(() => null)) as
+        | { publicResume?: { slug?: string } | null }
+        | null;
+      const __slug = __json && __json.publicResume && __json.publicResume.slug
+        ? String(__json.publicResume.slug)
+        : '';
+      if (!__res.ok || !__slug) {
+        console.warn('[SYNC V3] publication echouee (HTTP ' + __res.status + ')', __json);
+        return null;
       }
-      console.log('[SYNC v2] ecriture base OK :', __out.writes);
-      if (__out.publicOk === false) {
-        alert('Attention : CV enregistre mais copie publique non mise a jour. Detail : ' + ((__out.errors && __out.errors.join(' | ')) || '?'));
-      }
-      try {
-        window.dispatchEvent(new CustomEvent('nexirole:cv-publie', { detail: __out }));
-      } catch (_ev) {
-        // ancien navigateur : ignore
-      }
-      return { ok: true, data: __out, cv: __out.cv };
-    } catch (e) {
-      console.error('[SYNC v2] exception publication :', e);
-      return { ok: false, error: String(e) };
+      console.log('[SYNC V3] ecriture base + publication OK : /u/' + __slug);
+@@FLAGS@@@@SET_PUB@@      return __slug;
+    } catch (__e) {
+      console.warn('[SYNC V3] exception publication', __e);
+      return null;
     }
   }
-
-  async function pdfQrDepuisBase(opts?: any): Promise<any> {
-    const __w = await publierCvActuel({ declencheur: (opts && opts.declencheur) || 'pdf-qr' });
-    if (!__w || !__w.ok) {
-      alert('Publication en base impossible : ' + ((__w && __w.error) || '?'));
-      return { ok: false };
-    }
-    try {
-      const __res2 = await fetch('@@PDF_ENDPOINT@@', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cv: (__w.cv || (@@PDF_PAYLOAD@@)), avecQr: true, qr: true, withQr: true }),
-      });
-      if (!__res2.ok) {
-        alert('PDF impossible : HTTP ' + __res2.status);
-        return { ok: false };
-      }
-      const __blob = await __res2.blob();
-      const __url = URL.createObjectURL(__blob);
-      const __a = document.createElement('a');
-      __a.href = __url;
-      __a.download = 'cv-' + Date.now() + '-qr.pdf';
-      document.body.appendChild(__a);
-      __a.click();
-      __a.remove();
-      setTimeout(() => URL.revokeObjectURL(__url), 5000);
-      return { ok: true };
-    } catch (e) {
-      alert('PDF impossible : ' + String(e));
-      return { ok: false };
-    }
-  }
-  // [SYNC-PUBLICATION V2] fin - helpers
+  // [SYNC V3] fin - helper
 '@
 
+# E-C : sauvegarde explicite en base au debut de handlePublishPublicCv
+# (la publication historique qui suit reste inchangee).
 $EC_BLOCK = @'
-    // [SYNC v2 E-C] debut - chaque clic ecrit en base avant la publication
+    // [SYNC V3 E-C] debut - ecriture base avant la publication
     try {
-      const __syncRes = await publierCvActuel({ declencheur: 'handlePublishPublicCv' });
-      if (__syncRes && __syncRes.ok) {
-        return __syncRes;
-      }
-      console.warn('[SYNC v2] publication : ecriture en echec, code historique en secours', __syncRes && __syncRes.error);
-    } catch (__syncErrC) {
-      console.warn('[SYNC v2] publication : exception, code historique en secours', __syncErrC);
-    }
-    // [SYNC v2 E-C] fin
-'@
-
-$ED_BLOCK = @'
-    // [SYNC v2 E-D] debut - chaque clic ecrit en base puis telecharge le PDF QR
-    try {
-      const __pdfRes = await pdfQrDepuisBase({ declencheur: 'handleDownloadPdfWithQr' });
-      if (__pdfRes && __pdfRes.ok) {
-        return __pdfRes;
-      }
-      console.warn('[SYNC v2] PDF QR : echec, code historique en secours');
-    } catch (__syncErrD) {
-      console.warn('[SYNC v2] PDF QR : exception, code historique en secours', __syncErrD);
-    }
-    // [SYNC v2 E-D] fin
-'@
-
-$EE_BLOCK = @'
-    // [SYNC v2 E-E] debut - ecriture en base avant le telechargement du PDF simple
-    try {
-      await publierCvActuel({ declencheur: 'pdf-simple' });
-    } catch (_syncErrE) {
-      // PDF simple : le telechargement historique continue meme si l ecriture echoue
-    }
-    // [SYNC v2 E-E] fin
-'@
-
-$HUB_BLOCK = @'
-    // [SYNC-PUBLICATION V2 HUB] debut - ecriture base via route atomique
-    try {
-      const __hubSrc: any = @@PARAM@@;
-      const __hubCvId = String((__hubSrc && __hubSrc.id !== undefined && __hubSrc.id !== null) ? __hubSrc.id : __hubSrc);
-      if (__hubCvId) {
-        const __hubRes = await fetch('/api/cv/' + encodeURIComponent(__hubCvId) + '/publier', {
-          method: 'POST',
+      if (cvId) {
+        const __saveRes = await fetch('/api/cv/' + encodeURIComponent(cvId), {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ source: 'hub' }),
+          body: JSON.stringify({ data, design, step }),
         });
-        const __hubOut: any = await __hubRes.json().catch(() => null);
-        if (!__hubRes.ok || !__hubOut || __hubOut.ok === false) {
-          console.error('[SYNC v2 hub] ecriture base echouee', __hubOut);
-        } else {
-          console.log('[SYNC v2 hub] ecriture base OK', __hubOut.writes);
+        if (!__saveRes.ok) {
+          console.warn('[SYNC V3] sauvegarde CvDocument echouee (HTTP ' + __saveRes.status + ')');
         }
       }
-    } catch (__hubErr) {
-      console.error('[SYNC v2 hub] exception', __hubErr);
+    } catch (__syncErrC) {
+      console.warn('[SYNC V3] sauvegarde exception', __syncErrC);
     }
-    // [SYNC-PUBLICATION V2 HUB] fin
+    // [SYNC V3 E-C] fin
 '@
 
-$TOL_BLOCK = @'
-  // [SYNC-PUBLICATION V2 TOL] anciennes formes tolerees (cv a la racine, drapeaux QR)
-  const __tolCv = (@@VAR@@ && (@@VAR@@.cv || @@VAR@@.data || @@VAR@@.payload || @@VAR@@.resume)) || @@VAR@@ || {};
-  const __tolQr = !!(@@VAR@@ && (@@VAR@@.avecQr || @@VAR@@.qr || @@VAR@@.withQr || @@VAR@@.avecQR));
-  void __tolCv;
-  void __tolQr;
+# E-D : publication puis PDF serveur depuis la copie publique fraiche.
+$ED_BLOCK = @'
+    // [SYNC V3 E-D] debut - ecriture base + publication puis PDF du slug frais
+    try {
+      const __slugPdf = await publierCvActuel();
+      const __slugFinal = __slugPdf || @@SLUG_FALLBACK@@;
+      if (__slugFinal) {
+        window.open('/api/public-cv/pdf?slug=' + encodeURIComponent(__slugFinal), '_blank');
+        return;
+      }
+      console.warn('[SYNC V3] slug indisponible : export historique en secours');
+    } catch (__syncErrD) {
+      console.warn('[SYNC V3] exception PDF QR : export historique en secours', __syncErrD);
+    }
+    // [SYNC V3 E-D] fin
+'@
+
+# E-E : ecriture base avant le telechargement du PDF simple.
+$EE_BLOCK = @'
+    // [SYNC V3 E-E] debut - ecriture base avant le telechargement PDF
+    try {
+      await publierCvActuel();
+    } catch (_syncErrE) {
+      // l export historique continue meme si l ecriture echoue
+    }
+    // [SYNC V3 E-E] fin
+'@
+
+# [4/6] : normalisation des deux formes de cvData dans la route PDF.
+$PDF_NORMALIZE = @'
+/* [SYNC V3 PDF] debut - accepte les deux formes de cvData :
+   wrapper { cv, candidateName, contact } (createur) et
+   spec { theme, data } (bibliotheque) ; sinon renvoie cv inchange. */
+function normalizeCvData(cv: Record<string, unknown>): Record<string, unknown> {
+  const wrapper = asRecord((cv as Record<string, unknown>).cv);
+  const spec = asRecord((cv as Record<string, unknown>).data);
+  let base: Record<string, unknown> = cv;
+  if (str(asRecord(wrapper.personal).fullName) !== "" || str(wrapper.summary) !== "") {
+    base = wrapper;
+  } else if (str(asRecord(spec.personal).fullName) !== "" || str(spec.summary) !== "") {
+    base = spec;
+  }
+  const personal: Record<string, unknown> = { ...asRecord(base.personal) };
+  if (str(personal.fullName) === "" && str(cv.candidateName) !== "") {
+    personal.fullName = str(cv.candidateName);
+  }
+  const contact = asRecord(cv.contact);
+  const champsContact = ["email", "phone", "location", "linkedin"] as const;
+  for (const champ of champsContact) {
+    if (str(personal[champ]) === "" && str(contact[champ]) !== "") {
+      personal[champ] = str(contact[champ]);
+    }
+  }
+  return {
+    ...base,
+    personal,
+    theme: cv.theme !== undefined ? cv.theme : base.theme,
+    photo: cv.photo !== undefined ? cv.photo : base.photo,
+  };
+}
+/* [SYNC V3 PDF] fin */
 '@
 
 # ------------------------------------------------------------------ libelles
 $L_TELECH = 'T' + [char]0x00E9 + 'l' + [char]0x00E9 + 'charger le CV PDF'
 $L_MAJ = 'Mettre ' + [char]0x00E0 + ' jour la publication'
+$L_PDFQR = 'PDF avec QR'
+$L_PDFQRPAREN = 'PDF (QR)'
 
 # ------------------------------------------------------------------ demarrage
 Write-Host '=============================================================='
-Write-Host ' NEXIROLE - Synchronisation publication CV (boutons -> base)  V2'
+Write-Host ' NEXIROLE - Synchronisation publication CV (boutons -> base) V3'
 Write-Host '=============================================================='
 Write-Host ''
 
@@ -634,6 +391,7 @@ $okRoute = Test-FileExists $chemins.route
 if ($okCreateur) { Write-Host '  - createur     : src/app/dashboard/cv-builder/createur/page.tsx' } else { Write-Host '  - createur     : INTROUVABLE' }
 if ($okHub) { Write-Host '  - hub          : src/app/dashboard/cv-builder/page.tsx' } else { Write-Host '  - hub          : INTROUVABLE' }
 if ($okPdf) { Write-Host '  - pdf public   : src/app/api/public-cv/pdf/route.ts' } else { Write-Host '  - pdf public   : INTROUVABLE' }
+if ($okRoute) { Write-Host '  - route atom.  : src/app/api/cv/[id]/publier/route.ts (presente)' } else { Write-Host '  - route atom.  : absente (non requise en V3)' }
 if (-not $okCreateur) {
     Write-Host '[!] createur introuvable - lancez le script depuis la racine du projet.'
     exit 1
@@ -644,103 +402,148 @@ $stopAll = $false
 
 # ------------------------------------------------------------------ [1/6] route
 Write-Host ''
-Write-Host '[1/6] Nouvelle route atomique /api/cv/[id]/publier ...'
-if ($DiagnostiqueSeul) {
-    if ($okRoute) { Write-Host '  [=] route deja presente' } else { Write-Host '  [!] route absente (sera creee au lancement normal)' }
-} else {
-    if ($okRoute) {
-        $routeInfo = Read-TextUtf8 $chemins.route
-        if ($routeInfo.Text.Contains('SYNC-PUBLICATION V2')) {
-            Write-Host '  [=] src/app/api/cv/[id]/publier/route.ts deja en V2, ignore'
-        } else {
-            Write-Host '  [2] route presente -> normalisee vers V2 (contrat garanti avec les boutons)'
-            Write-TextUtf8 $chemins.route $ROUTE_TS $routeInfo.Bom
-            $written += 'src/app/api/cv/[id]/publier/route.ts (normalisee V2)'
-        }
+Write-Host '[1/6] Route atomique /api/cv/[id]/publier ...'
+if ($okRoute) {
+    $routeInfo = Read-TextUtf8 $chemins.route
+    if ($routeInfo.Text.Contains('SYNC-PUBLICATION V2')) {
+        Write-Host '  [=] route V2 presente - conservee (non requise par le flux V3)'
     } else {
-        Write-Host '  [+] route creee : src/app/api/cv/[id]/publier/route.ts'
-        Write-TextUtf8 $chemins.route $ROUTE_TS $false
-        $written += 'src/app/api/cv/[id]/publier/route.ts (creee)'
+        Write-Host '  [=] route presente - conservee telle quelle'
     }
+} else {
+    Write-Host '  [=] absente - le flux V3 passe par PATCH /api/cv/<id> + POST /api/public-cv (endpoints existants)'
 }
 
-# ------------------------------------------------------- [2/6] createur (diag)
+# ------------------------------------------------------- [2/6] createur
 Write-Host ''
-Write-Host '[2/6] Createur : rebranchement des boutons sur la route atomique ...'
+Write-Host '[2/6] Createur : rebranchement des boutons (ecriture base avant action) ...'
 $cInfo = Read-TextUtf8 $chemins.createur
 $creator = $cInfo.Text
-$nlC = ' '
-if ($creator.Contains("`r`n")) { $nlC = "`r`n" } else { $nlC = "`n" }
+$nlC = "`n"
+if ($creator.Contains("`r`n")) { $nlC = "`r`n" }
 
-$cvVarName = Show-DiagCreateur $creator
-$effStats = Get-EffectsStats $creator
-Write-Host ('  effets useEffect : ' + $effStats.Total + ' (dont ' + $effStats.Writes + ' ecriture(s) auto au montage)')
+$legacyCount = Test-LegacyMarkers $creator
+$creator = Remove-LegacySyncBlocks $creator
+if ($legacyCount -gt 0) {
+    Write-Host ('  [+] nettoyage : ' + $legacyCount + ' marqueur(s) des versions precedentes supprime(s)')
+}
+
+# --- diagnostics (affiches dans les deux modes)
+$hasCvId    = ([regex]::Matches($creator, '(?m)(?<![\w$])cvId(?![\w$])').Count -gt 0)
+$hasData    = ([regex]::Matches($creator, '(?m)^\s*const\s*\[\s*data\s*,\s*setData\s*\]').Count -gt 0)
+$hasDesign  = ([regex]::Matches($creator, '(?m)^\s*const\s*\[\s*design\s*,\s*setDesign\s*\]').Count -gt 0)
+$hasStep    = ([regex]::Matches($creator, '(?m)^\s*const\s*\[\s*step\s*,\s*setStep\s*\]').Count -gt 0)
+$hasBuild   = $creator.Contains('buildPublicCvPayload')
+$hasMapTpl  = $creator.Contains('mapDesignTemplate')
+$hasSetPub  = $creator.Contains('setPubSlug')
+$hasPubSlug = ([regex]::Matches($creator, '(?m)(?<![\w$])pubSlug(?![\w$])').Count -gt 0)
+$patchOk    = ($hasCvId -and $hasData -and $hasDesign -and $hasStep)
+
+Write-Host ('  identifiants : cvId=' + $hasCvId + ' data=' + $hasData + ' design=' + $hasDesign + ' step=' + $hasStep + ' buildPublicCvPayload=' + $hasBuild + ' mapDesignTemplate=' + $hasMapTpl + ' setPubSlug=' + $hasSetPub + ' pubSlug=' + $hasPubSlug)
 
 $hpSlice = Get-HandlerSlice $creator 'handlePublishPublicCv'
-$payloadRaw = Get-StringifyExpr $hpSlice
-$payloadPublie = $payloadRaw
-if (-not $payloadPublie) { $payloadPublie = $cvVarName }
-if (-not $payloadPublie) { $payloadPublie = 'cv' }
-$hdSlice = Get-HandlerSlice $creator 'handleDownloadPdfWithQr'
-$pdfEndpoint = Get-FetchEndpoint $hdSlice
-if (-not $pdfEndpoint) { $pdfEndpoint = '/api/public-cv/pdf' }
-$pdfPayload = Get-StringifyExpr $hdSlice
-if (-not $pdfPayload) { $pdfPayload = $payloadPublie }
+$publishBody = Get-StringifyExpr $hpSlice
+$bodySource = 'extrait de handlePublishPublicCv'
+if (-not $publishBody) {
+    if ($hasBuild -and $hasMapTpl) {
+        $publishBody = '{ cvData: buildPublicCvPayload(), templateId: mapDesignTemplate(design.template) }'
+        $bodySource = 'reconstruit (buildPublicCvPayload)'
+    }
+}
+Write-Host ('  corps publication utilise : ' + $bodySource)
+if ($publishBody) { Write-Host ('    -> ' + $publishBody) }
 
-Write-Host ('  payload publication extrait : ' + $payloadPublie)
-Write-Host ('  endpoint PDF extrait : ' + $pdfEndpoint)
-Write-Host ('  payload PDF extrait : ' + $pdfPayload)
+# libelles presents et handlers cibles (transparence totale)
+foreach ($lbl in @($L_MAJ, 'Publier en ligne', 'Publier mon CV en ligne', $L_PDFQRPAREN, $L_PDFQR, $L_TELECH)) {
+    $n = Get-CountLabel $creator $lbl
+    if ($n -gt 0) {
+        $h = Find-HandlerForLabel $creator $lbl
+        $info = ''
+        if ($h) { $info = ' -> onClick { ' + $h + ' } (defini : ' + (Test-HandlerDefined $creator $h) + ')' }
+        Write-Host ("  libelle '" + $lbl + "' : " + $n + ' occurrence(s)' + $info)
+    }
+}
+$defsPubAvant = Get-DefinitionCount $creator 'publierCvActuel'
+if ($defsPubAvant -gt 0) { Write-Host '  [!] publierCvActuel deja defini : ' + $defsPubAvant + ' definition(s)' }
 
 if ($DiagnostiqueSeul) {
-    Write-Host '  --- effets (detail) ---'
-    Show-EffectsReport $creator
+    Write-Host '  (mode diagnostic : aucune ecriture)'
 } else {
 
-# ------------------------------------------------------- [2/6] createur (ecrit)
+# ------------------------------------------------- [2/6] createur (ecritures)
 $creatorNew = $creator
-$publishBody = ''
-if ($payloadPublie.StartsWith('{')) {
-    $inner = $payloadPublie
-    $open = $inner.IndexOf('{')
-    $close = $inner.LastIndexOf('}')
-    if ($open -ge 0 -and $close -gt $open) {
-        $inner = $inner.Substring($open + 1, $close - $open - 1).Trim()
-    }
-    $sep = ''
-    if ($inner.Length -gt 0) { $sep = ', ' }
-    $publishBody = '{ ' + $inner + $sep + "source: 'createur:' + ((opts && opts.declencheur) || 'bouton') }"
-} else {
-    $publishBody = '{ cv: (' + $payloadPublie + "), source: 'createur:' + ((opts && opts.declencheur) || 'bouton') }"
+
+# --- generation du corps du helper selon les identifiants disponibles
+$patchSave = ''
+if ($patchOk) {
+    $patchSave = @'
+      if (cvId) {
+        const __saveRes = await fetch('/api/cv/' + encodeURIComponent(cvId), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data, design, step }),
+        });
+        if (!__saveRes.ok) {
+          console.warn('[SYNC V3] sauvegarde CvDocument echouee (HTTP ' + __saveRes.status + ')');
+        }
+      }
+'@
+}
+$flagsJs = ''
+if ($patchOk) {
+    $flagsJs = @'
+      try {
+        if (cvId) {
+          await fetch('/api/cv/' + encodeURIComponent(cvId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isPublic: true, publishedSlug: __slug }),
+          });
+        }
+      } catch (_flagErr) {
+        // drapeaux non critiques : la publication reste valide
+      }
+'@
+}
+$setPubJs = ''
+if ($hasSetPub) {
+    $setPubJs = @'
+      try { setPubSlug(__slug); } catch (_setPubErr) { /* etat indisponible */ }
+'@
 }
 
-# E-A : analyse uniquement (une ecriture automatique au montage est un bug, pas une cible de patch)
-Write-Host ('  [=] E-A effets analyses : aucune modification automatique (voir detail via -DiagnostiqueSeul)')
-
-# E-B : helpers
+# --- E-B : insertion du helper avant handlePublishPublicCv (ou PDF QR en secours)
 $eB = $false
-if ($creatorNew.Contains('[SYNC-PUBLICATION V2] debut - helpers')) {
-    Write-Host '  [=] E-B helpers deja presents, ignore'
+$eBAnchor = ''
+foreach ($cand in @('handlePublishPublicCv', 'handleDownloadPdfWithQr')) {
+    $m = [regex]::Match($creatorNew, "(?m)^[ \t]*(?:async\s+)?(?:const|function)\s+$cand\b")
+    if ($m.Success) { $eBAnchor = $cand; break }
+}
+if ($creatorNew.Contains('[SYNC V3] debut - helper')) {
+    Write-Host '  [=] E-B helper deja present, ignore'
     $eB = $true
+} elseif (-not $publishBody) {
+    Write-Host '  [!] E-B impossible : corps de publication non determine (ni extraction, ni buildPublicCvPayload)'
+} elseif (-not $eBAnchor) {
+    Write-Host '  [!] E-B ancre introuvable (handlePublishPublicCv / handleDownloadPdfWithQr)'
 } else {
-    $declPub = [regex]::Match($creatorNew, "(?m)^[ \t]*(?:const|function)\s+handlePublishPublicCv\b")
-    if ($declPub.Success) {
-        $bloc = $HELPERS_JS.Replace('@@PUBLISH_BODY@@', $publishBody).Replace('@@PDF_ENDPOINT@@', $pdfEndpoint).Replace('@@PDF_PAYLOAD@@', $pdfPayload)
-        $bloc = Convert-Eol $bloc $nlC
-        $creatorNew = $creatorNew.Insert($declPub.Index, $bloc.TrimEnd() + $nlC + $nlC)
-        Write-Host '  [+] E-B publierCvActuel + pdfQrDepuisBase ajoutes'
-        $eB = $true
-    } else {
-        Write-Host '  [!] E-B ancre handlePublishPublicCv introuvable - helpers non inseres'
-    }
+    $bloc = $HELPER_JS.Replace('@@PATCH_SAVE@@', $patchSave).Replace('@@PUBLISH_BODY@@', $publishBody).Replace('@@FLAGS@@', $flagsJs).Replace('@@SET_PUB@@', $setPubJs)
+    $bloc = Convert-Eol $bloc $nlC
+    $mAncre = [regex]::Match($creatorNew, "(?m)^[ \t]*(?:async\s+)?(?:const|function)\s+$eBAnchor\b")
+    $creatorNew = $creatorNew.Insert($mAncre.Index, $bloc.TrimEnd() + $nlC + $nlC)
+    Write-Host ('  [+] E-B helper publierCvActuel insere avant ' + $eBAnchor + ' (sauvegarde base : ' + $patchOk + ')')
+    $eB = $true
 }
 
-# E-C : handlePublishPublicCv -> publierCvActuel
-if ($creatorNew.Contains('[SYNC v2 E-C]')) {
+# --- E-C : sauvegarde en tete de handlePublishPublicCv
+if ($creatorNew.Contains('[SYNC V3 E-C]')) {
     Write-Host '  [=] E-C deja applique, ignore'
+} elseif (-not $patchOk) {
+    Write-Host '  [=] E-C saute : cvId/data/design/step incomplets (la publication historique reste inchangee)'
 } else {
     $resC = Get-HandlerInsert $creatorNew 'handlePublishPublicCv'
     if ($resC.Index -lt 0) {
-        Write-Host '  [!] E-C corps de handlePublishPublicCv non localise - bouton publication non rebranche'
+        Write-Host '  [!] E-C corps de handlePublishPublicCv non localise'
     } else {
         if (-not $resC.Async) {
             $aC = Add-AsyncToDecl $creatorNew 'handlePublishPublicCv'
@@ -751,20 +554,22 @@ if ($creatorNew.Contains('[SYNC v2 E-C]')) {
         }
         if ($resC.Index -ge 0 -and $resC.Async) {
             $creatorNew = $creatorNew.Insert($resC.Index, $nlC + (Convert-Eol $EC_BLOCK $nlC).TrimEnd() + $nlC)
-            Write-Host '  [+] E-C publication handlePublishPublicCv -> publierCvActuel'
+            Write-Host '  [+] E-C handlePublishPublicCv : ecriture base avant publication'
         } else {
             Write-Host '  [!] E-C handler non async (forme non reconnue) - envoyez la sortie'
         }
     }
 }
 
-# E-D : handleDownloadPdfWithQr -> pdfQrDepuisBase
-if ($creatorNew.Contains('[SYNC v2 E-D]')) {
+# --- E-D : publication + PDF serveur depuis le slug frais
+if ($creatorNew.Contains('[SYNC V3 E-D]')) {
     Write-Host '  [=] E-D deja applique, ignore'
+} elseif (-not $eB) {
+    Write-Host '  [!] E-D saute : helper absent'
 } else {
     $resD = Get-HandlerInsert $creatorNew 'handleDownloadPdfWithQr'
     if ($resD.Index -lt 0) {
-        Write-Host '  [!] E-D corps de handleDownloadPdfWithQr non localise - bouton PDF QR non rebranche'
+        Write-Host '  [!] E-D corps de handleDownloadPdfWithQr non localise'
     } else {
         if (-not $resD.Async) {
             $aD = Add-AsyncToDecl $creatorNew 'handleDownloadPdfWithQr'
@@ -774,33 +579,38 @@ if ($creatorNew.Contains('[SYNC v2 E-D]')) {
             }
         }
         if ($resD.Index -ge 0 -and $resD.Async) {
-            $creatorNew = $creatorNew.Insert($resD.Index, $nlC + (Convert-Eol $ED_BLOCK $nlC).TrimEnd() + $nlC)
-            Write-Host '  [+] E-D PDF QR handleDownloadPdfWithQr -> pdfQrDepuisBase'
+            $slugFallback = "''"
+            if ($hasPubSlug) { $slugFallback = 'pubSlug || ' + "''" }
+            $blocD = (Convert-Eol ($ED_BLOCK.Replace('@@SLUG_FALLBACK@@', $slugFallback)) $nlC).TrimEnd()
+            $creatorNew = $creatorNew.Insert($resD.Index, $nlC + $blocD + $nlC)
+            Write-Host '  [+] E-D handleDownloadPdfWithQr : publication puis PDF du slug frais (couvre les 3 boutons PDF avec QR)'
         } else {
             Write-Host '  [!] E-D handler non async (forme non reconnue) - envoyez la sortie'
         }
     }
 }
 
-# E-E : PDF simple (Telecharger le CV PDF) -> ecriture base puis telechargement historique
+# --- E-E : PDF simple (Telecharger le CV PDF) -> ecriture base avant export
 $eeHandler = ''
 $eeViaLabel = Find-HandlerForLabel $creator $L_TELECH
-if ($eeViaLabel -and $eeViaLabel -ne 'handleDownloadPdfWithQr' -and (Test-HandlerDefined $creator $eeViaLabel)) {
+if ($eeViaLabel -and $eeViaLabel -ne 'handleDownloadPdfWithQr' -and $eeViaLabel -notmatch 'Print' -and (Test-HandlerDefined $creator $eeViaLabel)) {
     $eeHandler = $eeViaLabel
 } else {
-    foreach ($m2 in [regex]::Matches($creator, "(?m)^[ \t]*(?:const|function)\s+(handle\w*[Dd]ownload\w*Pdf\w*|handle\w*Pdf\w*)\s*[=(]")) {
+    foreach ($m2 in [regex]::Matches($creator, "(?m)^[ \t]*(?:async\s+)?(?:const|function)\s+(handle\w*[Dd]ownload\w*Pdf\w*|handle\w*Pdf\w*|handle\w*Export\w*)\s*[=(]")) {
         $nm = $m2.Groups[1].Value
-        if ($nm -ne 'handleDownloadPdfWithQr' -and $nm -notmatch 'WithQr|AvecQr') { $eeHandler = $nm; break }
+        if ($nm -ne 'handleDownloadPdfWithQr' -and $nm -notmatch 'WithQr|AvecQr|Public|Print') { $eeHandler = $nm; break }
     }
 }
 if (-not $eeHandler) {
     Write-Host '  [=] E-E aucun gestionnaire PDF simple distinct (normal si le meme handler sert au QR)'
-} elseif ($creatorNew.Contains('[SYNC v2 E-E]')) {
+} elseif ($creatorNew.Contains('[SYNC V3 E-E]')) {
     Write-Host '  [=] E-E deja applique, ignore'
+} elseif (-not $eB) {
+    Write-Host '  [!] E-E saute : helper absent'
 } else {
     $resE = Get-HandlerInsert $creatorNew $eeHandler
     if ($resE.Index -lt 0) {
-        Write-Host ('  [!] E-E corps de ' + $eeHandler + ' non localise - rien modifie')
+        Write-Host ('  [!] E-E corps de ' + $eeHandler + ' non localise')
     } else {
         if (-not $resE.Async) {
             $aE = Add-AsyncToDecl $creatorNew $eeHandler
@@ -811,151 +621,106 @@ if (-not $eeHandler) {
         }
         if ($resE.Index -ge 0 -and $resE.Async) {
             $creatorNew = $creatorNew.Insert($resE.Index, $nlC + (Convert-Eol $EE_BLOCK $nlC).TrimEnd() + $nlC)
-            Write-Host ('  [+] E-E PDF simple ' + $eeHandler + ' -> ecriture base avant telechargement')
+            Write-Host ('  [+] E-E ' + $eeHandler + ' : ecriture base avant telechargement')
         } else {
             Write-Host ('  [!] E-E handler ' + $eeHandler + ' non async (forme non reconnue) - envoyez la sortie')
         }
     }
 }
 
-# controle doublon V2 : DEFINITIONS uniquement (les appels ne comptent plus)
-$rapDup = @()
-foreach ($n in @('publierCvActuel', 'pdfQrDepuisBase')) {
-    $defs = Get-DefinitionCount $creatorNew $n
-    $occ = Get-OccurrenceCount $creatorNew $n
-    $rapDup += [pscustomobject]@{ Nom = $n; Defs = $defs; Occ = $occ }
-}
-$dups = @($rapDup | Where-Object { $_.Defs -gt 1 })
-$manquants = @($rapDup | Where-Object { $_.Defs -lt 1 })
-foreach ($r in $rapDup) {
-    Write-Host ('  occurrences : ' + $r.Nom + ' -> definitions ' + $r.Defs + ', appels ' + ($r.Occ - $r.Defs))
-}
-if ($dups.Count -gt 0) {
-    Write-Host ('  [!] FONCTIONS EN DOUBLON (definitions) : ' + (($dups | ForEach-Object { $_.Nom + ' x' + $_.Defs }) -join ', '))
-    Write-Host '  Aucune ecriture du createur. Envoyez cette sortie.'
-    $stopAll = $true
-} elseif ($manquants.Count -gt 0) {
-    Write-Host ('  [!] DEFINITION MANQUANTE : ' + (($manquants | ForEach-Object { $_.Nom }) -join ', '))
-    Write-Host '  Aucune ecriture du createur. Envoyez cette sortie.'
+# --- controle final : UNE SEULE definition du helper, puis ecriture
+$defsPub = Get-DefinitionCount $creatorNew 'publierCvActuel'
+$occPub = Get-OccurrenceCount $creatorNew 'publierCvActuel'
+Write-Host ('  controle : publierCvActuel -> definitions ' + $defsPub + ', appels ' + ($occPub - $defsPub))
+if ($defsPub -ne 1) {
+    Write-Host '  [!] nombre de definitions inattendu - AUCUNE ecriture du createur. Envoyez cette sortie.'
     $stopAll = $true
 } else {
     Write-TextUtf8 $chemins.createur $creatorNew $cInfo.Bom
     $written += 'src/app/dashboard/cv-builder/createur/page.tsx'
-    Write-Host '  [OK] controle definitions : publierCvActuel x1, pdfQrDepuisBase x1'
+    Write-Host '  [OK] createur ecrit (sauvegarde base + publication + PDF slug frais)'
 }
 } # fin bloc ecriture createur (non-diag)
 
 # ------------------------------------------------------------------ [3/6] hub
 Write-Host ''
-Write-Host '[3/6] Hub bibliotheque : bouton Publier -> route atomique ...'
+Write-Host '[3/6] Hub bibliotheque : diagnostic (aucune modification) ...'
 if (-not $okHub) {
     Write-Host '  [=] hub introuvable, ignore'
-} elseif ($DiagnostiqueSeul) {
-    $hubTxt = (Read-TextUtf8 $chemins.hub).Text
-    $hFound = [regex]::Matches($hubTxt, "(?m)^[ \t]*(?:async\s+)?function\s+\w*(?:Publier|Publish)\w*\s*\(|(?m)^[ \t]*const\s+\w*(?:Publier|Publish)\w*\s*=")
-    Write-Host ('  gestionnaires publication detectes : ' + $hFound.Count)
-    foreach ($m in $hFound) { Write-Host ('    - ' + $m.Value.Trim()) }
-    Write-Host ('  occurrences publier : ' + [regex]::Matches($hubTxt, '[Pp]ublier\w*').Count)
-    $eps = [regex]::Matches($hubTxt, "[\x27\x22\x60](/api/[^\x27\x22\x60]+)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
-    Write-Host ('  endpoints utilises : ' + ($eps -join ', '))
-} elseif ($stopAll) {
-    Write-Host '  (arret demande a l etape 2 : etape ignoree)'
 } else {
-    $hInfo = Read-TextUtf8 $chemins.hub
-    $hub = $hInfo.Text
-    if ($hub.Contains('[SYNC-PUBLICATION V2 HUB]')) {
-        Write-Host '  [=] hub deja branche en V2, ignore'
-    } else {
-        $cand = $null
-        foreach ($m in [regex]::Matches($hub, "(?m)^[ \t]*(?:async\s+)?function\s+(handle\w*(?:Publier|Publish)\w*|publierCv\w*)\s*\(([^)]*)\)")) {
-            $cand = @{ Nom = $m.Groups[1].Value; Params = $m.Groups[2].Value }; break
-        }
-        if (-not $cand) {
-            foreach ($m in [regex]::Matches($hub, "(?m)^[ \t]*const\s+(handle\w*(?:Publier|Publish)\w*|publierCv\w*)\s*=\s*(?:async\s*)?\(([^)]*)\)")) {
-                $cand = @{ Nom = $m.Groups[1].Value; Params = $m.Groups[2].Value }; break
-            }
-        }
-        if ($cand) {
-            $param = ''
-            foreach ($p in ($cand.Params -split ',')) {
-                $t = ($p -replace ':.*$', '') -replace '\s*=.*$', ''
-                $t = $t.Trim()
-                if ($t -match '^[\w$]+$' -and $t -notmatch '^(e|event|ev|_e|_event)$') { $param = $t; break }
-            }
-            if (-not $param) {
-                Write-Host '  [=] gestionnaire hub trouve mais parametre non exploitable - rien modifie (envoyez la sortie -DiagnostiqueSeul)'
-            } else {
-                $nlH = ' '
-                if ($hub.Contains("`r`n")) { $nlH = "`r`n" } else { $nlH = "`n" }
-                $resH = Get-HandlerInsert $hub $cand.Nom
-                if ($resH.Index -lt 0) {
-                    Write-Host '  [!] corps du gestionnaire hub non localise - rien modifie (envoyez la sortie)'
-                } else {
-                    if (-not $resH.Async) {
-                        $aH = Add-AsyncToDecl $hub $cand.Nom
-                        if ($aH.Changed) {
-                            $hub = $aH.Content
-                            $resH = Get-HandlerInsert $hub $cand.Nom
-                        }
-                    }
-                    if ($resH.Index -ge 0 -and $resH.Async) {
-                        $blocH = Convert-Eol ($HUB_BLOCK.Replace('@@PARAM@@', $param)) $nlH
-                        $hub = $hub.Insert($resH.Index, $nlH + $blocH.TrimEnd() + $nlH)
-                        Write-TextUtf8 $chemins.hub $hub $hInfo.Bom
-                        $written += 'src/app/dashboard/cv-builder/page.tsx'
-                        Write-Host ('  [+] hub : ' + $cand.Nom + '(' + $param + ') -> ecriture base /api/cv/<id>/publier')
-                    } else {
-                        Write-Host '  [=] gestionnaire hub non async (forme non reconnue) - rien modifie (envoyez la sortie)'
-                    }
-                }
-            }
-        } else {
-            Write-Host '  [=] aucun gestionnaire de publication nomme detecte dans le hub - rien modifie'
-            Write-Host '      si le bouton Publier du hub doit aussi ecrire, envoyez la sortie -DiagnostiqueSeul'
+    $hubTxt = (Read-TextUtf8 $chemins.hub).Text
+    foreach ($lbl in @($L_MAJ, 'Publier en ligne', $L_PDFQRPAREN, $L_TELECH, $L_PDFQR)) {
+        $n = Get-CountLabel $hubTxt $lbl
+        if ($n -gt 0) {
+            $h = Find-HandlerForLabel $hubTxt $lbl
+            $info = ''
+            if ($h) { $info = ' -> onClick { ' + $h + ' } (defini : ' + (Test-HandlerDefined $hubTxt $h) + ')' }
+            Write-Host ("  libelle '" + $lbl + "' : " + $n + ' occurrence(s)' + $info)
         }
     }
+    $eps = [regex]::Matches($hubTxt, "[\x27\x22\x60](/api/[^\x27\x22\x60]+)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    Write-Host ('  endpoints utilises : ' + ($eps -join ', '))
+    Write-Host '  info : le hub relit deja GET /api/cv/<id> avant de republier ;'
+    Write-Host '         desormais le createur sauvegarde (PATCH) avant chaque clic,'
+    Write-Host '         donc le hub republie le contenu a jour (plus d ecrasement ancien).'
 }
 
 # ------------------------------------------------------------ [4/6] pdf public
 Write-Host ''
-Write-Host '[4/6] PDF public : tolerance des anciennes formes ...'
+Write-Host '[4/6] PDF public : normalisation des deux formes de cvData ...'
 if (-not $okPdf) {
     Write-Host '  [=] fichier pdf public introuvable, ignore'
 } elseif ($DiagnostiqueSeul) {
     $pdfTxt0 = (Read-TextUtf8 $chemins.pdfPublic).Text
-    $mJ0 = [regex]::Match($pdfTxt0, '(?m)^[ \t]*(?:const|let)\s+(\w+)\s*=\s*await\s+req\.json(?:<[^>]*>)?\(\s*\)')
-    if ($mJ0.Success) { Write-Host ('  ancre req.json() : OK (' + $mJ0.Groups[1].Value + ')') } else { Write-Host '  [!] ancre req.json() non trouvee' }
-    Write-Host ('  deja V2 : ' + $pdfTxt0.Contains('[SYNC-PUBLICATION V2 TOL]'))
+    Write-Host ('  deja V3 : ' + $pdfTxt0.Contains('[SYNC V3 PDF]'))
+    Write-Host ('  ancre toDossier        : ' + $pdfTxt0.Contains('function toDossier('))
+    Write-Host ('  ancre asRecord(row.cvData) : ' + $pdfTxt0.Contains('const cv = asRecord(row.cvData);'))
+    Write-Host ('  ancre asRecord(row.data)   : ' + $pdfTxt0.Contains('const cv = asRecord(row.data);'))
+    Write-Host ('  ancre theme            : ' + $pdfTxt0.Contains('const theme = asRecord(cv.theme);'))
+    Write-Host '  forme wrapper detectee dans le code createur : buildPublicCvPayload'
 } elseif ($stopAll) {
     Write-Host '  (arret demande a l etape 2 : etape ignoree)'
 } else {
     $pInfo = Read-TextUtf8 $chemins.pdfPublic
     $pdfTxt = $pInfo.Text
-    if ($pdfTxt.Contains('[SYNC-PUBLICATION V2 TOL]')) {
-        Write-Host '  [=] tolerance deja presente, ignore'
+    if ($pdfTxt.Contains('[SYNC V3 PDF]')) {
+        Write-Host '  [=] normalisation deja presente, ignore'
     } else {
-        $nlP = ' '
-        if ($pdfTxt.Contains("`r`n")) { $nlP = "`r`n" } else { $nlP = "`n" }
-        $mJ = [regex]::Match($pdfTxt, '(?m)^[ \t]*(?:const|let)\s+(\w+)\s*=\s*await\s+req\.json(?:<[^>]*>)?\(\s*\)')
-        if ($mJ.Success) {
-            $varName = $mJ.Groups[1].Value
-            $ls = $pdfTxt.LastIndexOf("`n", $mJ.Index) + 1
-            if ($ls -lt 0) { $ls = 0 }
-            $indent = ''
-            if ($mJ.Index -gt $ls) { $indent = $pdfTxt.Substring($ls, $mJ.Index - $ls) }
-            $le = $pdfTxt.IndexOf($nlP, $mJ.Index + $mJ.Length)
-            $blocT = Convert-Eol ($TOL_BLOCK.Replace('@@VAR@@', $varName)) $nlP
-            $blocT = ($blocT.TrimEnd() -replace '(?m)^', $indent)
-            if ($le -ge 0) {
-                $pdfTxt = $pdfTxt.Insert($le + $nlP.Length, $blocT + $nlP)
-            } else {
-                $pdfTxt = $pdfTxt + $nlP + $blocT + $nlP
-            }
+        $nlP = "`n"
+        if ($pdfTxt.Contains("`r`n")) { $nlP = "`r`n" }
+        $okA = $false
+        $okB = $false
+        $okC = $false
+        # A : insertion de normalizeCvData avant toDossier
+        $idxA = $pdfTxt.IndexOf('function toDossier(')
+        if ($idxA -ge 0) {
+            $blocN = (Convert-Eol $PDF_NORMALIZE $nlP).TrimEnd()
+            $pdfTxt = $pdfTxt.Insert($idxA, $blocN + $nlP + $nlP)
+            $okA = $true
+        }
+        # B : wrapper PublicResume (mode ?slug=)
+        $ancreB = 'const cv = asRecord(row.cvData);'
+        if ($pdfTxt.Contains($ancreB)) {
+            $pdfTxt = $pdfTxt.Replace($ancreB, 'const cv = normalizeCvData(asRecord(row.cvData));')
+            $okB = $true
+        }
+        # C : CvDocument (mode ?cv=)
+        $ancreC = 'const cv = asRecord(row.data);'
+        if ($pdfTxt.Contains($ancreC)) {
+            $pdfTxt = $pdfTxt.Replace($ancreC, 'const cv = normalizeCvData(asRecord(row.data));')
+            $okC = $true
+        }
+        # D (optionnel) : theme de secours depuis row.templateId
+        $ancreD = 'const theme = asRecord(cv.theme);'
+        if ($pdfTxt.Contains($ancreD)) {
+            $pdfTxt = $pdfTxt.Replace($ancreD, "const theme0 = asRecord(cv.theme);`n" + "      const theme: Record<string, unknown> = Object.keys(theme0).length > 0 ? theme0 : { webTemplate: typeof row.templateId === 'string' ? row.templateId : '' };")
+        }
+        if ($okA -and ($okB -or $okC)) {
             Write-TextUtf8 $chemins.pdfPublic $pdfTxt $pInfo.Bom
             $written += 'src/app/api/public-cv/pdf/route.ts'
-            Write-Host ('  [+] tolerance ajoutee apres ' + $varName + ' = await req.json()')
+            Write-Host ('  [+] normalizeCvData inseree (wrapper=' + $okB + ', cvDocument=' + $okC + ') - le PDF ?slug= accepte les deux formes de publication')
         } else {
-            Write-Host '  [!] ancre req.json() non trouvee - tolerance non ajoutee (envoyez la sortie -DiagnostiqueSeul)'
+            Write-Host '  [!] ancres non trouvees (toDossier=' + $okA + ', cvData=' + $okB + ', data=' + $okC + ') - rien modifie. Envoyez la sortie -DiagnostiqueSeul.'
         }
     }
 }
@@ -965,24 +730,29 @@ Write-Host ''
 Write-Host '[5/6] Diagnostic base de donnees (CvDocument + PublicResume) ...'
 if (Test-FileExists $chemins.schema) {
     $schemaTxt = (Read-TextUtf8 $chemins.schema).Text
+    $modeles = @()
     foreach ($modele in @('CvDocument', 'PublicResume')) {
         $mm = [regex]::Match($schemaTxt, "(?ms)model\s+$modele\s*\{(.*?)^\}")
         if ($mm.Success) {
+            $modeles += $modele
             Write-Host ('  modele ' + $modele + ' :')
             foreach ($ln in ($mm.Groups[1].Value -split "`n")) {
                 $t = $ln.Trim()
                 if ($t -and -not $t.StartsWith('//') -and $t -ne '}') { Write-Host ('    ' + $t) }
             }
-        } else {
-            Write-Host ('  [!] modele ' + $modele + ' introuvable dans prisma/schema.prisma')
         }
     }
-    $autres = [regex]::Matches($schemaTxt, '(?m)model\s+(\w+)\s*\{') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match 'Public|Resume|Cv|Document' } | Select-Object -Unique
-    Write-Host ('  modeles voisins : ' + ($autres -join ', '))
+    if ($modeles.Count -eq 0) {
+        $autres = [regex]::Matches($schemaTxt, '(?m)model\s+(\w+)\s*\{') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match 'Public|Resume|Cv|Document' } | Select-Object -Unique
+        if ($autres) { Write-Host ('  modeles voisins trouves : ' + ($autres -join ', ')) }
+        else { Write-Host '  [!] aucun modele Cv/Public trouve dans prisma/schema.prisma' }
+    }
 } else {
     Write-Host '  [!] prisma/schema.prisma introuvable'
 }
-Write-Host '  probe manuelle (serveur lance) : http://localhost:3000/api/cv/<cvId>/publier en GET'
+Write-Host '  rappels utiles :'
+Write-Host '   - PublicResume est upsert par userId : UN seul CV public par compte.'
+Write-Host '   - probe manuelle (serveur lance) : ouvrir http://localhost:3000/api/public-cv (GET)'
 
 # ------------------------------------------------------------------ [6/6] fin
 Write-Host ''
@@ -996,13 +766,6 @@ if ($written.Count -gt 0) {
     foreach ($w in $written) { Write-Host ('  modifie : ' + $w) }
 } else {
     Write-Host '  aucun fichier modifie'
-}
-if ($FermerAnciennesLignes) {
-    $nbCreateur = [regex]::Matches($creatorNew, '/api/public-cv').Count
-    $nbHub = 0
-    if ($okHub) { $nbHub = [regex]::Matches((Read-TextUtf8 $chemins.hub).Text, '/api/public-cv').Count }
-    Write-Host ('  anciens endpoints encore presents (createur : ' + $nbCreateur + ', hub : ' + $nbHub + ')')
-    Write-Host '  les boutons passent desormais par /api/cv/<id>/publier ; les anciens endpoints restent accessibles.'
 }
 if ($stopAll) {
     Write-Host ''
@@ -1041,7 +804,10 @@ Write-Host ''
 Write-Host 'TERMINE.'
 Write-Host 'Prochaines etapes :'
 Write-Host '  1) Redemarrez le serveur : Ctrl+C puis npm run dev'
-Write-Host '  2) Cliquez chaque bouton ; la console navigateur doit afficher "[SYNC v2] ecriture base OK"'
-Write-Host '  3) Verifiez le contenu publie sur la page /u/<slug>'
-Write-Host '  4) git add . ; git commit -m "SYNC V2 : boutons -> route atomique" ; git push'
+Write-Host '  2) Ouvrez le createur avec ?cv=<id>, faites une modification IA,'
+Write-Host '     puis cliquez chaque bouton : la console navigateur doit afficher'
+Write-Host '     "[SYNC V3] ecriture base + publication OK : /u/<slug>"'
+Write-Host '  3) Verifiez : la page /u/<slug>, le PDF ?slug= et le PDF telecharge'
+Write-Host '     montrent maintenant le MEME contenu que l editeur.'
+Write-Host '  4) git add . ; git commit -m "SYNC V3 : boutons -> sauvegarde + publication + PDF coherent" ; git push'
 Write-Host '  Si un point [!] apparait : relancez avec -DiagnostiqueSeul et renvoyez la sortie.'

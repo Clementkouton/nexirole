@@ -1325,7 +1325,70 @@ export default function CvBuilderPage() {
     return "modern-accent";
   }
 
+  // [SYNC V3] debut - helper : ecriture base puis publication avant chaque action
+  async function publierCvActuel(): Promise<string | null> {
+    try {
+      if (cvId) {
+        const __saveRes = await fetch('/api/cv/' + encodeURIComponent(cvId), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data, design, step }),
+        });
+        if (!__saveRes.ok) {
+          console.warn('[SYNC V3] sauvegarde CvDocument echouee (HTTP ' + __saveRes.status + ')');
+        }
+      }      const __res = await fetch('/api/public-cv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cvData: buildPublicCvPayload(), templateId: mapDesignTemplate(design.template) }),
+      });
+      const __json = (await __res.json().catch(() => null)) as
+        | { publicResume?: { slug?: string } | null }
+        | null;
+      const __slug = __json && __json.publicResume && __json.publicResume.slug
+        ? String(__json.publicResume.slug)
+        : '';
+      if (!__res.ok || !__slug) {
+        console.warn('[SYNC V3] publication echouee (HTTP ' + __res.status + ')', __json);
+        return null;
+      }
+      console.log('[SYNC V3] ecriture base + publication OK : /u/' + __slug);
+      try {
+        if (cvId) {
+          await fetch('/api/cv/' + encodeURIComponent(cvId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isPublic: true, publishedSlug: __slug }),
+          });
+        }
+      } catch (_flagErr) {
+        // drapeaux non critiques : la publication reste valide
+      }      try { setPubSlug(__slug); } catch (_setPubErr) { /* etat indisponible */ }      return __slug;
+    } catch (__e) {
+      console.warn('[SYNC V3] exception publication', __e);
+      return null;
+    }
+  }
+  // [SYNC V3] fin - helper
+
   async function handlePublishPublicCv() {
+    // [SYNC V3 E-C] debut - ecriture base avant la publication
+    try {
+      if (cvId) {
+        const __saveRes = await fetch('/api/cv/' + encodeURIComponent(cvId), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data, design, step }),
+        });
+        if (!__saveRes.ok) {
+          console.warn('[SYNC V3] sauvegarde CvDocument echouee (HTTP ' + __saveRes.status + ')');
+        }
+      }
+    } catch (__syncErrC) {
+      console.warn('[SYNC V3] sauvegarde exception', __syncErrC);
+    }
+    // [SYNC V3 E-C] fin
+
     if (!data.personal.fullName.trim()) {
       toast.error("Renseignez votre nom complet (etape 1) avant la publication.");
       setStep(0);
@@ -1510,6 +1573,14 @@ export default function CvBuilderPage() {
   }
 
   async function handleDownloadPdfServer() {
+    // [SYNC V3 E-E] debut - ecriture base avant le telechargement PDF
+    try {
+      await publierCvActuel();
+    } catch (_syncErrE) {
+      // l export historique continue meme si l ecriture echoue
+    }
+    // [SYNC V3 E-E] fin
+
     if (!data.personal.fullName.trim()) {
       toast.error("Renseignez votre nom complet (étape 1) avant l'export.");
       setStep(0);
@@ -1844,6 +1915,20 @@ export default function CvBuilderPage() {
   /* PDF @react-pdf/renderer AVEC QR code — imports dynamiques résilients :
      accepte l'export nommé OU l'export par défaut du module. */
   async function handleDownloadPdfWithQr() {
+    // [SYNC V3 E-D] debut - ecriture base + publication puis PDF du slug frais
+    try {
+      const __slugPdf = await publierCvActuel();
+      const __slugFinal = __slugPdf || pubSlug || '';
+      if (__slugFinal) {
+        window.open('/api/public-cv/pdf?slug=' + encodeURIComponent(__slugFinal), '_blank');
+        return;
+      }
+      console.warn('[SYNC V3] slug indisponible : export historique en secours');
+    } catch (__syncErrD) {
+      console.warn('[SYNC V3] exception PDF QR : export historique en secours', __syncErrD);
+    }
+    // [SYNC V3 E-D] fin
+
     if (!data.personal.fullName.trim()) {
       toast.error("Renseignez votre nom complet (étape 1) avant l'export.");
       setStep(0);

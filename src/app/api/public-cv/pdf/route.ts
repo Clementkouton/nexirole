@@ -44,6 +44,38 @@ function asArray(value: unknown): Record<string, unknown>[] {
 }
 
 /** Convertit le cvData stocké (builder ou publication) en DossierData PDF. */
+/* [SYNC V3 PDF] debut - accepte les deux formes de cvData :
+   wrapper { cv, candidateName, contact } (createur) et
+   spec { theme, data } (bibliotheque) ; sinon renvoie cv inchange. */
+function normalizeCvData(cv: Record<string, unknown>): Record<string, unknown> {
+  const wrapper = asRecord((cv as Record<string, unknown>).cv);
+  const spec = asRecord((cv as Record<string, unknown>).data);
+  let base: Record<string, unknown> = cv;
+  if (str(asRecord(wrapper.personal).fullName) !== "" || str(wrapper.summary) !== "") {
+    base = wrapper;
+  } else if (str(asRecord(spec.personal).fullName) !== "" || str(spec.summary) !== "") {
+    base = spec;
+  }
+  const personal: Record<string, unknown> = { ...asRecord(base.personal) };
+  if (str(personal.fullName) === "" && str(cv.candidateName) !== "") {
+    personal.fullName = str(cv.candidateName);
+  }
+  const contact = asRecord(cv.contact);
+  const champsContact = ["email", "phone", "location", "linkedin"] as const;
+  for (const champ of champsContact) {
+    if (str(personal[champ]) === "" && str(contact[champ]) !== "") {
+      personal[champ] = str(contact[champ]);
+    }
+  }
+  return {
+    ...base,
+    personal,
+    theme: cv.theme !== undefined ? cv.theme : base.theme,
+    photo: cv.photo !== undefined ? cv.photo : base.photo,
+  };
+}
+/* [SYNC V3 PDF] fin */
+
 function toDossier(cv: Record<string, unknown>): DossierData {
   const personal = asRecord(cv.personal);
   const experiences = asArray(cv.experiences);
@@ -160,8 +192,9 @@ export async function GET(request: NextRequest) {
       if (!row || !row.isPublic) {
         return NextResponse.json({ error: "CV public introuvable ou privé." }, { status: 404 });
       }
-      const cv = asRecord(row.cvData);
-      const theme = asRecord(cv.theme);
+      const cv = normalizeCvData(asRecord(row.cvData));
+      const theme0 = asRecord(cv.theme);
+      const theme: Record<string, unknown> = Object.keys(theme0).length > 0 ? theme0 : { webTemplate: typeof row.templateId === 'string' ? row.templateId : '' };
       const publicUrl = `${originFrom(request)}/u/${row.slug}`;
       const nomComplet = str(asRecord(cv.personal).fullName) || "Candidat";
       const photo = typeof cv.photo === "string" && cv.photo.length > 0 ? cv.photo : null;
@@ -204,7 +237,7 @@ export async function GET(request: NextRequest) {
           { status: 409 }
         );
       }
-      const cv = asRecord(row.data);
+      const cv = normalizeCvData(asRecord(row.data));
       const design = asRecord(row.design);
 
       // Photo + lien public repris de la publication existante si disponible.
