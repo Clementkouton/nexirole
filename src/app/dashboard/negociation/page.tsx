@@ -12,12 +12,22 @@
  *   - des scripts prêts à l'emploi (réponse orale d'entretien, e-mail de
  *     contre-proposition avec copie en un clic, avantages alternatifs).
  *
+ * LIMITES PAR PLAN : au chargement, la page interroge GET /api/salary-coach
+ * (état du quota) et affiche :
+ *   - plan Découverte : compteur « X/2 simulations ce mois-ci » + lien vers
+ *     les offres,
+ *   - plans payants (Pass Boost / Carrière Pro) : bannière « illimité » avec
+ *     les jours restants,
+ *   - limite atteinte (403 QUOTA_EXCEEDED) : carte d'upgrade dorée avec
+ *     bouton vers /pricing.
+ *
  * Aucune écriture en base, aucun composant externe : mini-bibliothèque UI
  * maison (@/components/ui), icônes @tabler/icons-react et charte NexiRole
  * (navy #051937 + or #FFC107).
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { Input, Label, Tabs, TabsContent, TabsList, TabsTrigger, Textarea, cx } from "@/components/ui";
 import {
   IconAlertTriangle,
@@ -27,7 +37,9 @@ import {
   IconChartBar,
   IconCoin,
   IconCopy,
+  IconCrown,
   IconGift,
+  IconInfoCircle,
   IconLoader2,
   IconMail,
   IconMessageCircle,
@@ -59,6 +71,20 @@ type Analyse = {
   };
 };
 
+/** État du quota renvoyé par GET /api/salary-coach. */
+type EtatQuota = {
+  plan: string;
+  planLabel: string;
+  used: number;
+  limit: number;
+  unlimited: boolean;
+  remaining: number | null;
+  reached: boolean;
+  compteurDedie: boolean;
+  isActive: boolean;
+  daysRemaining: number | null;
+};
+
 const REGIONS: Array<{ value: RegionValue; label: string }> = [
   { value: "afrique_ouest_fcfa", label: "Afrique de l'Ouest (FCFA)" },
   { value: "france_europe_eur", label: "France / Europe (EUR)" },
@@ -88,6 +114,37 @@ async function lireErreur(res: Response, fallback: string): Promise<string> {
   }
 }
 
+/** Parse le corps d'une réponse en JSON, sans jamais lever d'exception. */
+async function lireJson(res: Response): Promise<Record<string, unknown> | null> {
+  try {
+    return (await res.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalise l'état du quota reçu de l'API (aucune confiance aveugle au JSON). */
+function normaliserQuota(data: Record<string, unknown> | null): EtatQuota | null {
+  if (!data) return null;
+  const planBrut = data.plan;
+  if (typeof planBrut !== "string") return null;
+  const nombre = (v: unknown, defaut: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : defaut;
+  const limite = nombre(data.limit, -1);
+  return {
+    plan: planBrut,
+    planLabel: typeof data.planLabel === "string" ? data.planLabel : planBrut,
+    used: nombre(data.used, 0),
+    limit: limite,
+    unlimited: data.unlimited === true || limite < 0,
+    remaining: typeof data.remaining === "number" ? data.remaining : null,
+    reached: data.reached === true,
+    compteurDedie: data.compteurDedie === true,
+    isActive: data.isActive === true,
+    daysRemaining: typeof data.daysRemaining === "number" ? data.daysRemaining : null,
+  };
+}
+
 /* ── Page ────────────────────────────────────────────────────────────── */
 
 export default function NegociationPage() {
@@ -102,10 +159,34 @@ export default function NegociationPage() {
   const [analyse, setAnalyse] = useState<Analyse | null>(null);
   const [copie, setCopie] = useState<"" | "oral" | "email">("");
 
+  const [quota, setQuota] = useState<EtatQuota | null>(null);
+  const [blocage, setBlocage] = useState<{ message: string; planLabel: string | null } | null>(null);
+
   const resultatsRef = useRef<HTMLDivElement | null>(null);
+  const demarrageFaitRef = useRef(false);
+
+  /** État du plan pour la bannière (silencieux : c'est de l'indicatif). */
+  async function chargerQuota() {
+    try {
+      const res = await fetch("/api/salary-coach");
+      if (!res.ok) return;
+      const data = await lireJson(res);
+      if (!data || data.indisponible === true) return;
+      setQuota(normaliserQuota(data));
+    } catch {
+      // Bannière indicative uniquement : silence en cas de souci réseau.
+    }
+  }
+
+  useEffect(() => {
+    if (demarrageFaitRef.current) return;
+    demarrageFaitRef.current = true;
+    void chargerQuota();
+  }, []);
 
   async function calculer() {
     setErreur("");
+    setBlocage(null);
     if (jobTitle.trim().length < 2) {
       setErreur("Indique d'abord le poste visé (2 caractères minimum).");
       return;
@@ -134,6 +215,22 @@ export default function NegociationPage() {
         }),
       });
       if (!res.ok) {
+        /* Limite du plan atteinte → carte d'upgrade dorée (pas une simple
+           erreur rouge) + rafraîchissement de la bannière de quota. */
+        if (res.status === 403) {
+          const data = await lireJson(res);
+          if (data && data.code === "QUOTA_EXCEEDED") {
+            setBlocage({
+              message:
+                typeof data.error === "string"
+                  ? data.error
+                  : "Limite du plan atteinte. Passez à un plan supérieur pour continuer.",
+              planLabel: typeof data.planLabel === "string" ? data.planLabel : null,
+            });
+            void chargerQuota();
+            return;
+          }
+        }
         setErreur(
           await lireErreur(res, "Analyse impossible (erreur " + res.status + ").")
         );
@@ -145,6 +242,7 @@ export default function NegociationPage() {
         return;
       }
       setAnalyse(data.analyse);
+      void chargerQuota();
       setTimeout(
         () => resultatsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
         80
@@ -165,6 +263,9 @@ export default function NegociationPage() {
       setErreur("Copie impossible : sélectionne le texte et copie-le manuellement.");
     }
   }
+
+  const limiteAtteinte = (quota && !quota.unlimited && quota.reached) || blocage !== null;
+  const planLabelBlocage = blocage?.planLabel ?? quota?.planLabel ?? "Découverte";
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -187,6 +288,82 @@ export default function NegociationPage() {
           Exclusivité Carrière Pro
         </span>
       </div>
+
+      {/* ── Bannière de quota du plan ───────────────────────────────── */}
+      {quota && !quota.unlimited && !quota.reached ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
+          <span className="flex items-center gap-2 text-slate-600">
+            <IconInfoCircle size={18} className="shrink-0 text-[#051937]" />
+            <span>
+              Plan {quota.planLabel} :{" "}
+              <strong className="text-[#051937]">
+                {quota.used}/{quota.limit}
+              </strong>{" "}
+              {quota.compteurDedie
+                ? "simulations du Coach ce mois-ci"
+                : "générations IA ce mois-ci (quota partagé avec les dossiers)"}
+              {quota.remaining === 1 ? " — plus qu'une !" : ""}
+            </span>
+          </span>
+          <Link
+            href="/pricing"
+            className="text-xs font-semibold text-[#051937] underline decoration-[#FFC107] decoration-2 underline-offset-4 transition-colors hover:text-[#0b2a5b]"
+          >
+            Passer à un plan supérieur
+          </Link>
+        </div>
+      ) : null}
+
+      {quota && quota.unlimited ? (
+        <div className="flex items-center gap-2 rounded-xl border border-[#FFC107]/60 bg-[#FFC107]/10 px-4 py-3 text-sm text-[#051937]">
+          <IconCrown size={18} className="shrink-0" />
+          <span>
+            Plan {quota.planLabel} — simulations illimitées
+            {quota.isActive && quota.daysRemaining !== null
+              ? ` · ${quota.daysRemaining} jour(s) restants`
+              : ""}
+          </span>
+        </div>
+      ) : null}
+
+      {/* ── Limite du plan atteinte : carte d'upgrade ───────────────── */}
+      {limiteAtteinte ? (
+        <section className="rounded-2xl border-2 border-[#FFC107] bg-[#FFC107]/10 p-6 shadow-sm">
+          <div className="flex items-center gap-3">
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#051937] text-[#FFC107]">
+              <IconCrown size={22} />
+            </span>
+            <h2 className="text-lg font-bold text-[#051937]">
+              Limite du plan {planLabelBlocage} atteinte
+            </h2>
+          </div>
+          <p className="mt-3 text-sm leading-relaxed text-slate-600">
+            {blocage?.message ??
+              `Vous avez utilisé vos ${quota?.limit ?? 2} simulations offertes ce mois-ci. Passez à un plan supérieur pour continuer à simuler sans limite.`}
+          </p>
+          <ul className="mt-4 space-y-2 text-sm text-[#051937]">
+            <li className="flex items-center gap-2">
+              <IconCheck size={16} className="shrink-0" />
+              Coach de Négociation illimité
+            </li>
+            <li className="flex items-center gap-2">
+              <IconCheck size={16} className="shrink-0" />
+              Dossiers IA et recherches d&apos;offres illimités
+            </li>
+            <li className="flex items-center gap-2">
+              <IconCheck size={16} className="shrink-0" />
+              Requêtes IA prioritaires (20 par heure)
+            </li>
+          </ul>
+          <Link
+            href="/pricing"
+            className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[#051937] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#0b2a5b]"
+          >
+            <IconSparkles size={16} />
+            Découvrir les offres
+          </Link>
+        </section>
+      ) : null}
 
       {/* ── Formulaire de simulation ────────────────────────────────── */}
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">

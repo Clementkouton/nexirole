@@ -4,6 +4,7 @@ import { generateStructured } from "@/lib/ai";
 import { hasGroqKey } from "@/lib/ai-guard";
 import { getClientIp, guardRateLimit } from "@/lib/rate-limit";
 import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
+import { etatCoach, consommerCoach, type EtatCoach } from "@/lib/coach-quota";
 
 /**
  * NexiRole — COACH DE NÉGOCIATION SALARIALE IA (route /api/salary-coach).
@@ -12,10 +13,18 @@ import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
  * currentOffer } et renvoie une analyse complète (fourchettes salariales,
  * arguments de valeur chiffrés, scripts de négociation prêts à l'emploi).
  *
+ * GET : renvoie l'état du quota du plan d'abonnement de l'utilisateur
+ * (plan, simulations utilisées / limite, illimité ou non) pour la bannière
+ * de la page /dashboard/negociation.
+ *
  * - Authentification : résolution tolérante existante (3 voies) — la même
  *   que /api/lettre, via src/lib/utilisateur-actuel.ts.
- * - Garde-fous IA : limite 15 requêtes/heure (rate-limit) + clé Groq
- *   (ai-guard). Aucune écriture en base : le schéma Prisma n'est pas touché.
+ * - LIMITES PAR PLAN (src/lib/coach-quota.ts) : plan Découverte limité à
+ *   2 simulations par fenêtre de 30 jours, Pass Boost et Carrière Pro
+ *   illimités. En cas de dépassement : 403 QUOTA_EXCEEDED + upgradeUrl,
+ *   le même contrat que les autres routes IA (l'intercepteur du tableau
+ *   de bord peut ouvrir la modale d'abonnement).
+ * - Garde-fous IA : limite horaire 15 requêtes + clé Groq (ai-guard).
  * - Moteur : generateObject du SDK Vercel AI via le moteur central de
  *   l'app (src/lib/ai.ts → Groq llama-3.3-70b-versatile) + schéma Zod
  *   strict — sortie 100 % structurée, jamais de texte libre à parser.
@@ -136,6 +145,17 @@ function construirePrompt(params: {
   return lignes.filter(Boolean).join("\n");
 }
 
+/* ── État du plan : lit les limites, sans jamais bloquer sur une panne ── */
+
+async function lireEtatTolerant(userId: string): Promise<EtatCoach | null> {
+  try {
+    return await etatCoach(userId);
+  } catch (error) {
+    console.error("[salary-coach] état du plan indisponible :", error);
+    return null;
+  }
+}
+
 export async function POST(request: NextRequest) {
   /* 1. Authentification (résolution tolérante existante, 3 voies) */
   const { utilisateur, diagnostic } = await resoudreUtilisateur();
@@ -151,7 +171,7 @@ export async function POST(request: NextRequest) {
   }
   const userId = utilisateur.userId;
 
-  /* 2. Garde-fou anti-abus (même mécanique que /api/lettre) */
+  /* 2. Garde-fou horaire anti-abus (même mécanique que /api/lettre) */
   const guard = guardRateLimit(request, {
     route: "salary-coach",
     clientId: userId,
@@ -160,7 +180,30 @@ export async function POST(request: NextRequest) {
   });
   if (!guard.ok) return guard.response;
 
-  /* 3. Clé IA configurée ? */
+  /* 3. Limite du plan d'abonnement (Découverte : 2/mois, payants : illimité).
+        En cas de dépassement : 403 QUOTA_EXCEEDED + upgradeUrl — le même
+        contrat que /api/generate-from-url, /api/search-jobs, etc.           */
+  const etat = await lireEtatTolerant(userId);
+  if (etat?.reached) {
+    const message = etat.compteurDedie
+      ? `Vous avez utilisé vos ${etat.limit} simulations offertes du plan ${etat.planLabel} ce mois-ci. Passez au Pass Boost ou Carrière Pro pour des simulations illimitées.`
+      : `Vous avez utilisé vos ${etat.limit} générations IA offertes ce mois-ci — le plan ${etat.planLabel} partage ce quota entre les dossiers IA et le Coach Négociation. Passez au Pass Boost ou Carrière Pro pour l'illimité.`;
+    return NextResponse.json(
+      {
+        error: message,
+        code: "QUOTA_EXCEEDED",
+        reason: "COACH_LIMIT",
+        plan: etat.plan,
+        planLabel: etat.planLabel,
+        used: etat.used,
+        limit: etat.limit,
+        upgradeUrl: "/pricing",
+      },
+      { status: 403 }
+    );
+  }
+
+  /* 4. Clé IA configurée ? */
   if (!hasGroqKey()) {
     return NextResponse.json(
       {
@@ -171,7 +214,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  /* 4. Corps de la requête */
+  /* 5. Corps de la requête */
   let body: unknown;
   try {
     body = await request.json();
@@ -195,7 +238,7 @@ export async function POST(request: NextRequest) {
 
   const params = parsed.data;
 
-  /* 5. Génération structurée (generateObject + schéma zod strict) */
+  /* 6. Génération structurée (generateObject + schéma zod strict) */
   try {
     const analyse = await generateStructured<AnalyseSalariale>({
       schema: outputSchema,
@@ -204,6 +247,12 @@ export async function POST(request: NextRequest) {
       temperature: 0.5,
       maxOutputTokens: 4000,
     });
+
+    /* 7. Consommation du crédit du plan (après succès, plan Découverte
+          uniquement — les plans payants sont illimités). */
+    if (etat && etat.plan === "FREE") {
+      await consommerCoach(userId, etat.compteurDedie);
+    }
 
     return NextResponse.json({ analyse });
   } catch (error) {
@@ -214,4 +263,35 @@ export async function POST(request: NextRequest) {
         : "L'analyse IA n'a pas abouti (service momentanément saturé ?). Réessaie dans quelques instants.";
     return NextResponse.json({ error: message }, { status: 502 });
   }
+}
+
+/* ── GET : état du quota du plan, pour la bannière de la page ────────── */
+
+export async function GET() {
+  const { utilisateur } = await resoudreUtilisateur();
+  if (!utilisateur) {
+    return NextResponse.json(
+      { error: "Session expirée — reconnecte-toi." },
+      { status: 401 }
+    );
+  }
+
+  const etat = await lireEtatTolerant(utilisateur.userId);
+  if (!etat) {
+    // Bannière indicative uniquement : on ne casse pas la page.
+    return NextResponse.json({ indisponible: true });
+  }
+
+  return NextResponse.json({
+    plan: etat.plan,
+    planLabel: etat.planLabel,
+    used: etat.used,
+    limit: etat.limit,
+    unlimited: etat.unlimited,
+    remaining: etat.remaining,
+    reached: etat.reached,
+    compteurDedie: etat.compteurDedie,
+    isActive: etat.isActive,
+    daysRemaining: etat.daysRemaining,
+  });
 }

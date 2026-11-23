@@ -1318,7 +1318,7 @@ export default function CvBuilderPage() {
   }, [loaded]);
 
   /* Design du builder -> templateId comprehensible par la page publique. */
-  function mapDesignTemplate(id: "modern" | "sleek" | "bold" | "clean"): string {
+  function mapPublicCvDesignTemplate(id: "modern" | "sleek" | "bold" | "clean"): string {
     if (id === "sleek") return "sleek-executive";
     if (id === "bold") return "bold-minimalism";
     if (id === "clean") return "clean-ats";
@@ -1340,7 +1340,7 @@ export default function CvBuilderPage() {
       }      const __res = await fetch('/api/public-cv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cvData: buildPublicCvPayload(), templateId: mapDesignTemplate(design.template) }),
+        body: JSON.stringify({ cvData: buildPublicCvPayload(), templateId: mapPublicCvDesignTemplate(design.template) }),
       });
       const __json = (await __res.json().catch(() => null)) as
         | { publicResume?: { slug?: string } | null }
@@ -1781,53 +1781,6 @@ export default function CvBuilderPage() {
     };
   }
 
-  async function handlePublishPublicCv() {
-    if (!data.personal.fullName.trim()) {
-      toast.error("Renseignez votre nom complet (étape 1) avant la publication.");
-      setStep(0);
-      return;
-    }
-    setPubLoading(true);
-    setPubError(null);
-    try {
-      const res = await fetch("/api/public-cv", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cvData: buildPublicCvPayload(),
-          templateId: mapDesignTemplate(design.template),
-        }),
-      });
-      const json = (await res.json().catch(() => null)) as
-        | {
-            publicResume?: { slug?: string; viewsCount?: number; publicUrl?: string };
-            error?: string;
-          }
-        | null;
-      if (!res.ok || !json?.publicResume?.slug) {
-        const message =
-          json?.error ?? `Publication impossible (code ${res.status}). Réessayez.`;
-        setPubError(message);
-        toast.error(message);
-        return;
-      }
-      setPubSlug(json.publicResume.slug);
-      setPubUrl(json.publicResume.publicUrl ?? null);
-      setPubViews(
-        typeof json.publicResume.viewsCount === "number"
-          ? json.publicResume.viewsCount
-          : 0
-      );
-      toast.success("CV publié en ligne ! Le lien est copiable ci-dessous.");
-    } catch {
-      const message =
-        "Impossible de joindre le serveur. Vérifiez votre connexion et réessayez.";
-      setPubError(message);
-      toast.error(message);
-    } finally {
-      setPubLoading(false);
-    }
-  }
 
   async function handleCopyPublicLink() {
     if (!pubSlug) return;

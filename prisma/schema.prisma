@@ -31,7 +31,7 @@ model User {
   // Compteurs d'usage — remis à zéro à l'activation d'une licence.
   // usagePeriodStart pilote la fenêtre glissante de 30 jours du plan FREE.
   searchesUsed     Int       @default(0)
-  generationsUsed  Int       @default(0)
+  coachAnalysesUsed Int       @default(0) // Coach de négociation : simulations du mois (plan Découverte)
   usagePeriodStart DateTime? @default(now())
 
   savedResumes          SavedResume[]
