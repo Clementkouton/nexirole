@@ -6,16 +6,22 @@
 // GET  /api/cv/<id>/publier : diagnostic (existe ? publie ? cles ?)
 // Body accepte : { cv: ... } | { data: ... } | { payload: ... } | brut
 // Si "cv" est absent, la version stockee dans CvDocument est reprise.
+//
+// [FIX PRISMA 7] L'ancien import du client Prisma par le chemin historique
+// (client généré dans node_modules) n'existe plus depuis la migration
+// Prisma 7 : le client est désormais généré dans src/generated/prisma et
+// requiert l'adaptateur Neon. On utilise donc le SINGLETON partagé de
+// l'application (src/lib/prisma.ts), comme toutes les autres routes.
+// La logique de la route est inchangée.
 // =============================================================
-import * as Prisma from '@prisma/client';
+import { prisma as clientPrisma } from "@/lib/prisma";
 
-const PrismaClient = (Prisma as any).PrismaClient;
+// Accès typé souple : cette route teste plusieurs formes de schéma
+// (clés dynamiques), on garde donc le typage « any » historique.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const prisma: any = clientPrisma;
 
-const g = globalThis as any;
-if (!g.__nexirolePrismaV2) {
-  g.__nexirolePrismaV2 = new PrismaClient();
-}
-const prisma: any = g.__nexirolePrismaV2;
+export const dynamic = "force-dynamic";
 
 function errMsg(e: unknown): string {
   const anyE = e as any;

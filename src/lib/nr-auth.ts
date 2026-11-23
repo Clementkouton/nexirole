@@ -29,9 +29,7 @@ type PrismaClient = {
   };
 };
 
-const { PrismaClient } = require("@prisma/client") as {
-  PrismaClient: new () => PrismaClient;
-};
+const { PrismaClient } = require("./prisma-compat") as { PrismaClient: new () => import("./prisma-compat").ClientPrisma };
 import { auth } from "@/auth"
 import { authOptions } from "@/lib/auth";
 
