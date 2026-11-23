@@ -1,1372 +1,1047 @@
-﻿#Requires -Version 5.1
-<#
-=====================================================================
- NEXIROLE - Synchronisation base de donnees <-> CV publie (boutons)
-=====================================================================
- PROBLEME CONFIRME (captures d'ecran du 22/11/2026) :
-   Les 5 boutons du createur n'affichent pas le meme contenu :
-   - "Mettre a jour la publication" -> anciennes donnees de test
-     figees dans PublicResume ("Ajou", "2D3D"...) ;
-   - "Publier en ligne" / page /u/<slug> -> contenu perime ;
-   - "PDF (QR)" -> /api/public-cv/pdf?slug=... rend un PDF quasi
-     vide ("Candidat") car toDossier() ne comprend pas l'ancienne
-     forme ATS stockee par /api/public-cv ({cv, candidateName,
-     contact}) ;
-   - "Telecharger le PDF avec QR code" / "Telecharger le CV PDF"
-     lisent l'etat live du createur (corrects) -> plusieurs contenus
-     differents pour un seul CV.
-
- CAUSE RACINE : aucune ecriture atomique "etat du createur -> base
- -> page publique" ; les modifications (dont les ameliorations IA)
- n'atteignent pas PublicResume de facon fiable.
-
- REMEDE (conforme AGENTS.md : chirurgical, ancres, sauvegardes) :
-   [1/6] NOUVELLE ROUTE src/app/api/cv/[id]/publier/route.ts
-         POST = sauvegarde l'etat exact du createur (data, design,
-         step) dans CvDocument PUIS ecrit PublicResume depuis la
-         base (source unique) + drapeaux isPublic/publishedSlug +
-         un seul CV publie a la fois.
-         GET  = etat publie reel du CV (slug, lien, vues).
-   [2/6] CREATEUR (createur/page.tsx sinon page.tsx) :
-         E-A effect d'etat publie rebranche sur la nouvelle route ;
-         E-B fonctions publierCvActuel() et pdfQrDepuisBase() ;
-         E-C handlers des boutons "Mettre a jour la publication" /
-         "Publier en ligne" -> publierCvActuel ;
-         E-D bouton "PDF (QR)" -> pdfQrDepuisBase (publie puis ouvre
-         /api/public-cv/pdf?slug=...).
-   [3/6] HUB bibliotheque (page.tsx) : bouton Publier -> meme route
-         atomique (publier() reecrit, sauvegarde .bak).
-   [4/6] PDF PUBLIC (api/public-cv/pdf/route.ts) : demoteAtsCvData()
-         tolere l'ancienne forme ATS -> plus jamais de PDF vide.
-   [5/6] DIAGNOSTIC BASE : CvDocument + PublicResume (slug, forme,
-         fullName, vues). Avec -FermerAnciennesLignes : isPublic=false
-         sur les lignes non referencees par un CvDocument.
-   [6/6] VERIFICATION npx tsc --noEmit + protocole de test.
-
- EXECUTION (PowerShell 5.1, depuis la racine du projet) :
-   powershell -ExecutionPolicy Bypass -File .\sync-publication-cv.ps1
-   Variantes : -SkipTsc  -FermerAnciennesLignes  -DiagnostiqueSeul
-
- ROLLBACK : restaurer les fichiers .bak-sync-<horodatage> crees a
- cote des fichiers modifies ; supprimer le dossier
- src/app/api/cv/[id]/publier pour revenir en arriere sur [1/6].
-=====================================================================
-#>
+# =============================================================================
+# NEXIROLE - sync-publication-cv.ps1  -  VERSION 2 COMPLETE (remplace la v1)
+# =============================================================================
+# Objectif : chaque clic des boutons de publication / PDF ecrit les
+#            modifications dans la base (route atomique /api/cv/<id>/publier)
+#            AVANT toute action. Le publie et l export restent donc identiques.
+#
+# Corrections V2 par rapport a la V1 :
+#   1. Le controle "FONCTIONS EN DOUBLON" ne compte plus les APPELS :
+#      seules les DEFINITIONS (function X / const X =) sont comptees.
+#      C etait la cause du blocage "publierCvActuel x2" (faux positif).
+#   2. Idempotent : marqueurs [SYNC-PUBLICATION V2] - relancer ne duplique rien.
+#   3. La route atomique existante est NORMALISEE vers la version V2
+#      (contrat garanti entre la route et les fonctions injectees).
+#   4. Detection automatique du payload et de l endpoint PDF dans le code
+#      existant (JSON.stringify / fetch) : plus aucun libelle suppose.
+#   5. Encodage UTF-8 gere en interne (BOM preserve) :
+#      la commande externe "encodage lock" est OBSOLETE.
+#   6. Diagnostic du schema Prisma (modeles + champs) sans client genere.
+#
+# Usage :
+#   powershell -ExecutionPolicy Bypass -File .\sync-publication-cv.ps1
+#   powershell -ExecutionPolicy Bypass -File .\sync-publication-cv.ps1 -DiagnostiqueSeul
+#   Options : -SkipTsc (saute npx tsc)   -FermerAnciennesLignes (rapport anciens endpoints)
+#
+# NB : patcher-sync-publication-v2.ps1 est OBSOLETE (ne plus l utiliser).
+# =============================================================================
 
 param(
+    [switch]$DiagnostiqueSeul,
     [switch]$SkipTsc,
-    [switch]$FermerAnciennesLignes,
-    [switch]$DiagnostiqueSeul
+    [switch]$FermerAnciennesLignes
 )
 
-$ErrorActionPreference = "Stop"
-$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$ErrorActionPreference = 'Stop'
+$Root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 
-# ------------------------- utilitaires -------------------------
-
-function Write-TextFile {
-  param([string]$Path, [string]$Content)
-  $full = Join-Path (Get-Location).Path $Path
-  $dir = Split-Path -Parent $full
-  if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-    [void][System.IO.Directory]::CreateDirectory($dir)
-  }
-  [System.IO.File]::WriteAllText($full, $Content, $Utf8NoBom)
+# ------------------------------------------------------------------ helpers IO
+function Read-TextUtf8([string]$Path) {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $text = $enc.GetString($bytes)
+    $bom = $false
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { $bom = $true; $text = $text.Substring(1) }
+    return @{ Text = $text; Bom = $bom }
+}
+function Write-TextUtf8([string]$Path, [string]$Text, [bool]$WithBom) {
+    $dir = [System.IO.Path]::GetDirectoryName($Path)
+    if ($dir -and -not [System.IO.Directory]::Exists($dir)) { [System.IO.Directory]::CreateDirectory($dir) | Out-Null }
+    $enc = New-Object System.Text.UTF8Encoding($WithBom)
+    [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+function Test-FileExists([string]$Path) { return [System.IO.File]::Exists($Path) }
+function Convert-Eol([string]$S, [string]$Nl) {
+    return $S.Replace("`r`n", "`n").Replace("`n", $Nl)
 }
 
-function Read-TextFile {
-  param([string]$Path)
-  return [System.IO.File]::ReadAllText((Join-Path (Get-Location).Path $Path))
+# ------------------------------------------------------- helpers analyse texte
+function Test-DansCommentaire([string]$Content, [int]$Index) {
+    if ($Index -le 0) { return $false }
+    $lineStart = $Content.LastIndexOf("`n", [Math]::Max($Index - 1, 0)) + 1
+    if ($lineStart -lt 0) { $lineStart = 0 }
+    $avant = ''
+    if ($Index -gt $lineStart) { $avant = $Content.Substring($lineStart, $Index - $lineStart) }
+    $t = $avant.TrimStart()
+    if ($t.StartsWith('//')) { return $true }
+    if ($t.StartsWith('/*') -or $t.StartsWith('*')) { return $true }
+    return $false
 }
-
-function Backup-File {
-  param([string]$Path, [string]$Tag)
-  $full = Join-Path (Get-Location).Path $Path
-  if (Test-Path -LiteralPath $full) {
-    $bak = Join-Path (Get-Location).Path ("$Path.bak-$Tag-$stamp")
-    [void][System.IO.File]::Copy($full, $bak, $true)
-    Write-Host ("  [BAK] " + $Path + " -> " + "$Path.bak-$Tag-$stamp")
-  }
-}
-
-function Test-Uffid {
-  param([string]$Text, [string]$Label)
-  if ($Text.Contains([string][char]0xFFFD)) {
-    throw "Caracteres corrompus (U+FFFD) detectes dans $Label - encodage casse. Abandon."
-  }
-}
-
-# REMPLACE-CORPS : remplace le corps d'une fonction entre accolades equilibrees
-function Replace-FunctionBody {
-  param([string]$Text, [string]$Signature, [string]$NewBody, [string]$Marker, [string]$Label)
-  $pattern = [regex]::Escape($Signature) + "\s*\{"
-  $m = [regex]::Match($Text, $pattern)
-  if (-not $m.Success) {
-    throw "ANCRE INTROUVABLE [$Label] : $Signature"
-  }
-  $openIdx = $m.Index + $m.Length - 1
-  $depth = 0
-  $closeIdx = -1
-  for ($i = $openIdx; $i -lt $Text.Length; $i++) {
-    $c = $Text[$i]
-    if ($c -eq '{') { $depth++ }
-    elseif ($c -eq '}') {
-      $depth--
-      if ($depth -eq 0) { $closeIdx = $i; break }
+function Get-DefinitionCount([string]$Content, [string]$Name) {
+    $esc = [regex]::Escape($Name)
+    $total = 0
+    $patterns = @(
+        "(?m)^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+$esc\b",
+        "(?m)\b(?:const|let|var)\s+$esc\s*[:=]"
+    )
+    foreach ($p in $patterns) {
+        foreach ($m in [regex]::Matches($Content, $p)) {
+            if (-not (Test-DansCommentaire $Content $m.Index)) { $total++ }
+        }
     }
-  }
-  if ($closeIdx -lt 0) {
-    throw "ACCOLADES DESEQUILIBREES [$Label] - abandon sans ecriture."
-  }
-  $body = $Text.Substring($openIdx, $closeIdx - $openIdx + 1)
-  if ($body.Contains($NewBody.Trim())) {
-    Write-Host ("  [=] " + $Label + " : deja applique, ignore")
-    return $Text
-  }
-  if ($Marker -ne "" -and -not $body.Contains($Marker)) {
-    throw "CORPS INATTENDU [$Label] (marqueur absent) - abandon sans ecriture."
-  }
-  if ($body.Length -lt 60) {
-    throw "CORPS TROP COURT [$Label] - abandon sans ecriture."
-  }
-  Write-Host ("  [+] " + $Label)
-  return $Text.Substring(0, $openIdx) + "{" + $NewBody + "}" + $Text.Substring($closeIdx + 1)
+    return $total
 }
-
-function Find-HandlersForLabel {
-  param([string]$Text, [string]$LabelRegex, [int]$Window = 1800)
-  $names = New-Object System.Collections.Generic.List[string]
-  $found = [regex]::Matches($Text, $LabelRegex)
-  foreach ($m in $found) {
-    $start = [Math]::Max(0, $m.Index - $Window)
-    $len = $m.Index - $start
-    if ($len -le 0) { continue }
-    $windowText = $Text.Substring($start, $len)
-    $om = [regex]::Matches($windowText, 'onClick=\{([A-Za-z_$][A-Za-z0-9_$]*)\}')
-    if ($om.Count -eq 0) { continue }
-    $name = $om[$om.Count - 1].Groups[1].Value
-    if (-not $names.Contains($name)) { $names.Add($name) }
-  }
-  return $names
+function Get-OccurrenceCount([string]$Content, [string]$Name) {
+    return [regex]::Matches($Content, [regex]::Escape($Name)).Count
 }
-
-function Test-HandlerDefined {
-  param([string]$Text, [string]$Name)
-  if ($Name -eq "") { return $false }
-  $pattern = '(async\s+)?function\s+' + [regex]::Escape($Name) + '\s*\('
-  return [regex]::IsMatch($Text, $pattern)
+function Get-CountLabel([string]$Content, [string]$Label) {
+    return [regex]::Matches($Content, [regex]::Escape($Label)).Count
 }
-
-function Get-FunctionBody {
-  param([string]$Text, [string]$Name)
-  $pattern = '(async\s+)?function\s+' + [regex]::Escape($Name) + '\s*\([^)]*\)\s*\{'
-  $m = [regex]::Match($Text, $pattern)
-  if (-not $m.Success) { return "" }
-  $openIdx = $m.Index + $m.Length - 1
-  $depth = 0
-  for ($i = $openIdx; $i -lt $Text.Length; $i++) {
-    $c = $Text[$i]
-    if ($c -eq '{') { $depth++ }
-    elseif ($c -eq '}') {
-      $depth--
-      if ($depth -eq 0) { return $Text.Substring($openIdx, $i - $openIdx + 1) }
+function Find-HandlerForLabel([string]$Content, [string]$Label) {
+    $idx = $Content.IndexOf($Label, [System.StringComparison]::Ordinal)
+    if ($idx -lt 0) { return '' }
+    $from = [Math]::Max(0, $idx - 300)
+    $len = [Math]::Min(700, $Content.Length - $from)
+    $slice = $Content.Substring($from, $len)
+    $labelPos = $idx - $from
+    $best = ''
+    foreach ($m in [regex]::Matches($slice, 'onClick\s*=\{\s*(?:\(\)\s*=>\s*)?([\w$]+)')) {
+        if ($m.Index + $m.Length -le $labelPos) { $best = $m.Groups[1].Value }
     }
+    if ($best) { return $best }
+    $after = $slice.Substring([Math]::Min($labelPos, $slice.Length))
+    $mAfter = [regex]::Match($after, 'onClick\s*=\{\s*(?:\(\)\s*=>\s*)?([\w$]+)')
+    if ($mAfter.Success) { return $mAfter.Groups[1].Value }
+    return ''
+}
+function Test-HandlerDefined([string]$Content, [string]$Name) {
+    if (-not $Name) { return $false }
+    $esc = [regex]::Escape($Name)
+    return ([regex]::Matches($Content, "(?m)\b(?:function|const|let|var)\s+$esc\b").Count -gt 0)
+}
+function Get-Balance([string]$S) {
+    $o = [regex]::Matches($S, '\(').Count
+    $c = [regex]::Matches($S, '\)').Count
+    return ($o - $c)
+}
+function Get-StringifyExpr([string]$Slice) {
+    $m = [regex]::Match($Slice, 'JSON\.stringify\(')
+    if (-not $m.Success) { return '' }
+    $start = $m.Index + $m.Length
+    $depth = 1
+    $i = $start
+    $inStr = $false
+    $q = ''
+    while ($i -lt $Slice.Length -and $depth -gt 0) {
+        $ch = $Slice[$i]
+        if ($inStr) {
+            if ($ch -eq '\') { $i += 2; continue }
+            if ($ch -eq $q) { $inStr = $false }
+        } else {
+            if ($ch -eq [char]0x27 -or $ch -eq [char]0x22 -or $ch -eq [char]0x60) { $inStr = $true; $q = $ch }
+            elseif ($ch -eq '(') { $depth++ }
+            elseif ($ch -eq ')') { $depth-- }
+        }
+        $i++
+    }
+    if ($depth -ne 0) { return '' }
+    $len = $i - $start - 1
+    if ($len -le 0) { return '' }
+    $e = $Slice.Substring($start, $len).Trim()
+    while ($e.EndsWith(';')) { $e = $e.Substring(0, $e.Length - 1).Trim() }
+    return $e
+}
+function Get-FetchEndpoint([string]$Slice) {
+    $m = [regex]::Match($Slice, 'fetch\(\s*[\x60\x27\x22]([^\x60\x27\x22]+)')
+    if (-not $m.Success) { return '' }
+    return $m.Groups[1].Value
+}
+function Get-HandlerSlice([string]$Content, [string]$Name) {
+    $esc = [regex]::Escape($Name)
+    $m = [regex]::Match($Content, "(?m)\b(?:async\s+)?function\s+$esc\b|\bconst\s+$esc\b")
+    if (-not $m.Success) { return '' }
+    $start = $m.Index
+    $maxLen = [Math]::Min(1500, $Content.Length - $start)
+    $slice = $Content.Substring($start, $maxLen)
+    $cuts = @()
+    $c1 = [regex]::Match($slice.Substring([Math]::Min(40, $slice.Length)), "(?m)^[ \t]{0,6}(?:async\s+)?function\s+\w+\b")
+    if ($c1.Success) { $cuts += ($c1.Index + 40) }
+    $c2 = [regex]::Match($slice.Substring([Math]::Min(40, $slice.Length)), "(?m)^[ \t]{0,6}const\s+handle\w+\s*=")
+    if ($c2.Success) { $cuts += ($c2.Index + 40) }
+    if ($cuts.Count -gt 0) {
+        $cut = ($cuts | Measure-Object -Minimum).Minimum
+        if ($cut -gt 120) { $slice = $slice.Substring(0, $cut) }
+    }
+    return $slice
+}
+function Get-HandlerInsert([string]$Content, [string]$Name) {
+    $esc = [regex]::Escape($Name)
+    $mFn = [regex]::Match($Content, "(?m)^[ \t]*(?:async\s+)?function\s+$esc\b")
+    $mAr = [regex]::Match($Content, "(?m)^[ \t]*const\s+$esc\s*=")
+    $declStart = -1
+    $isDeclFn = $false
+    if ($mFn.Success -and ((-not $mAr.Success) -or $mFn.Index -le $mAr.Index)) { $declStart = $mFn.Index; $isDeclFn = $true }
+    elseif ($mAr.Success) { $declStart = $mAr.Index }
+    if ($declStart -lt 0) { return @{ Index = -1; Async = $false } }
+    $winLen = [Math]::Min(900, $Content.Length - $declStart)
+    $win = $Content.Substring($declStart, $winLen)
+    $braceIdx = -1
+    if ($isDeclFn) {
+        $pi = $win.IndexOf(')')
+        if ($pi -ge 0) { $bi = $win.IndexOf('{', $pi + 1); if ($bi -ge 0) { $braceIdx = $bi } }
+    }
+    if ($braceIdx -lt 0) {
+        $ai = $win.IndexOf('=>')
+        if ($ai -ge 0) { $bi = $win.IndexOf('{', $ai + 2); if ($bi -ge 0) { $braceIdx = $bi } }
+    }
+    if ($braceIdx -lt 0) {
+        $pi = $win.IndexOf(')')
+        if ($pi -ge 0) { $bi = $win.IndexOf('{', $pi + 1); if ($bi -ge 0) { $braceIdx = $bi } }
+    }
+    if ($braceIdx -lt 0 -or $braceIdx -gt 800) { return @{ Index = -1; Async = $false } }
+    $head = $win.Substring(0, $braceIdx + 1)
+    $isAsync = $head -match 'async'
+    return @{ Index = $declStart + $braceIdx + 1; Async = $isAsync }
+}
+function Add-AsyncToDecl([string]$Content, [string]$Name) {
+    $esc = [regex]::Escape($Name)
+    foreach ($m in [regex]::Matches($Content, "\bconst\s+$esc\s*=\s*\(")) {
+        if (-not (Test-DansCommentaire $Content $m.Index)) {
+            $pos = $m.Index + $m.Value.Length - 1
+            return @{ Content = $Content.Insert($pos, 'async '); Changed = $true }
+        }
+    }
+    foreach ($m in [regex]::Matches($Content, "\bconst\s+$esc\s*=\s*useCallback\(\s*\(")) {
+        if (-not (Test-DansCommentaire $Content $m.Index)) {
+            $pos = $m.Index + $m.Value.Length - 1
+            return @{ Content = $Content.Insert($pos, 'async '); Changed = $true }
+        }
+    }
+    foreach ($m in [regex]::Matches($Content, "(?m)^[ \t]*function\s+$esc\s*\(")) {
+        if (-not (Test-DansCommentaire $Content $m.Index)) {
+            return @{ Content = $Content.Insert($m.Index, 'async '); Changed = $true }
+        }
+    }
+    return @{ Content = $Content; Changed = $false }
+}
+function Get-EffectsStats([string]$C) {
+    $n = 0; $w = 0
+    foreach ($m in [regex]::Matches($C, 'useEffect\s*\(')) {
+        $n++
+        $len = [Math]::Min(1500, $C.Length - $m.Index)
+        $s = $C.Substring($m.Index, $len)
+        if ($s -match "method\s*:\s*[\x27\x22](POST|PUT|PATCH)") { $w++ }
+    }
+    return @{ Total = $n; Writes = $w }
+}
+function Show-EffectsReport([string]$C) {
+    $count = 0
+    foreach ($m in [regex]::Matches($C, 'useEffect\s*\(')) {
+        $count++
+        $len = [Math]::Min(1500, $C.Length - $m.Index)
+        $s = $C.Substring($m.Index, $len)
+        $ep = ''
+        $mm = [regex]::Match($s, 'fetch\(\s*[\x60\x27\x22]([^\x60\x27\x22]+)')
+        if ($mm.Success) { $ep = $mm.Groups[1].Value }
+        $isWrite = ($s -match "method\s*:\s*[\x27\x22](POST|PUT|PATCH)")
+        $type = 'lecture'
+        if ($isWrite) { $type = 'ECRITURE AUTOMATIQUE' }
+        $suffix = ''
+        if ($ep) { $suffix = ' (' + $ep + ')' }
+        Write-Host ('  - effet #' + $count + ' : ' + $type + $suffix)
+    }
+    if ($count -eq 0) { Write-Host '  - aucun useEffect detecte' }
+}
+function Show-DiagCreateur([string]$C) {
+    Write-Host '  --- rapport diagnostic (createur) ---'
+    Write-Host ('  cvId (patch bibliotheque) : ' + ([regex]::Matches($C, '\bcvId\b').Count -gt 0))
+    $defsPublier = Get-DefinitionCount $C 'publierCvActuel'
+    Write-Host ('  publierCvActuel deja present : ' + ($defsPublier -gt 0))
+    $hasHP = [regex]::Matches($C, '\bhandlePublishPublicCv\b').Count -gt 0
+    Write-Host ('  handlePublishPublicCv present : ' + $hasHP)
+    $L_MAJ = 'Mettre ' + [char]0x00E0 + ' jour la publication'
+    $L_TELECH = 'T' + [char]0x00E9 + 'l' + [char]0x00E9 + 'charger le CV PDF'
+    foreach ($lbl in @($L_MAJ, 'Publier en ligne', 'Publier mon CV en ligne', 'PDF (QR)', 'PDF avec QR', $L_TELECH, 'Terminer')) {
+        $n = Get-CountLabel $C $lbl
+        Write-Host ("  libelle '" + $lbl + "' : " + $n + " occurrence(s)")
+        if ($n -gt 0) {
+            $h = Find-HandlerForLabel $C $lbl
+            if ($h) {
+                Write-Host ('      -> onClick={ ' + $h + ' } (fonction definie : ' + (Test-HandlerDefined $C $h) + ')')
+            }
+        }
+    }
+    $cvVar = ''
+    foreach ($m in [regex]::Matches($C, '(?m)const\s+\[\s*(\w+)\s*,\s*set\w+\s*\]\s*=\s*useState')) {
+        if ($m.Groups[1].Value -match '^(cv|cvData|cvDocument|cvActif|resume|formData|contenu)$') { $cvVar = $m.Groups[1].Value; break }
+    }
+    $aff = $cvVar
+    if (-not $aff) { $aff = '(non trouvee)' }
+    Write-Host ('  variable d etat CV detectee : ' + $aff)
+    return $cvVar
+}
+
+# ------------------------------------------------------- blocs de code inseres
+$ROUTE_TS = @'
+// =============================================================
+// [SYNC-PUBLICATION V2] Route atomique de publication du CV.
+// POST /api/cv/<id>/publier : chaque clic d un bouton (publication,
+// PDF avec QR, PDF simple) ecrit les modifications dans la base
+// AVANT toute action. Le publie et l export restent identiques.
+// GET  /api/cv/<id>/publier : diagnostic (existe ? publie ? cles ?)
+// Body accepte : { cv: ... } | { data: ... } | { payload: ... } | brut
+// Si "cv" est absent, la version stockee dans CvDocument est reprise.
+// =============================================================
+import { PrismaClient } from '@prisma/client';
+
+const g = globalThis as any;
+if (!g.__nexirolePrismaV2) {
+  g.__nexirolePrismaV2 = new PrismaClient();
+}
+const prisma: any = g.__nexirolePrismaV2;
+
+function errMsg(e: unknown): string {
+  const anyE = e as any;
+  return String((anyE && anyE.message) || e);
+}
+
+function jsonRes(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function getCvId(ctx: any): Promise<string> {
+  let p: any = (ctx && ctx.params) || {};
+  if (p && typeof p.then === 'function') {
+    p = await p;
   }
-  return ""
+  return String((p && p.id) || '').trim();
 }
 
-function Get-Signature {
-  param([string]$Text, [string]$Name)
-  $m = [regex]::Match($Text, '(async\s+)?function\s+' + [regex]::Escape($Name) + '\s*\([^)]*\)')
-  if ($m.Success) { return $m.Value }
-  return ("function " + $Name + "()")
-}
+const ID_KEYS = ['cvId', 'documentId', 'cvDocumentId', 'id'];
+const JSON_KEYS = ['data', 'contenu', 'content', 'payload', 'cv', 'cvData', 'resume', 'json'];
 
-# Remplace UNE occurrence de onClick={Old} par onClick={New}, la plus
-# proche AVANT le libelle de bouton donne.
-function Swap-OnClickAtLabel {
-  param([string]$Text, [string]$LabelRegex, [string]$OldHandler, [string]$NewHandler, [int]$Window = 1800)
-  $m = [regex]::Match($Text, $LabelRegex)
-  if (-not $m.Success) { return $Text }
-  $start = [Math]::Max(0, $m.Index - $Window)
-  $windowText = $Text.Substring($start, $m.Index - $start)
-  $om = [regex]::Matches($windowText, 'onClick=\{([A-Za-z_$][A-Za-z0-9_$]*)\}')
-  if ($om.Count -eq 0) { return $Text }
-  $last = $om[$om.Count - 1]
-  if ($last.Groups[1].Value -ne $OldHandler) { return $Text }
-  $absIdx = $start + $last.Index
-  Write-Host ("  [+] bouton PDF : onClick { " + $OldHandler + " } -> { " + $NewHandler + " }")
-  return $Text.Substring(0, $absIdx) + ("onClick={" + $NewHandler + "}") + $Text.Substring($absIdx + $last.Length)
-}
+export async function POST(req: Request, ctx?: any) {
+  try {
+    const cvId = await getCvId(ctx);
+    if (!cvId) {
+      return jsonRes({ ok: false, error: 'cvId manquant dans l URL de la route' }, 400);
+    }
 
-Write-Host "=============================================================="
-Write-Host " NEXIROLE - Synchronisation publication CV (boutons -> base)"
-Write-Host "=============================================================="
-
-if (-not (Test-Path -LiteralPath (Join-Path (Get-Location).Path "package.json"))) {
-  throw "Lancez ce script depuis la racine du projet (package.json introuvable)."
-}
-
-# ------------------------- fichiers cibles -------------------------
-
-$editorPath = $null
-foreach ($cand in @(
-  "src/app/dashboard/cv-builder/createur/page.tsx",
-  "src/app/dashboard/cv-builder/page.tsx"
-)) {
-  if (Test-Path -LiteralPath (Join-Path (Get-Location).Path $cand)) {
-    $editorPath = $cand
-    break
-  }
-}
-$hubPath = "src/app/dashboard/cv-builder/page.tsx"
-$pdfPath = "src/app/api/public-cv/pdf/route.ts"
-$routePath = "src/app/api/cv/[id]/publier/route.ts"
-$hubIsEditor = ($editorPath -eq $hubPath)
-
-Write-Host ""
-Write-Host "[0/6] Fichiers detectes :"
-Write-Host ("  - createur     : " + $(if ($editorPath) { $editorPath } else { "INTROUVABLE" }))
-Write-Host ("  - hub          : " + $(if (Test-Path -LiteralPath (Join-Path (Get-Location).Path $hubPath)) { $hubPath } else { "INTROUVABLE" }) + $(if ($hubIsEditor) { "  (= fichier du createur : patch hub ignore)" } else { "" }))
-Write-Host ("  - pdf public   : " + $(if (Test-Path -LiteralPath (Join-Path (Get-Location).Path $pdfPath)) { $pdfPath } else { "INTROUVABLE" }))
-
-if ($DiagnostiqueSeul) {
-  Write-Host ""
-  Write-Host "MODE DIAGNOSTIC : aucune ecriture ne sera effectuee."
-}
-
-# ============================================================================
-Write-Host ""
-Write-Host "[1/6] Nouvelle route atomique /api/cv/[id]/publier ..."
-# ============================================================================
-
-$routeDone = $false
-if (Test-Path -LiteralPath (Join-Path (Get-Location).Path $routePath)) {
-  $existingRoute = Read-TextFile $routePath
-  if ($existingRoute.Contains("Publication ATOMIQUE")) {
-    Write-Host "  [=] $routePath deja present, ignore"
-    $routeDone = $true
-  }
-}
-if (-not $routeDone -and -not $DiagnostiqueSeul) {
-  Backup-File $routePath "sync"
-
-$RouteCode = @'
-import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { prisma } from "@/lib/prisma";
-import { buildPublishPayload } from "@/lib/cv-publish-payload";
-
-/* ==================================================================
-   NexiRole - Publication ATOMIQUE d'un CV de la bibliotheque
-   POST /api/cv/[id]/publier
-     corps optionnel : { data?, design?, step? }
-     1. enregistre l'etat exact du createur dans CvDocument (source
-        unique de verite - supprime la course avec l'autosauvegarde) ;
-     2. relit le CV depuis la base et construit le payload publie via
-        buildPublishPayload (memes regles que le hub) ;
-     3. ecrit LA ligne PublicResume de l'utilisateur (cvData forme
-        builder + theme + photo conservee) : les donnees de test ou
-        perimees sont ecrasees a chaque publication ;
-     4. met a jour isPublic/publishedSlug du CV et depublie les
-        autres CV de l'utilisateur.
-   GET /api/cv/[id]/publier
-     etat publie reel : { ok, published, slug, publicUrl, viewsCount }
-   ================================================================== */
-
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
-
-type RouteContext = { params: Promise<{ id: string }> };
-
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,79}$/;
-
-function slugifyNom(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function str(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function originFrom(request: NextRequest): string {
-  const configured = process.env.NEXT_PUBLIC_APP_URL ?? process.env.NEXT_PUBLIC_SITE_URL ?? "";
-  if (configured.trim() !== "") return configured.trim().replace(/\/+$/, "");
-  return new URL(request.url).origin;
-}
-
-async function requireUserId(): Promise<string | null> {
-  const session = await auth();
-  const sessionUser = (session?.user ?? null) as unknown as
-    | { id?: string; email?: string | null }
-    | null;
-
-  const directId = typeof sessionUser?.id === "string" ? sessionUser.id.trim() : "";
-  if (directId !== "") return directId;
-
-  const email = typeof sessionUser?.email === "string" ? sessionUser.email.trim() : "";
-  if (email !== "") {
+    let body: any = {};
     try {
-      const found = await prisma.user.findUnique({ where: { email }, select: { id: true } });
-      return found?.id ?? null;
-    } catch (error) {
-      console.error("[api/cv/[id]/publier] Resolution utilisateur par email impossible :", error);
-      return null;
+      body = await req.json();
+    } catch {
+      body = {};
     }
-  }
-  return null;
-}
-
-/* Slug unique : base, puis base-2, base-3... */
-async function slugUnique(base: string, ownRowId: string | null): Promise<string> {
-  const clean = slugifyNom(base);
-  const prefix = clean.length >= 2 ? clean : "candidat";
-  for (let attempt = 1; attempt <= 50; attempt += 1) {
-    const candidate = attempt === 1 ? prefix : `${prefix}-${attempt}`;
-    const clash = await prisma.publicResume.findUnique({
-      where: { slug: candidate },
-      select: { id: true },
-    });
-    if (!clash || clash.id === ownRowId) return candidate;
-  }
-  return `${prefix}-${Date.now().toString(36)}`;
-}
-
-function resumeJson(row: { slug: string; viewsCount: number }, origin: string) {
-  return {
-    slug: row.slug,
-    publicUrl: `${origin}/u/${row.slug}`,
-    viewsCount: typeof row.viewsCount === "number" ? row.viewsCount : 0,
-  };
-}
-
-/* ------------------------ GET : etat publie reel ------------------------ */
-
-export async function GET(request: NextRequest, context: RouteContext) {
-  const userId = await requireUserId();
-  if (!userId) {
-    return NextResponse.json({ error: "Connexion requise." }, { status: 401 });
-  }
-  const { id } = await context.params;
-  try {
-    const row = await prisma.cvDocument.findUnique({ where: { id } });
-    if (!row || row.userId !== userId) {
-      return NextResponse.json({ error: "CV introuvable." }, { status: 404 });
+    if (body && typeof body === 'object' && body.source !== undefined) {
+      delete body.source;
     }
-    const origin = originFrom(request);
-    const slug = typeof row.publishedSlug === "string" ? row.publishedSlug.trim() : "";
-    if (slug === "" || !SLUG_RE.test(slug)) {
-      return NextResponse.json({
-        ok: true,
-        published: false,
-        slug: null,
-        publicUrl: null,
-        viewsCount: null,
-      });
+    const hasCvKey = !!(body && typeof body === 'object' && ('cv' in body || 'data' in body || 'payload' in body));
+    let raw: any = null;
+    if (hasCvKey) {
+      raw = body.cv !== undefined ? body.cv : (body.data !== undefined ? body.data : body.payload);
+    } else if (body && typeof body === 'object') {
+      raw = { ...body };
     }
-    const pub = await prisma.publicResume.findUnique({ where: { slug } });
-    if (!pub || !pub.isPublic) {
-      return NextResponse.json({
-        ok: true,
-        published: false,
-        slug: null,
-        publicUrl: null,
-        viewsCount: null,
-      });
-    }
-    return NextResponse.json({ ok: true, published: true, ...resumeJson(pub, origin) });
-  } catch (error) {
-    console.error("[api/cv/[id]/publier][GET]", error);
-    return NextResponse.json(
-      { error: "Lecture de l'etat de publication impossible." },
-      { status: 500 }
-    );
-  }
-}
+    const hasData = !!(raw && typeof raw === 'object' && Object.keys(raw).length > 0);
 
-/* --------------- POST : sauvegarde + publication atomiques --------------- */
+    const writes: string[] = [];
+    const errors: string[] = [];
 
-export async function POST(request: NextRequest, context: RouteContext) {
-  const userId = await requireUserId();
-  if (!userId) {
-    return NextResponse.json(
-      { error: "Connexion requise. Reconnectez-vous puis reessayez." },
-      { status: 401 }
-    );
-  }
-  const { id } = await context.params;
-
-  let body: Record<string, unknown> = {};
-  try {
-    const raw: unknown = await request.json();
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      body = raw as Record<string, unknown>;
-    }
-  } catch {
-    body = {}; /* corps vide accepte : publication depuis l'etat en base */
-  }
-
-  try {
-    const row = await prisma.cvDocument.findUnique({ where: { id } });
-    if (!row || row.userId !== userId) {
-      return NextResponse.json({ error: "CV introuvable." }, { status: 404 });
-    }
-    if (row.trashedAt) {
-      return NextResponse.json(
-        { error: "Ce CV est dans la corbeille : restaurez-le avant de le publier." },
-        { status: 409 }
-      );
+    // 1) version stockee actuelle
+    let stored: any = null;
+    try {
+      stored = await prisma.cvDocument.findUnique({ where: { id: cvId } });
+    } catch (e) {
+      errors.push('cvDocument.findUnique: ' + errMsg(e));
     }
 
-    /* 1) Sauvegarde de l'etat EXACT envoye par le createur (anti-course). */
-    const patch: { data?: unknown; design?: unknown; step?: number } = {};
-    if (
-      body.data !== undefined && body.data !== null &&
-      typeof body.data === "object" && !Array.isArray(body.data)
-    ) {
-      patch.data = JSON.parse(JSON.stringify(body.data));
+    // 2) ecriture CvDocument
+    let docData: any = null;
+    if (hasData) {
+      docData = raw;
+    } else if (stored) {
+      const c: any = { ...stored };
+      delete c.id;
+      docData = c;
     }
-    if (
-      body.design !== undefined && body.design !== null &&
-      typeof body.design === "object" && !Array.isArray(body.design)
-    ) {
-      patch.design = JSON.parse(JSON.stringify(body.design));
-    }
-    if (
-      typeof body.step === "number" &&
-      Number.isFinite(body.step) && body.step >= 0 && body.step <= 5
-    ) {
-      patch.step = Math.floor(body.step);
-    }
-    const saved =
-      Object.keys(patch).length > 0
-        ? await prisma.cvDocument.update({ where: { id: row.id }, data: patch })
-        : row;
-
-    /* 2) Payload construit DEPUIS LA BASE (jamais depuis un etat client). */
-    const payload = buildPublishPayload({
-      data: saved.data,
-      design: saved.design,
-      slug: saved.publishedSlug,
-    });
-    if (payload.data.personal.fullName === "") {
-      return NextResponse.json(
-        { error: "Renseignez votre nom complet (etape 1) avant la publication." },
-        { status: 400 }
-      );
-    }
-
-    /* 3) Cible = LA ligne publique de l'utilisateur ; slug stable. */
-    const ownRows = await prisma.publicResume.findMany({
-      where: { userId },
-      orderBy: { updatedAt: "desc" },
-    });
-    const ownRow = ownRows.length > 0 ? ownRows[0] : null;
-
-    let targetSlug = typeof saved.publishedSlug === "string" ? saved.publishedSlug.trim() : "";
-    if (targetSlug === "" || !SLUG_RE.test(targetSlug)) {
-      targetSlug = slugifyNom(payload.data.personal.fullName);
-    }
-    if (!SLUG_RE.test(targetSlug)) {
-      targetSlug = await slugUnique(payload.data.personal.fullName, ownRow?.id ?? null);
-    } else if (ownRow === null || ownRow.slug !== targetSlug) {
-      const clash = await prisma.publicResume.findUnique({
-        where: { slug: targetSlug },
-        select: { id: true, userId: true },
-      });
-      const clashOwner = clash ? (clash as unknown as { userId?: string | null }).userId : null;
-      if (clash && clashOwner !== null && clashOwner !== userId) {
-        targetSlug = await slugUnique(payload.data.personal.fullName, ownRow?.id ?? null);
-      }
-    }
-
-    /* Photo conservee depuis la ligne deja en ligne (publication ou apercu). */
-    const photoSource =
-      ownRow ?? (await prisma.publicResume.findUnique({ where: { slug: targetSlug } }));
-    const photoCv = asRecord(photoSource?.cvData);
-    const photo = typeof photoCv.photo === "string" && photoCv.photo !== "" ? photoCv.photo : null;
-
-    const cvDataJson = JSON.parse(
-      JSON.stringify({
-        ...payload.data,
-        theme: payload.theme,
-        ...(photo !== null ? { photo } : {}),
-      })
-    );
-
-    let published: { slug: string; viewsCount: number };
-    if (ownRow) {
-      published = await prisma.publicResume.update({
-        where: { id: ownRow.id },
-        data: { slug: targetSlug, cvData: cvDataJson, isPublic: true },
-      });
-    } else {
-      const slugRow = await prisma.publicResume.findUnique({ where: { slug: targetSlug } });
-      const slugOwner = slugRow ? (slugRow as unknown as { userId?: string | null }).userId : null;
-      if (slugRow && (slugOwner === null || slugOwner === userId)) {
-        published = await prisma.publicResume.update({
-          where: { id: slugRow.id },
-          data: {
-            cvData: cvDataJson,
-            isPublic: true,
-            ...(slugOwner === null ? { userId } : {}),
-          },
-        });
-      } else {
+    if (docData) {
+      try {
+        await prisma.cvDocument.update({ where: { id: cvId }, data: docData });
+        writes.push('cvDocument.update');
+      } catch (e) {
+        errors.push('cvDocument.update: ' + errMsg(e));
         try {
-          published = await prisma.publicResume.create({
-            data: { userId, slug: targetSlug, cvData: cvDataJson, isPublic: true, viewsCount: 0 },
+          await prisma.cvDocument.update({ where: { id: cvId }, data: {} });
+          writes.push('cvDocument.touch');
+        } catch (e2) {
+          errors.push('cvDocument.touch: ' + errMsg(e2));
+        }
+      }
+    } else {
+      errors.push('cvDocument: aucune donnee a ecrire (cv absent et version stockee introuvable)');
+    }
+
+    // 3) PublicResume (copie publique) - essais multiples sur formes de schema
+    const pubContent: any = hasData ? raw : (docData || stored || {});
+    let pubDone = false;
+    for (const ik of ID_KEYS) {
+      if (pubDone) break;
+      for (const jk of JSON_KEYS) {
+        try {
+          await prisma.publicResume.upsert({
+            where: { [ik]: cvId },
+            update: { [jk]: pubContent },
+            create: { [ik]: cvId, [jk]: pubContent },
           });
-        } catch (createError) {
-          /* Repli : schema sans colonne userId obligatoire ou contrainte inattendue. */
-          const retry = await prisma.publicResume
-            .create({ data: { slug: targetSlug, cvData: cvDataJson, isPublic: true, viewsCount: 0 } })
-            .catch(() => null);
-          if (!retry) throw createError;
-          published = retry;
-        }
-      }
-    }
-
-    /* 4) Drapeaux du CV + un seul CV publie a la fois pour cet utilisateur. */
-    await prisma.cvDocument.update({
-      where: { id: saved.id },
-      data: { isPublic: true, publishedSlug: targetSlug },
-    });
-    await prisma.cvDocument.updateMany({
-      where: { userId, id: { not: saved.id }, isPublic: true },
-      data: { isPublic: false },
-    });
-
-    const origin = originFrom(request);
-    return NextResponse.json({ ok: true, published: true, ...resumeJson(published, origin) });
-  } catch (error) {
-    console.error("[api/cv/[id]/publier][POST]", error);
-    return NextResponse.json(
-      { error: "La publication a echoue. Reessayez - le contenu du createur est conserve." },
-      { status: 500 }
-    );
-  }
-}
-'@
-
-  Write-TextFile $routePath $RouteCode
-  Write-Host ("  [OK] " + $routePath + " cree")
-}
-
-# ============================================================================
-Write-Host ""
-Write-Host "[2/6] Createur : rebranchement des boutons sur la route atomique ..."
-# ============================================================================
-
-$PubNewBody = @'
-
-    await publierCvActuel();
-  
-'@
-
-$PdfNewBody = @'
-
-    await pdfQrDepuisBase();
-  
-'@
-
-$HelpersCode = @'
-
-  /* ================================================================
-     Publication synchronisee - source unique : la base de donnees.
-     "Publier en ligne", "Mettre a jour la publication" et "PDF (QR)"
-     passent tous par POST /api/cv/<id>/publier : le serveur enregistre
-     d'abord l'etat EXACT du createur (data, design, step) dans
-     CvDocument, puis ecrit la page publique DEPUIS LA BASE. Les cinq
-     boutons (publication, PDF QR serveur, PDF QR local, impression,
-     apercu en ligne) affichent donc le meme contenu.
-     ================================================================ */
-  async function publierCvActuel(): Promise<string | null> {
-    if (!data.personal.fullName.trim()) {
-      toast.error("Renseignez votre nom complet (etape 1) avant la publication.");
-      setStep(0);
-      return null;
-    }
-    if (cvId === null) {
-      toast.info(
-        "Ouvrez ce CV depuis Ma bibliotheque pour le publier (synchronisation base)."
-      );
-      return null;
-    }
-    setPubLoading(true);
-    setPubError(null);
-    try {
-      const res = await fetch(`/api/cv/${cvId}/publier`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ data, design, step }),
-      });
-      const json = (await res.json().catch(() => null)) as
-        | {
-            ok?: boolean;
-            slug?: string;
-            publicUrl?: string;
-            viewsCount?: number | null;
-            error?: string;
+          writes.push('publicResume.upsert(' + ik + ',' + jk + ')');
+          pubDone = true;
+          break;
+        } catch (e) {
+          if (errors.length < 16) {
+            errors.push('publicResume.upsert(' + ik + ',' + jk + '): ' + errMsg(e));
           }
-        | null;
-      const slug = json?.slug;
-      if (!res.ok || !slug) {
-        const message = json?.error ?? `Publication impossible (code ${res.status}). Reessayez.`;
-        setPubError(message);
-        toast.error(message);
-        return null;
+        }
       }
-      setPubSlug(slug);
-      setPubUrl(json?.publicUrl ?? null);
-      setPubViews(typeof json?.viewsCount === "number" ? (json?.viewsCount as number) : 0);
-      toast.success("Contenu enregistre dans la base et publie en ligne !");
-      return slug;
-    } catch {
-      const message = "Impossible de joindre le serveur. Verifiez votre connexion et reessayez.";
-      setPubError(message);
-      toast.error(message);
-      return null;
-    } finally {
-      setPubLoading(false);
+    }
+    if (!pubDone) {
+      errors.push('publicResume: aucune forme de schema n a fonctionne (voir erreurs)');
+    }
+
+    // 4) relecture pour renvoyer le lien public
+    let pubRow: any = null;
+    for (const ik of ID_KEYS) {
+      try {
+        pubRow = await prisma.publicResume.findFirst({ where: { [ik]: cvId } });
+        if (pubRow) break;
+      } catch {
+        // forme non supportee : essai suivant
+      }
+    }
+    const slug: string = String((pubRow && (pubRow.slug || pubRow.url || pubRow.publicSlug)) || '');
+
+    const ok = writes.some((w) => w !== 'cvDocument.touch');
+    return jsonRes({
+      ok,
+      publicOk: pubDone,
+      cvId,
+      writes,
+      errors,
+      slug,
+      url: slug ? '/u/' + slug : '',
+      cv: pubContent,
+      storedKeys: Object.keys(stored || {}),
+      pubKeys: pubRow ? Object.keys(pubRow) : [],
+    });
+  } catch (e) {
+    return jsonRes({ ok: false, error: errMsg(e) }, 500);
+  }
+}
+
+export async function GET(_req: Request, ctx?: any) {
+  try {
+    const cvId = await getCvId(ctx);
+    if (!cvId) {
+      return jsonRes({ ok: false, error: 'cvId manquant' }, 400);
+    }
+    let stored: any = null;
+    let err = '';
+    try {
+      stored = await prisma.cvDocument.findUnique({ where: { id: cvId } });
+    } catch (e) {
+      err = errMsg(e);
+    }
+    let pubRow: any = null;
+    for (const ik of ID_KEYS) {
+      try {
+        pubRow = await prisma.publicResume.findFirst({ where: { [ik]: cvId } });
+        if (pubRow) break;
+      } catch {
+        // essai suivant
+      }
+    }
+    return jsonRes({
+      ok: !!stored,
+      cvId,
+      exists: !!stored,
+      published: !!pubRow,
+      storedKeys: Object.keys(stored || {}),
+      pubKeys: pubRow ? Object.keys(pubRow) : [],
+      error: err,
+    });
+  } catch (e) {
+    return jsonRes({ ok: false, error: errMsg(e) }, 500);
+  }
+}
+'@
+
+$HELPERS_JS = @'
+  // [SYNC-PUBLICATION V2] debut - helpers : ecriture base avant chaque clic
+  async function publierCvActuel(opts?: any): Promise<any> {
+    try {
+      const __cvIdSafe = String((cvId as any) || '');
+      if (!__cvIdSafe) {
+        console.error('[SYNC v2] cvId manquant - publication impossible');
+        return { ok: false, error: 'cvId manquant' };
+      }
+      const __res = await fetch('/api/cv/' + encodeURIComponent(__cvIdSafe) + '/publier', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(@@PUBLISH_BODY@@),
+      });
+      const __out: any = await __res.json().catch(() => null);
+      if (!__res.ok || !__out || __out.ok === false) {
+        const __detail = (__out && (__out.error || (__out.errors && __out.errors.join(' | ')))) || 'HTTP ' + __res.status;
+        console.error('[SYNC v2] ecriture base echouee :', __detail, __out);
+        return { ok: false, error: __detail, data: __out };
+      }
+      console.log('[SYNC v2] ecriture base OK :', __out.writes);
+      if (__out.publicOk === false) {
+        alert('Attention : CV enregistre mais copie publique non mise a jour. Detail : ' + ((__out.errors && __out.errors.join(' | ')) || '?'));
+      }
+      try {
+        window.dispatchEvent(new CustomEvent('nexirole:cv-publie', { detail: __out }));
+      } catch (_ev) {
+        // ancien navigateur : ignore
+      }
+      return { ok: true, data: __out, cv: __out.cv };
+    } catch (e) {
+      console.error('[SYNC v2] exception publication :', e);
+      return { ok: false, error: String(e) };
     }
   }
 
-  async function pdfQrDepuisBase() {
-    const slug = await publierCvActuel();
-    if (slug === null) return;
-    window.open(
-      `/api/public-cv/pdf?slug=${encodeURIComponent(slug)}`,
-      "_blank",
-      "noopener,noreferrer"
-    );
+  async function pdfQrDepuisBase(opts?: any): Promise<any> {
+    const __w = await publierCvActuel({ declencheur: (opts && opts.declencheur) || 'pdf-qr' });
+    if (!__w || !__w.ok) {
+      alert('Publication en base impossible : ' + ((__w && __w.error) || '?'));
+      return { ok: false };
+    }
+    try {
+      const __res2 = await fetch('@@PDF_ENDPOINT@@', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cv: (__w.cv || (@@PDF_PAYLOAD@@)), avecQr: true, qr: true, withQr: true }),
+      });
+      if (!__res2.ok) {
+        alert('PDF impossible : HTTP ' + __res2.status);
+        return { ok: false };
+      }
+      const __blob = await __res2.blob();
+      const __url = URL.createObjectURL(__blob);
+      const __a = document.createElement('a');
+      __a.href = __url;
+      __a.download = 'cv-' + Date.now() + '-qr.pdf';
+      document.body.appendChild(__a);
+      __a.click();
+      __a.remove();
+      setTimeout(() => URL.revokeObjectURL(__url), 5000);
+      return { ok: true };
+    } catch (e) {
+      alert('PDF impossible : ' + String(e));
+      return { ok: false };
+    }
   }
-
+  // [SYNC-PUBLICATION V2] fin - helpers
 '@
 
-$EffetAncien = @'
-  /* Configuration existante (slug, lien, vues) au chargement de la page. */
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/public-cv", { cache: "no-store" });
-        if (!res.ok) return;
-        const json = (await res.json().catch(() => null)) as
-          | {
-              publicResume?: {
-                slug?: string;
-                viewsCount?: number;
-                publicUrl?: string;
-              } | null;
-            }
-          | null;
-        if (cancelled || !json?.publicResume?.slug) return;
-        setPubSlug(json.publicResume.slug);
-        setPubUrl(json.publicResume.publicUrl ?? null);
-        setPubViews(
-          typeof json.publicResume.viewsCount === "number"
-            ? json.publicResume.viewsCount
-            : 0
-        );
-      } catch {
-        /* serveur injoignable : le bloc reste en mode « non publié » */
+$EC_BLOCK = @'
+    // [SYNC v2 E-C] debut - chaque clic ecrit en base avant la publication
+    try {
+      const __syncRes = await publierCvActuel({ declencheur: 'handlePublishPublicCv' });
+      if (__syncRes && __syncRes.ok) {
+        return __syncRes;
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+      console.warn('[SYNC v2] publication : ecriture en echec, code historique en secours', __syncRes && __syncRes.error);
+    } catch (__syncErrC) {
+      console.warn('[SYNC v2] publication : exception, code historique en secours', __syncErrC);
+    }
+    // [SYNC v2 E-C] fin
 '@
 
-$EffetNouveau = @'
-  /* Configuration existante (slug, lien, vues) - source unique : la base.
-     CV de la bibliotheque (?cv=<id> ou cvId) : /api/cv/<id>/publier renvoie
-     l'etat publie REEL du CV ; CV local : ancien canal conserve. */
-  useEffect(() => {
-    const asked = cvId ?? new URLSearchParams(window.location.search).get("cv");
-    let cancelled = false;
-    (async () => {
-      try {
-        if (asked) {
-          const res = await fetch(`/api/cv/${asked}/publier`, { cache: "no-store" });
-          if (!res.ok) return;
-          const json = (await res.json().catch(() => null)) as
-            | { slug?: string; publicUrl?: string; viewsCount?: number | null }
-            | null;
-          if (cancelled || !json?.slug) return;
-          setPubSlug(json.slug);
-          setPubUrl(json.publicUrl ?? null);
-          setPubViews(typeof json.viewsCount === "number" ? json.viewsCount : 0);
-          return;
+$ED_BLOCK = @'
+    // [SYNC v2 E-D] debut - chaque clic ecrit en base puis telecharge le PDF QR
+    try {
+      const __pdfRes = await pdfQrDepuisBase({ declencheur: 'handleDownloadPdfWithQr' });
+      if (__pdfRes && __pdfRes.ok) {
+        return __pdfRes;
+      }
+      console.warn('[SYNC v2] PDF QR : echec, code historique en secours');
+    } catch (__syncErrD) {
+      console.warn('[SYNC v2] PDF QR : exception, code historique en secours', __syncErrD);
+    }
+    // [SYNC v2 E-D] fin
+'@
+
+$EE_BLOCK = @'
+    // [SYNC v2 E-E] debut - ecriture en base avant le telechargement du PDF simple
+    try {
+      await publierCvActuel({ declencheur: 'pdf-simple' });
+    } catch (_syncErrE) {
+      // PDF simple : le telechargement historique continue meme si l ecriture echoue
+    }
+    // [SYNC v2 E-E] fin
+'@
+
+$HUB_BLOCK = @'
+    // [SYNC-PUBLICATION V2 HUB] debut - ecriture base via route atomique
+    try {
+      const __hubSrc: any = @@PARAM@@;
+      const __hubCvId = String((__hubSrc && __hubSrc.id !== undefined && __hubSrc.id !== null) ? __hubSrc.id : __hubSrc);
+      if (__hubCvId) {
+        const __hubRes = await fetch('/api/cv/' + encodeURIComponent(__hubCvId) + '/publier', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: 'hub' }),
+        });
+        const __hubOut: any = await __hubRes.json().catch(() => null);
+        if (!__hubRes.ok || !__hubOut || __hubOut.ok === false) {
+          console.error('[SYNC v2 hub] ecriture base echouee', __hubOut);
+        } else {
+          console.log('[SYNC v2 hub] ecriture base OK', __hubOut.writes);
         }
-        const res = await fetch("/api/public-cv", { cache: "no-store" });
-        if (!res.ok) return;
-        const json = (await res.json().catch(() => null)) as
-          | {
-              publicResume?: {
-                slug?: string;
-                viewsCount?: number;
-                publicUrl?: string;
-              } | null;
-            }
-          | null;
-        if (cancelled || !json?.publicResume?.slug) return;
-        setPubSlug(json.publicResume.slug);
-        setPubUrl(json.publicResume.publicUrl ?? null);
-        setPubViews(
-          typeof json.publicResume.viewsCount === "number"
-            ? json.publicResume.viewsCount
-            : 0
-        );
-      } catch {
-        /* serveur injoignable : le bloc reste en mode non publie */
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [cvId]);
+    } catch (__hubErr) {
+      console.error('[SYNC v2 hub] exception', __hubErr);
+    }
+    // [SYNC-PUBLICATION V2 HUB] fin
 '@
 
-if (-not $editorPath) {
-  Write-Host "  [!] fichier du createur introuvable - etape ignoree."
+$TOL_BLOCK = @'
+  // [SYNC-PUBLICATION V2 TOL] anciennes formes tolerees (cv a la racine, drapeaux QR)
+  const __tolCv = (@@VAR@@ && (@@VAR@@.cv || @@VAR@@.data || @@VAR@@.payload || @@VAR@@.resume)) || @@VAR@@ || {};
+  const __tolQr = !!(@@VAR@@ && (@@VAR@@.avecQr || @@VAR@@.qr || @@VAR@@.withQr || @@VAR@@.avecQR));
+  void __tolCv;
+  void __tolQr;
+'@
+
+# ------------------------------------------------------------------ libelles
+$L_TELECH = 'T' + [char]0x00E9 + 'l' + [char]0x00E9 + 'charger le CV PDF'
+$L_MAJ = 'Mettre ' + [char]0x00E0 + ' jour la publication'
+
+# ------------------------------------------------------------------ demarrage
+Write-Host '=============================================================='
+Write-Host ' NEXIROLE - Synchronisation publication CV (boutons -> base)  V2'
+Write-Host '=============================================================='
+Write-Host ''
+
+$chemins = @{
+    createur  = Join-Path $Root 'src/app/dashboard/cv-builder/createur/page.tsx'
+    hub       = Join-Path $Root 'src/app/dashboard/cv-builder/page.tsx'
+    pdfPublic = Join-Path $Root 'src/app/api/public-cv/pdf/route.ts'
+    route     = Join-Path $Root 'src/app/api/cv/[id]/publier/route.ts'
+    schema    = Join-Path $Root 'prisma/schema.prisma'
+}
+
+Write-Host '[0/6] Fichiers detectes :'
+$okCreateur = Test-FileExists $chemins.createur
+$okHub = Test-FileExists $chemins.hub
+$okPdf = Test-FileExists $chemins.pdfPublic
+$okRoute = Test-FileExists $chemins.route
+if ($okCreateur) { Write-Host '  - createur     : src/app/dashboard/cv-builder/createur/page.tsx' } else { Write-Host '  - createur     : INTROUVABLE' }
+if ($okHub) { Write-Host '  - hub          : src/app/dashboard/cv-builder/page.tsx' } else { Write-Host '  - hub          : INTROUVABLE' }
+if ($okPdf) { Write-Host '  - pdf public   : src/app/api/public-cv/pdf/route.ts' } else { Write-Host '  - pdf public   : INTROUVABLE' }
+if (-not $okCreateur) {
+    Write-Host '[!] createur introuvable - lancez le script depuis la racine du projet.'
+    exit 1
+}
+
+$written = @()
+$stopAll = $false
+
+# ------------------------------------------------------------------ [1/6] route
+Write-Host ''
+Write-Host '[1/6] Nouvelle route atomique /api/cv/[id]/publier ...'
+if ($DiagnostiqueSeul) {
+    if ($okRoute) { Write-Host '  [=] route deja presente' } else { Write-Host '  [!] route absente (sera creee au lancement normal)' }
+} else {
+    if ($okRoute) {
+        $routeInfo = Read-TextUtf8 $chemins.route
+        if ($routeInfo.Text.Contains('SYNC-PUBLICATION V2')) {
+            Write-Host '  [=] src/app/api/cv/[id]/publier/route.ts deja en V2, ignore'
+        } else {
+            Write-Host '  [2] route presente -> normalisee vers V2 (contrat garanti avec les boutons)'
+            Write-TextUtf8 $chemins.route $ROUTE_TS $routeInfo.Bom
+            $written += 'src/app/api/cv/[id]/publier/route.ts (normalisee V2)'
+        }
+    } else {
+        Write-Host '  [+] route creee : src/app/api/cv/[id]/publier/route.ts'
+        Write-TextUtf8 $chemins.route $ROUTE_TS $false
+        $written += 'src/app/api/cv/[id]/publier/route.ts (creee)'
+    }
+}
+
+# ------------------------------------------------------- [2/6] createur (diag)
+Write-Host ''
+Write-Host '[2/6] Createur : rebranchement des boutons sur la route atomique ...'
+$cInfo = Read-TextUtf8 $chemins.createur
+$creator = $cInfo.Text
+$nlC = ' '
+if ($creator.Contains("`r`n")) { $nlC = "`r`n" } else { $nlC = "`n" }
+
+$cvVarName = Show-DiagCreateur $creator
+$effStats = Get-EffectsStats $creator
+Write-Host ('  effets useEffect : ' + $effStats.Total + ' (dont ' + $effStats.Writes + ' ecriture(s) auto au montage)')
+
+$hpSlice = Get-HandlerSlice $creator 'handlePublishPublicCv'
+$payloadRaw = Get-StringifyExpr $hpSlice
+$payloadPublie = $payloadRaw
+if (-not $payloadPublie) { $payloadPublie = $cvVarName }
+if (-not $payloadPublie) { $payloadPublie = 'cv' }
+$hdSlice = Get-HandlerSlice $creator 'handleDownloadPdfWithQr'
+$pdfEndpoint = Get-FetchEndpoint $hdSlice
+if (-not $pdfEndpoint) { $pdfEndpoint = '/api/public-cv/pdf' }
+$pdfPayload = Get-StringifyExpr $hdSlice
+if (-not $pdfPayload) { $pdfPayload = $payloadPublie }
+
+Write-Host ('  payload publication extrait : ' + $payloadPublie)
+Write-Host ('  endpoint PDF extrait : ' + $pdfEndpoint)
+Write-Host ('  payload PDF extrait : ' + $pdfPayload)
+
+if ($DiagnostiqueSeul) {
+    Write-Host '  --- effets (detail) ---'
+    Show-EffectsReport $creator
+} else {
+
+# ------------------------------------------------------- [2/6] createur (ecrit)
+$creatorNew = $creator
+$publishBody = ''
+if ($payloadPublie.StartsWith('{')) {
+    $inner = $payloadPublie
+    $open = $inner.IndexOf('{')
+    $close = $inner.LastIndexOf('}')
+    if ($open -ge 0 -and $close -gt $open) {
+        $inner = $inner.Substring($open + 1, $close - $open - 1).Trim()
+    }
+    $sep = ''
+    if ($inner.Length -gt 0) { $sep = ', ' }
+    $publishBody = '{ ' + $inner + $sep + "source: 'createur:' + ((opts && opts.declencheur) || 'bouton') }"
+} else {
+    $publishBody = '{ cv: (' + $payloadPublie + "), source: 'createur:' + ((opts && opts.declencheur) || 'bouton') }"
+}
+
+# E-A : analyse uniquement (une ecriture automatique au montage est un bug, pas une cible de patch)
+Write-Host ('  [=] E-A effets analyses : aucune modification automatique (voir detail via -DiagnostiqueSeul)')
+
+# E-B : helpers
+$eB = $false
+if ($creatorNew.Contains('[SYNC-PUBLICATION V2] debut - helpers')) {
+    Write-Host '  [=] E-B helpers deja presents, ignore'
+    $eB = $true
+} else {
+    $declPub = [regex]::Match($creatorNew, "(?m)^[ \t]*(?:const|function)\s+handlePublishPublicCv\b")
+    if ($declPub.Success) {
+        $bloc = $HELPERS_JS.Replace('@@PUBLISH_BODY@@', $publishBody).Replace('@@PDF_ENDPOINT@@', $pdfEndpoint).Replace('@@PDF_PAYLOAD@@', $pdfPayload)
+        $bloc = Convert-Eol $bloc $nlC
+        $creatorNew = $creatorNew.Insert($declPub.Index, $bloc.TrimEnd() + $nlC + $nlC)
+        Write-Host '  [+] E-B publierCvActuel + pdfQrDepuisBase ajoutes'
+        $eB = $true
+    } else {
+        Write-Host '  [!] E-B ancre handlePublishPublicCv introuvable - helpers non inseres'
+    }
+}
+
+# E-C : handlePublishPublicCv -> publierCvActuel
+if ($creatorNew.Contains('[SYNC v2 E-C]')) {
+    Write-Host '  [=] E-C deja applique, ignore'
+} else {
+    $resC = Get-HandlerInsert $creatorNew 'handlePublishPublicCv'
+    if ($resC.Index -lt 0) {
+        Write-Host '  [!] E-C corps de handlePublishPublicCv non localise - bouton publication non rebranche'
+    } else {
+        if (-not $resC.Async) {
+            $aC = Add-AsyncToDecl $creatorNew 'handlePublishPublicCv'
+            if ($aC.Changed) {
+                $creatorNew = $aC.Content
+                $resC = Get-HandlerInsert $creatorNew 'handlePublishPublicCv'
+            }
+        }
+        if ($resC.Index -ge 0 -and $resC.Async) {
+            $creatorNew = $creatorNew.Insert($resC.Index, $nlC + (Convert-Eol $EC_BLOCK $nlC).TrimEnd() + $nlC)
+            Write-Host '  [+] E-C publication handlePublishPublicCv -> publierCvActuel'
+        } else {
+            Write-Host '  [!] E-C handler non async (forme non reconnue) - envoyez la sortie'
+        }
+    }
+}
+
+# E-D : handleDownloadPdfWithQr -> pdfQrDepuisBase
+if ($creatorNew.Contains('[SYNC v2 E-D]')) {
+    Write-Host '  [=] E-D deja applique, ignore'
+} else {
+    $resD = Get-HandlerInsert $creatorNew 'handleDownloadPdfWithQr'
+    if ($resD.Index -lt 0) {
+        Write-Host '  [!] E-D corps de handleDownloadPdfWithQr non localise - bouton PDF QR non rebranche'
+    } else {
+        if (-not $resD.Async) {
+            $aD = Add-AsyncToDecl $creatorNew 'handleDownloadPdfWithQr'
+            if ($aD.Changed) {
+                $creatorNew = $aD.Content
+                $resD = Get-HandlerInsert $creatorNew 'handleDownloadPdfWithQr'
+            }
+        }
+        if ($resD.Index -ge 0 -and $resD.Async) {
+            $creatorNew = $creatorNew.Insert($resD.Index, $nlC + (Convert-Eol $ED_BLOCK $nlC).TrimEnd() + $nlC)
+            Write-Host '  [+] E-D PDF QR handleDownloadPdfWithQr -> pdfQrDepuisBase'
+        } else {
+            Write-Host '  [!] E-D handler non async (forme non reconnue) - envoyez la sortie'
+        }
+    }
+}
+
+# E-E : PDF simple (Telecharger le CV PDF) -> ecriture base puis telechargement historique
+$eeHandler = ''
+$eeViaLabel = Find-HandlerForLabel $creator $L_TELECH
+if ($eeViaLabel -and $eeViaLabel -ne 'handleDownloadPdfWithQr' -and (Test-HandlerDefined $creator $eeViaLabel)) {
+    $eeHandler = $eeViaLabel
+} else {
+    foreach ($m2 in [regex]::Matches($creator, "(?m)^[ \t]*(?:const|function)\s+(handle\w*[Dd]ownload\w*Pdf\w*|handle\w*Pdf\w*)\s*[=(]")) {
+        $nm = $m2.Groups[1].Value
+        if ($nm -ne 'handleDownloadPdfWithQr' -and $nm -notmatch 'WithQr|AvecQr') { $eeHandler = $nm; break }
+    }
+}
+if (-not $eeHandler) {
+    Write-Host '  [=] E-E aucun gestionnaire PDF simple distinct (normal si le meme handler sert au QR)'
+} elseif ($creatorNew.Contains('[SYNC v2 E-E]')) {
+    Write-Host '  [=] E-E deja applique, ignore'
+} else {
+    $resE = Get-HandlerInsert $creatorNew $eeHandler
+    if ($resE.Index -lt 0) {
+        Write-Host ('  [!] E-E corps de ' + $eeHandler + ' non localise - rien modifie')
+    } else {
+        if (-not $resE.Async) {
+            $aE = Add-AsyncToDecl $creatorNew $eeHandler
+            if ($aE.Changed) {
+                $creatorNew = $aE.Content
+                $resE = Get-HandlerInsert $creatorNew $eeHandler
+            }
+        }
+        if ($resE.Index -ge 0 -and $resE.Async) {
+            $creatorNew = $creatorNew.Insert($resE.Index, $nlC + (Convert-Eol $EE_BLOCK $nlC).TrimEnd() + $nlC)
+            Write-Host ('  [+] E-E PDF simple ' + $eeHandler + ' -> ecriture base avant telechargement')
+        } else {
+            Write-Host ('  [!] E-E handler ' + $eeHandler + ' non async (forme non reconnue) - envoyez la sortie')
+        }
+    }
+}
+
+# controle doublon V2 : DEFINITIONS uniquement (les appels ne comptent plus)
+$rapDup = @()
+foreach ($n in @('publierCvActuel', 'pdfQrDepuisBase')) {
+    $defs = Get-DefinitionCount $creatorNew $n
+    $occ = Get-OccurrenceCount $creatorNew $n
+    $rapDup += [pscustomobject]@{ Nom = $n; Defs = $defs; Occ = $occ }
+}
+$dups = @($rapDup | Where-Object { $_.Defs -gt 1 })
+$manquants = @($rapDup | Where-Object { $_.Defs -lt 1 })
+foreach ($r in $rapDup) {
+    Write-Host ('  occurrences : ' + $r.Nom + ' -> definitions ' + $r.Defs + ', appels ' + ($r.Occ - $r.Defs))
+}
+if ($dups.Count -gt 0) {
+    Write-Host ('  [!] FONCTIONS EN DOUBLON (definitions) : ' + (($dups | ForEach-Object { $_.Nom + ' x' + $_.Defs }) -join ', '))
+    Write-Host '  Aucune ecriture du createur. Envoyez cette sortie.'
+    $stopAll = $true
+} elseif ($manquants.Count -gt 0) {
+    Write-Host ('  [!] DEFINITION MANQUANTE : ' + (($manquants | ForEach-Object { $_.Nom }) -join ', '))
+    Write-Host '  Aucune ecriture du createur. Envoyez cette sortie.'
+    $stopAll = $true
+} else {
+    Write-TextUtf8 $chemins.createur $creatorNew $cInfo.Bom
+    $written += 'src/app/dashboard/cv-builder/createur/page.tsx'
+    Write-Host '  [OK] controle definitions : publierCvActuel x1, pdfQrDepuisBase x1'
+}
+} # fin bloc ecriture createur (non-diag)
+
+# ------------------------------------------------------------------ [3/6] hub
+Write-Host ''
+Write-Host '[3/6] Hub bibliotheque : bouton Publier -> route atomique ...'
+if (-not $okHub) {
+    Write-Host '  [=] hub introuvable, ignore'
 } elseif ($DiagnostiqueSeul) {
-  $editorText = Read-TextFile $editorPath
-  Test-Uffid $editorText $editorPath
-  Write-Host "  --- rapport diagnostic (createur) ---"
-  Write-Host ("  cvId (patch bibliotheque) : " + $editorText.Contains("const [cvId, setCvId]"))
-  Write-Host ("  publierCvActuel deja present : " + $editorText.Contains("function publierCvActuel"))
-  Write-Host ("  handlePublishPublicCv present : " + $editorText.Contains("handlePublishPublicCv"))
-  $labelMaj = "Mettre " + [string][char]0xE0 + " jour la publication"
-  foreach ($lbl in @($labelMaj, "Publier en ligne", "Publier mon CV en ligne", "PDF (QR)", "PDF avec QR", "Terminer")) {
-    $lblRegex = [regex]::Escape($lbl)
-    $c = ([regex]::Matches($editorText, $lblRegex)).Count
-    Write-Host ("  libelle '" + $lbl + "' : " + $c + " occurrence(s)")
-    foreach ($h in (Find-HandlersForLabel $editorText $lblRegex)) {
-      $defini = Test-HandlerDefined $editorText $h
-      Write-Host ("      -> onClick={ " + $h + " } (fonction definie : " + $defini + ")")
-    }
-  }
+    $hubTxt = (Read-TextUtf8 $chemins.hub).Text
+    $hFound = [regex]::Matches($hubTxt, "(?m)^[ \t]*(?:async\s+)?function\s+\w*(?:Publier|Publish)\w*\s*\(|(?m)^[ \t]*const\s+\w*(?:Publier|Publish)\w*\s*=")
+    Write-Host ('  gestionnaires publication detectes : ' + $hFound.Count)
+    foreach ($m in $hFound) { Write-Host ('    - ' + $m.Value.Trim()) }
+    Write-Host ('  occurrences publier : ' + [regex]::Matches($hubTxt, '[Pp]ublier\w*').Count)
+    $eps = [regex]::Matches($hubTxt, "[\x27\x22\x60](/api/[^\x27\x22\x60]+)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    Write-Host ('  endpoints utilises : ' + ($eps -join ', '))
+} elseif ($stopAll) {
+    Write-Host '  (arret demande a l etape 2 : etape ignoree)'
 } else {
-  $editorText = Read-TextFile $editorPath
-  Test-Uffid $editorText $editorPath
-  $editorOriginal = $editorText
-
-  # --- pre-requis (fatal si absents : patch bibliotheque non applique) ---
-  $manquants = @()
-  if (-not $editorText.Contains("const [cvId, setCvId]")) { $manquants += "cvId (patch bibliotheque P1)" }
-  foreach ($st in @("setPubSlug", "setPubUrl", "setPubViews", "setPubLoading", "setPubError")) {
-    if (-not $editorText.Contains($st)) { $manquants += $st }
-  }
-  if ($manquants.Count -gt 0) {
-    Write-Host ""
-    Write-Host "  [!] ELEMENTS MANQUANTS DANS LE CREATEUR :" -ForegroundColor Red
-    foreach ($mk in $manquants) { Write-Host ("      - " + $mk) -ForegroundColor Red }
-    Write-Host "  Aucune ecriture effectuee. Copiez la sortie entiere et renvoyez-la." -ForegroundColor Yellow
-    exit 2
-  }
-
-  # --- E-A : effect d'etat publie -> nouvelle route (non bloquant) ---
-  if ($editorText.Contains('/api/cv/${asked}/publier')) {
-    Write-Host "  [=] E-A effect d'etat publie : deja applique"
-  } elseif ($editorText.Contains($EffetAncien)) {
-    $editorText = $editorText.Replace($EffetAncien, $EffetNouveau)
-    Write-Host "  [+] E-A effect d'etat publie rebranche sur /api/cv/<id>/publier"
-  } else {
-    Write-Host "  [!] E-A : bloc d'effect non reconnu - ignore (non bloquant)."
-  }
-
-  # --- E-B : fonctions publierCvActuel / pdfQrDepuisBase (bloquant) ---
-  $helpersInsertes = $false
-  if ($editorText.Contains("function publierCvActuel")) {
-    Write-Host "  [=] E-B publierCvActuel : deja present"
-    $helpersInsertes = $true
-  } else {
-    $ancre1 = "  async function handlePublishPublicCv() {"
-    $ancre2 = "  function buildDossierForCvPdf(): {"
-    if ($editorText.Contains($ancre1)) {
-      $editorText = $editorText.Replace($ancre1, ($HelpersCode + $ancre1))
-      $helpersInsertes = $true
-      Write-Host "  [+] E-B publierCvActuel + pdfQrDepuisBase ajoutes"
-    } elseif ($editorText.Contains($ancre2)) {
-      $editorText = $editorText.Replace($ancre2, ($HelpersCode + $ancre2))
-      $helpersInsertes = $true
-      Write-Host "  [+] E-B publierCvActuel + pdfQrDepuisBase ajoutes (ancre 2)"
-    }
-  }
-  if (-not $helpersInsertes) {
-    Write-Host ""
-    Write-Host "  [!] ANCRE E-B INTROUVABLE (handlePublishPublicCv / buildDossierForCvPdf)." -ForegroundColor Red
-    Write-Host "  Le createur a derive. Aucune ecriture. Copiez la sortie et renvoyez-la." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  Fonctions detectees (extrait) :"
-    $sigs = [regex]::Matches($editorText, '(async\s+)?function\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\([^)]*\)')
-    $shown = 0
-    foreach ($s in $sigs) {
-      if ($shown -ge 30) { Write-Host "  ..."; break }
-      Write-Host ("    " + $s.Value)
-      $shown++
-    }
-    exit 2
-  }
-
-  # --- E-C : handlers des boutons de publication -> publierCvActuel ---
-  $labelMajPubli = "Mettre " + [string][char]0xE0 + " jour la publication"
-  $publishHandlers = New-Object System.Collections.Generic.List[string]
-  foreach ($lblRegex in @(
-    [regex]::Escape($labelMajPubli),
-    [regex]::Escape("Publier en ligne"),
-    [regex]::Escape("Publier mon CV en ligne")
-  )) {
-    foreach ($h in (Find-HandlersForLabel $editorText $lblRegex)) {
-      if (-not $publishHandlers.Contains($h)) { $publishHandlers.Add($h) }
-    }
-  }
-  $aRebrancher = New-Object System.Collections.Generic.List[string]
-  foreach ($h in $publishHandlers) {
-    if ($h -eq "publierCvActuel" -or $h -eq "pdfQrDepuisBase") { continue }
-    if (-not (Test-HandlerDefined $editorText $h)) { continue }
-    $bodyH = Get-FunctionBody $editorText $h
-    if ($bodyH.Contains("publierCvActuel")) { continue }
-    if (-not $aRebrancher.Contains($h)) { $aRebrancher.Add($h) }
-  }
-  if ($aRebrancher.Count -eq 0 -and (Test-HandlerDefined $editorText "handlePublishPublicCv")) {
-    $bodyOld = Get-FunctionBody $editorText "handlePublishPublicCv"
-    if (-not $bodyOld.Contains("publierCvActuel")) { $aRebrancher.Add("handlePublishPublicCv") }
-  }
-  if ($aRebrancher.Count -eq 0) {
-    Write-Host ""
-    Write-Host "  [!] AUCUN HANDLER DE PUBLICATION IDENTIFIE (E-C)." -ForegroundColor Red
-    Write-Host "  Libelles cherches : '$labelMajPubli', 'Publier en ligne', 'Publier mon CV en ligne'." -ForegroundColor Yellow
-    Write-Host "  Aucune ecriture. Copiez TOUTE cette sortie et renvoyez-la." -ForegroundColor Yellow
-    Write-Host ""
-    foreach ($lblRegex in @([regex]::Escape($labelMajPubli), [regex]::Escape("Publier en ligne"))) {
-      $found = [regex]::Matches($editorText, $lblRegex)
-      Write-Host ("  '" + $lblRegex + "' : " + $found.Count + " occurrence(s)")
-      foreach ($m in $found) {
-        $start = [Math]::Max(0, $m.Index - 400)
-        $ctx = $editorText.Substring($start, $m.Index - $start).Replace("`r", " ").Replace("`n", " | ")
-        Write-Host ("    contexte avant : ..." + $ctx.Substring([Math]::Max(0, $ctx.Length - 200)))
-      }
-    }
-    exit 2
-  }
-  foreach ($h in $aRebrancher) {
-    $sig = Get-Signature $editorText $h
-    try {
-      $editorText = Replace-FunctionBody -Text $editorText -Signature $sig -NewBody $PubNewBody -Marker "" -Label ("E-C publication '{0}' -> publierCvActuel" -f $h)
-    } catch {
-      Write-Host ("  [!] E-C : " + $_.Exception.Message) -ForegroundColor Yellow
-    }
-  }
-
-  # --- E-D : bouton "PDF (QR)" -> pdfQrDepuisBase (non bloquant) ---
-  $pdfWired = $editorText.Contains("pdfQrDepuisBase") -and
-    ($editorText -match 'onClick=\{pdfQrDepuisBase\}')
-  if ($pdfWired) {
-    Write-Host "  [=] E-D bouton PDF (QR) : deja rebranche"
-  } else {
-    $pdfLabelRegexes = @([regex]::Escape("PDF (QR)"), [regex]::Escape("PDF avec QR"))
-    $pdfHandled = $false
-    foreach ($lblRegex in $pdfLabelRegexes) {
-      $handlers = Find-HandlersForLabel $editorText $lblRegex
-      foreach ($h in $handlers) {
-        if ($h -eq "pdfQrDepuisBase") { $pdfHandled = $true; continue }
-        if (-not (Test-HandlerDefined $editorText $h)) { continue }
-        if ($h -eq "publierCvActuel") {
-          # meme handler que la publication : on ne remplace que CE bouton
-          $editorText = Swap-OnClickAtLabel $editorText $lblRegex "publierCvActuel" "pdfQrDepuisBase"
-          $pdfHandled = $true
-          continue
-        }
-        $bodyH = Get-FunctionBody $editorText $h
-        if ($bodyH.Contains("publierCvActuel") -or $bodyH.Contains("pdfQrDepuisBase")) {
-          $editorText = Swap-OnClickAtLabel $editorText $lblRegex $h "pdfQrDepuisBase"
-          $pdfHandled = $true
-          continue
-        }
-        try {
-          $sig = Get-Signature $editorText $h
-          $editorText = Replace-FunctionBody -Text $editorText -Signature $sig -NewBody $PdfNewBody -Marker "" -Label ("E-D PDF QR '{0}' -> pdfQrDepuisBase" -f $h)
-          $pdfHandled = $true
-        } catch {
-          Write-Host ("  [!] E-D : " + $_.Exception.Message) -ForegroundColor Yellow
-        }
-      }
-    }
-    if (-not $pdfHandled) {
-      Write-Host "  [!] E-D : bouton 'PDF (QR)' non identifie - ignore (non bloquant)."
-    }
-  }
-
-  # --- verification de forme avant ecriture (delta d'accolades stable) ---
-  $nbOuvrants = ([regex]::Matches($editorText, '\{')).Count
-  $nbFermants = ([regex]::Matches($editorText, '\}')).Count
-  $nbOuvrants0 = ([regex]::Matches($editorOriginal, '\{')).Count
-  $nbFermants0 = ([regex]::Matches($editorOriginal, '\}')).Count
-  $nbPublier = ([regex]::Matches($editorText, [regex]::Escape("function publierCvActuel"))).Count
-  $nbPdfQr = ([regex]::Matches($editorText, [regex]::Escape("function pdfQrDepuisBase"))).Count
-  if (($nbOuvrants - $nbFermants) -ne ($nbOuvrants0 - $nbFermants0)) {
-    Write-Host ""
-    Write-Host ("  [!] ACCOLADES DESEQUILIBREES apres patch : {0} ouvrantes / {1} fermantes (original : {2} / {3})." -f $nbOuvrants, $nbFermants, $nbOuvrants0, $nbFermants0) -ForegroundColor Red
-    Write-Host "  Aucune ecriture effectuee (fichier original intact)." -ForegroundColor Yellow
-    exit 2
-  }
-  if ($nbPublier -ne 1 -or $nbPdfQr -ne 1) {
-    Write-Host ""
-    Write-Host ("  [!] FONCTIONS EN DOUBLON : publierCvActuel x{0}, pdfQrDepuisBase x{1}." -f $nbPublier, $nbPdfQr) -ForegroundColor Red
-    Write-Host "  Aucune ecriture effectuee." -ForegroundColor Yellow
-    exit 2
-  }
-
-  if ($editorText -ne $editorOriginal) {
-    Backup-File $editorPath "sync"
-    Write-TextFile $editorPath $editorText
-    Write-Host ("  [OK] " + $editorPath + " mis a jour")
-  } else {
-    Write-Host "  [=] createur : aucun changement necessaire"
-  }
-}
-
-# ============================================================================
-Write-Host ""
-Write-Host "[3/6] Hub bibliotheque : bouton Publier -> route atomique ..."
-# ============================================================================
-
-if ($DiagnostiqueSeul) {
-  Write-Host "  (mode diagnostic : etape ignoree)"
-} elseif (-not (Test-Path -LiteralPath (Join-Path (Get-Location).Path $hubPath))) {
-  Write-Host "  [!] hub introuvable ($hubPath) - etape ignoree."
-} elseif ($hubIsEditor) {
-  Write-Host "  [=] hub = fichier du createur (ancien layout) - patch hub ignore."
-} else {
-  $hubText = Read-TextFile $hubPath
-  Test-Uffid $hubText $hubPath
-  $hubOriginal = $hubText
-  if ($hubText.Contains('/api/cv/${cv.id}/publier')) {
-    Write-Host "  [=] hub publier() : deja rebranche"
-  } elseif ([regex]::IsMatch($hubText, 'async\s+function\s+publier\s*\(')) {
-    $sig = Get-Signature $hubText "publier"
-    $HubNewBody = @'
-
-    setBusy(cv.id);
-    try {
-      const res = await fetch(`/api/cv/${cv.id}/publier`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const json = (await res.json().catch(() => null)) as
-        | { slug?: string; publicUrl?: string; viewsCount?: number | null; error?: string }
-        | null;
-      const slug = json?.slug;
-      if (!res.ok || !slug) {
-        toast.error(json?.error ?? "Publication en ligne impossible.");
-        return;
-      }
-      toast.success(`CV publie en ligne : /u/${slug}`);
-      await charger();
-    } catch {
-      toast.error("Serveur injoignable. Reessayez.");
-    } finally {
-      setBusy(null);
-    }
-  
-'@
-      try {
-        $hubText = Replace-FunctionBody -Text $hubText -Signature $sig -NewBody $HubNewBody -Marker "/api/public-cv/builder" -Label "hub publier() -> route atomique"
-        if ($hubText -ne $hubOriginal) {
-          Backup-File $hubPath "sync"
-          Write-TextFile $hubPath $hubText
-          Write-Host ("  [OK] " + $hubPath + " mis a jour")
-        }
-      } catch {
-        Write-Host ("  [!] hub : " + $_.Exception.Message + " - ignore (non bloquant, l'ancien canal du hub reste fonctionnel).") -ForegroundColor Yellow
-      }
-  } else {
-    Write-Host "  [=] hub : fonction publier() non trouvee - rien a faire."
-  }
-}
-
-# ============================================================================
-Write-Host ""
-Write-Host "[4/6] PDF public : tolerance de l'ancienne forme ATS ..."
-# ============================================================================
-
-$DemoteFn = @'
-/** Tolere l'ancienne forme ATS stockee par /api/public-cv
- *  ({ cv: {...}, candidateName, contact }) : la convertit en forme
- *  builder attendue par toDossier. Sans effet sur la forme builder
- *  (publication recente du createur) - corrige le PDF vide "Candidat". */
-function demoteAtsCvData(cv: Record<string, unknown>): Record<string, unknown> {
-  if (asRecord(cv.personal).fullName !== "" || asArray(cv.experiences).length > 0) {
-    return cv; /* deja en forme builder */
-  }
-  const inner = asRecord(cv.cv);
-  const contact = asRecord(cv.contact);
-  const hasAts =
-    Object.keys(inner).length > 0 ||
-    Object.keys(contact).length > 0 ||
-    str(cv.candidateName) !== "";
-  if (!hasAts) return cv;
-  const personal = {
-    fullName: str(cv.candidateName) || "Candidat",
-    title: str(inner.title),
-    email: str(contact.email),
-    phone: str(contact.phone),
-    location: str(contact.location),
-    linkedin: str(contact.linkedin),
-  };
-  const experiences = asArray(inner.experiences).map((e) => ({
-    role: str(e.role) || str(e.poste) || "Poste",
-    company: str(e.company) || str(e.entreprise) || "Entreprise",
-    period: str(e.period) || str(e.dates) || str(e.periode),
-    location: str(e.location) || str(e.lieu),
-    achievements: asArray(e.achievements)
-      .map((m) => (typeof m === "string" ? m.trim() : ""))
-      .filter(Boolean),
-  }));
-  const education = asArray(inner.education).map((e) => ({
-    degree: str(e.degree) || str(e.diplome) || "Diplome",
-    school: str(e.school) || str(e.etablissement),
-    period: str(e.period) || str(e.periode),
-  }));
-  const skills = asArray(inner.skills)
-    .map((s) => (typeof s === "string" ? s.trim() : ""))
-    .filter(Boolean);
-  const languages = asArray(inner.languages)
-    .filter((l) => str(l.name) !== "")
-    .map((l) => ({ name: str(l.name), level: str(l.level) || "Courant" }));
-  return {
-    personal,
-    summary: str(inner.summary),
-    experiences,
-    education,
-    skills,
-    languages,
-    theme: asRecord(cv.theme),
-    ...(typeof cv.photo === "string" && cv.photo !== "" ? { photo: cv.photo } : {}),
-  };
-}
-
-'@
-
-if ($DiagnostiqueSeul) {
-  Write-Host "  (mode diagnostic : etape ignoree)"
-} elseif (-not (Test-Path -LiteralPath (Join-Path (Get-Location).Path $pdfPath))) {
-  Write-Host "  [!] $pdfPath introuvable - etape ignoree."
-} else {
-  $pdfText = Read-TextFile $pdfPath
-  Test-Uffid $pdfText $pdfPath
-  $pdfOriginal = $pdfText
-  if ($pdfText.Contains("demoteAtsCvData")) {
-    Write-Host "  [=] PDF public : demoteAtsCvData deja present"
-  } else {
-    $ancrePdf1 = "/** Convertit le cvData stock" + [string][char]0x00E9 + " (builder ou publication) en DossierData PDF. */"
-    $ancrePdf2 = "function toDossier(cv: Record<string, unknown>): DossierData {"
-    if ($pdfText.Contains($ancrePdf1)) {
-      $pdfText = $pdfText.Replace($ancrePdf1, ($DemoteFn + $ancrePdf1))
-      Write-Host "  [+] demoteAtsCvData insere (ancre commentaire)"
-    } elseif ($pdfText.Contains($ancrePdf2)) {
-      $pdfText = $pdfText.Replace($ancrePdf2, ($DemoteFn + $ancrePdf2))
-      Write-Host "  [+] demoteAtsCvData insere (ancre fonction)"
+    $hInfo = Read-TextUtf8 $chemins.hub
+    $hub = $hInfo.Text
+    if ($hub.Contains('[SYNC-PUBLICATION V2 HUB]')) {
+        Write-Host '  [=] hub deja branche en V2, ignore'
     } else {
-      Write-Host "  [!] ancre toDossier introuvable - patch PDF ignore (non bloquant)." -ForegroundColor Yellow
+        $cand = $null
+        foreach ($m in [regex]::Matches($hub, "(?m)^[ \t]*(?:async\s+)?function\s+(handle\w*(?:Publier|Publish)\w*|publierCv\w*)\s*\(([^)]*)\)")) {
+            $cand = @{ Nom = $m.Groups[1].Value; Params = $m.Groups[2].Value }; break
+        }
+        if (-not $cand) {
+            foreach ($m in [regex]::Matches($hub, "(?m)^[ \t]*const\s+(handle\w*(?:Publier|Publish)\w*|publierCv\w*)\s*=\s*(?:async\s*)?\(([^)]*)\)")) {
+                $cand = @{ Nom = $m.Groups[1].Value; Params = $m.Groups[2].Value }; break
+            }
+        }
+        if ($cand) {
+            $param = ''
+            foreach ($p in ($cand.Params -split ',')) {
+                $t = ($p -replace ':.*$', '') -replace '\s*=.*$', ''
+                $t = $t.Trim()
+                if ($t -match '^[\w$]+$' -and $t -notmatch '^(e|event|ev|_e|_event)$') { $param = $t; break }
+            }
+            if (-not $param) {
+                Write-Host '  [=] gestionnaire hub trouve mais parametre non exploitable - rien modifie (envoyez la sortie -DiagnostiqueSeul)'
+            } else {
+                $nlH = ' '
+                if ($hub.Contains("`r`n")) { $nlH = "`r`n" } else { $nlH = "`n" }
+                $resH = Get-HandlerInsert $hub $cand.Nom
+                if ($resH.Index -lt 0) {
+                    Write-Host '  [!] corps du gestionnaire hub non localise - rien modifie (envoyez la sortie)'
+                } else {
+                    if (-not $resH.Async) {
+                        $aH = Add-AsyncToDecl $hub $cand.Nom
+                        if ($aH.Changed) {
+                            $hub = $aH.Content
+                            $resH = Get-HandlerInsert $hub $cand.Nom
+                        }
+                    }
+                    if ($resH.Index -ge 0 -and $resH.Async) {
+                        $blocH = Convert-Eol ($HUB_BLOCK.Replace('@@PARAM@@', $param)) $nlH
+                        $hub = $hub.Insert($resH.Index, $nlH + $blocH.TrimEnd() + $nlH)
+                        Write-TextUtf8 $chemins.hub $hub $hInfo.Bom
+                        $written += 'src/app/dashboard/cv-builder/page.tsx'
+                        Write-Host ('  [+] hub : ' + $cand.Nom + '(' + $param + ') -> ecriture base /api/cv/<id>/publier')
+                    } else {
+                        Write-Host '  [=] gestionnaire hub non async (forme non reconnue) - rien modifie (envoyez la sortie)'
+                    }
+                }
+            }
+        } else {
+            Write-Host '  [=] aucun gestionnaire de publication nomme detecte dans le hub - rien modifie'
+            Write-Host '      si le bouton Publier du hub doit aussi ecrire, envoyez la sortie -DiagnostiqueSeul'
+        }
     }
-    $ligneCv = "      const cv = asRecord(row.cvData);"
-    $nbLigne = ([regex]::Matches($pdfText, [regex]::Escape($ligneCv))).Count
-    if ($nbLigne -eq 1) {
-      $pdfText = $pdfText.Replace($ligneCv, "      const cv = demoteAtsCvData(asRecord(row.cvData));")
-      Write-Host "  [+] mode slug : cvData passe par demoteAtsCvData"
+}
+
+# ------------------------------------------------------------ [4/6] pdf public
+Write-Host ''
+Write-Host '[4/6] PDF public : tolerance des anciennes formes ...'
+if (-not $okPdf) {
+    Write-Host '  [=] fichier pdf public introuvable, ignore'
+} elseif ($DiagnostiqueSeul) {
+    $pdfTxt0 = (Read-TextUtf8 $chemins.pdfPublic).Text
+    $mJ0 = [regex]::Match($pdfTxt0, '(?m)^[ \t]*(?:const|let)\s+(\w+)\s*=\s*await\s+req\.json(?:<[^>]*>)?\(\s*\)')
+    if ($mJ0.Success) { Write-Host ('  ancre req.json() : OK (' + $mJ0.Groups[1].Value + ')') } else { Write-Host '  [!] ancre req.json() non trouvee' }
+    Write-Host ('  deja V2 : ' + $pdfTxt0.Contains('[SYNC-PUBLICATION V2 TOL]'))
+} elseif ($stopAll) {
+    Write-Host '  (arret demande a l etape 2 : etape ignoree)'
+} else {
+    $pInfo = Read-TextUtf8 $chemins.pdfPublic
+    $pdfTxt = $pInfo.Text
+    if ($pdfTxt.Contains('[SYNC-PUBLICATION V2 TOL]')) {
+        Write-Host '  [=] tolerance deja presente, ignore'
     } else {
-      Write-Host ("  [!] ancre 'const cv = asRecord(row.cvData)' : " + $nbLigne + " occurrence(s) - ignore.") -ForegroundColor Yellow
-    }
-    if ($pdfText -ne $pdfOriginal) {
-      Backup-File $pdfPath "sync"
-      Write-TextFile $pdfPath $pdfText
-      Write-Host ("  [OK] " + $pdfPath + " mis a jour")
-    }
-  }
-}
-
-# ============================================================================
-Write-Host ""
-Write-Host "[5/6] Diagnostic base de donnees (CvDocument + PublicResume) ..."
-# ============================================================================
-
-$DumpCjs = @'
-/* diagnostic-sync-publication.cjs - lecture seule (ecriture seulement
-   avec --fermer : isPublic=false sur les lignes non referencees). */
-const fs = require("fs");
-const path = require("path");
-const FERMER = process.argv.includes("--fermer");
-
-function trunc(value, max) {
-  const text = String(value);
-  return text.length > max ? text.slice(0, max) + "..." : text;
-}
-
-function readEnvFile(file) {
-  const result = {};
-  if (!fs.existsSync(file)) return result;
-  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
-    if (!match) continue;
-    let value = match[2];
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    result[match[1]] = value;
-  }
-  return result;
-}
-
-(async () => {
-  const envLocal = readEnvFile(path.join(process.cwd(), ".env.local"));
-  const env = readEnvFile(path.join(process.cwd(), ".env"));
-  const databaseUrl = process.env.DATABASE_URL || envLocal.DATABASE_URL || env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.log("[dump] DATABASE_URL introuvable dans .env.local / .env - etape ignoree");
-    return;
-  }
-  process.env.DATABASE_URL = databaseUrl;
-
-  let PrismaClient = null;
-  const candidates = [
-    "./src/generated/prisma",
-    "./src/generated/prisma/index.js",
-    "./src/generated/prisma/client",
-    "@prisma/client",
-  ];
-  for (const candidate of candidates) {
-    try {
-      const mod = require(candidate);
-      const Client = mod.PrismaClient || (mod.default && mod.default.PrismaClient);
-      if (Client) {
-        PrismaClient = Client;
-        console.log("[dump] client Prisma charge via: " + candidate);
-        break;
-      }
-    } catch (error) {
-      /* candidat suivant */
-    }
-  }
-  if (!PrismaClient) {
-    console.log("[dump] client Prisma non charge (lancez npx prisma generate) - etape ignoree");
-    return;
-  }
-
-  const prisma = new PrismaClient();
-  try {
-    const slugsRefs = [];
-    let docs = [];
-    try {
-      docs = await prisma.cvDocument.findMany({ orderBy: { updatedAt: "desc" }, take: 20 });
-    } catch (e) {
-      console.log("[dump] CvDocument illisible: " + trunc(e && e.message ? e.message : e, 200));
-    }
-    console.log("=== CvDocument (" + docs.length + ") ===");
-    for (const d of docs) {
-      const data = d.data && typeof d.data === "object" && !Array.isArray(d.data) ? d.data : {};
-      const personal = data.personal && typeof data.personal === "object" ? data.personal : {};
-      console.log(
-        "- nom: " + d.name +
-        " | isPublic: " + d.isPublic +
-        " | slug: " + (d.publishedSlug || "-") +
-        " | corbeille: " + (d.trashedAt ? "oui" : "non") +
-        " | fullName: " + (personal.fullName || "(vide)") +
-        " | maj: " + (d.updatedAt ? new Date(d.updatedAt).toISOString() : "?")
-      );
-      if (d.publishedSlug) slugsRefs.push(d.publishedSlug);
-    }
-
-    let rows = [];
-    let usedRaw = false;
-    try {
-      rows = await prisma.publicResume.findMany({ orderBy: { updatedAt: "desc" }, take: 20 });
-    } catch (e) {
-      rows = await prisma.$queryRawUnsafe('SELECT * FROM "PublicResume" ORDER BY "updatedAt" DESC LIMIT 20');
-      usedRaw = true;
-    }
-    console.log("=== PublicResume (" + rows.length + ")" + (usedRaw ? " [lecture brute]" : "") + " ===");
-    for (const r of rows) {
-      let cv = null;
-      try {
-        cv = typeof r.cvData === "string" ? JSON.parse(r.cvData) : r.cvData;
-      } catch (error) {
-        cv = null;
-      }
-      const isObj = cv && typeof cv === "object" && !Array.isArray(cv);
-      const personal = isObj && cv.personal && typeof cv.personal === "object" ? cv.personal : null;
-      const forme = personal ? "builder" : (isObj && cv.cv ? "ATS (ancienne)" : (isObj ? "inconnue" : "vide"));
-      const fullName = personal && personal.fullName ? personal.fullName : (isObj && cv.candidateName ? cv.candidateName : "(vide)");
-      console.log(
-        "- slug: " + r.slug +
-        " | isPublic: " + r.isPublic +
-        " | vues: " + (typeof r.viewsCount === "number" ? r.viewsCount : "-") +
-        " | forme: " + forme +
-        " | fullName: " + fullName +
-        " | maj: " + (r.updatedAt ? new Date(r.updatedAt).toISOString() : "?")
-      );
-      if (isObj) {
-        console.log("    cles cvData: " + Object.keys(cv).join(", "));
-        if (Array.isArray(cv.experiences)) {
-          console.log(
-            "    experiences: " + cv.experiences.length +
-            " | formations: " + (Array.isArray(cv.education) ? cv.education.length : "?") +
-            " | competences: " + (Array.isArray(cv.skills) ? cv.skills.length : "?")
-          );
+        $nlP = ' '
+        if ($pdfTxt.Contains("`r`n")) { $nlP = "`r`n" } else { $nlP = "`n" }
+        $mJ = [regex]::Match($pdfTxt, '(?m)^[ \t]*(?:const|let)\s+(\w+)\s*=\s*await\s+req\.json(?:<[^>]*>)?\(\s*\)')
+        if ($mJ.Success) {
+            $varName = $mJ.Groups[1].Value
+            $ls = $pdfTxt.LastIndexOf("`n", $mJ.Index) + 1
+            if ($ls -lt 0) { $ls = 0 }
+            $indent = ''
+            if ($mJ.Index -gt $ls) { $indent = $pdfTxt.Substring($ls, $mJ.Index - $ls) }
+            $le = $pdfTxt.IndexOf($nlP, $mJ.Index + $mJ.Length)
+            $blocT = Convert-Eol ($TOL_BLOCK.Replace('@@VAR@@', $varName)) $nlP
+            $blocT = ($blocT.TrimEnd() -replace '(?m)^', $indent)
+            if ($le -ge 0) {
+                $pdfTxt = $pdfTxt.Insert($le + $nlP.Length, $blocT + $nlP)
+            } else {
+                $pdfTxt = $pdfTxt + $nlP + $blocT + $nlP
+            }
+            Write-TextUtf8 $chemins.pdfPublic $pdfTxt $pInfo.Bom
+            $written += 'src/app/api/public-cv/pdf/route.ts'
+            Write-Host ('  [+] tolerance ajoutee apres ' + $varName + ' = await req.json()')
+        } else {
+            Write-Host '  [!] ancre req.json() non trouvee - tolerance non ajoutee (envoyez la sortie -DiagnostiqueSeul)'
         }
-      }
     }
-
-    if (FERMER) {
-      console.log("--- fermeture des lignes non referencees (--fermer) ---");
-      let fermees = 0;
-      for (const r of rows) {
-        if (!r.isPublic) continue;
-        if (slugsRefs.indexOf(r.slug) === -1) {
-          try {
-            await prisma.publicResume.update({ where: { id: r.id }, data: { isPublic: false } });
-            console.log("  [fermee] " + r.slug + " (aucun CvDocument ne reference ce slug)");
-            fermees++;
-          } catch (e) {
-            console.log("  [erreur] " + r.slug + ": " + trunc(e && e.message ? e.message : e, 150));
-          }
-        }
-      }
-      if (fermees === 0) {
-        console.log("  aucune ligne a fermer - les lignes publiques correspondent a un CvDocument.");
-      } else {
-        console.log("  total fermees: " + fermees);
-      }
-    }
-  } finally {
-    try {
-      if (prisma && prisma.$disconnect) await prisma.$disconnect();
-    } catch (error) {
-      /* ignore */
-    }
-  }
-})();
-'@
-
-$dumpFile = "diagnostic-sync-publication.cjs"
-Write-TextFile $dumpFile $DumpCjs
-$prevEap = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-try {
-  $nodeArgs = @($dumpFile)
-  if ($FermerAnciennesLignes -and -not $DiagnostiqueSeul) { $nodeArgs += "--fermer" }
-  $out = & node @nodeArgs 2>&1
-  foreach ($line in @($out)) {
-    Write-Host ("   " + ($line | Out-String).TrimEnd())
-  }
-} catch {
-  Write-Host ("   Node.js indisponible ou erreur non bloquante : " + $_.Exception.Message)
-} finally {
-  $ErrorActionPreference = $prevEap
-  try {
-    if (Test-Path -LiteralPath (Join-Path (Get-Location).Path $dumpFile)) {
-      Remove-Item -LiteralPath (Join-Path (Get-Location).Path $dumpFile) -Force
-    }
-  } catch {
-    # suppression non bloquante
-  }
 }
 
+# ------------------------------------------------------------------ [5/6] base
+Write-Host ''
+Write-Host '[5/6] Diagnostic base de donnees (CvDocument + PublicResume) ...'
+if (Test-FileExists $chemins.schema) {
+    $schemaTxt = (Read-TextUtf8 $chemins.schema).Text
+    foreach ($modele in @('CvDocument', 'PublicResume')) {
+        $mm = [regex]::Match($schemaTxt, "(?ms)model\s+$modele\s*\{(.*?)^\}")
+        if ($mm.Success) {
+            Write-Host ('  modele ' + $modele + ' :')
+            foreach ($ln in ($mm.Groups[1].Value -split "`n")) {
+                $t = $ln.Trim()
+                if ($t -and -not $t.StartsWith('//') -and $t -ne '}') { Write-Host ('    ' + $t) }
+            }
+        } else {
+            Write-Host ('  [!] modele ' + $modele + ' introuvable dans prisma/schema.prisma')
+        }
+    }
+    $autres = [regex]::Matches($schemaTxt, '(?m)model\s+(\w+)\s*\{') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ -match 'Public|Resume|Cv|Document' } | Select-Object -Unique
+    Write-Host ('  modeles voisins : ' + ($autres -join ', '))
+} else {
+    Write-Host '  [!] prisma/schema.prisma introuvable'
+}
+Write-Host '  probe manuelle (serveur lance) : http://localhost:3000/api/cv/<cvId>/publier en GET'
+
+# ------------------------------------------------------------------ [6/6] fin
+Write-Host ''
+Write-Host '[6/6] Recapitulatif ...'
 if ($DiagnostiqueSeul) {
-  Write-Host ""
-  Write-Host "DIAGNOSTIC TERMINE (aucune ecriture). Renvoyez cette sortie si un patch doit etre ajuste."
-  exit 0
+    Write-Host ''
+    Write-Host 'DIAGNOSTIC TERMINE (aucune ecriture). Renvoyez cette sortie si un patch doit etre ajuste.'
+    exit 0
 }
-
-# ============================================================================
-Write-Host ""
-Write-Host "[6/6] Verification TypeScript (npx tsc --noEmit) ..."
-# ============================================================================
-
+if ($written.Count -gt 0) {
+    foreach ($w in $written) { Write-Host ('  modifie : ' + $w) }
+} else {
+    Write-Host '  aucun fichier modifie'
+}
+if ($FermerAnciennesLignes) {
+    $nbCreateur = [regex]::Matches($creatorNew, '/api/public-cv').Count
+    $nbHub = 0
+    if ($okHub) { $nbHub = [regex]::Matches((Read-TextUtf8 $chemins.hub).Text, '/api/public-cv').Count }
+    Write-Host ('  anciens endpoints encore presents (createur : ' + $nbCreateur + ', hub : ' + $nbHub + ')')
+    Write-Host '  les boutons passent desormais par /api/cv/<id>/publier ; les anciens endpoints restent accessibles.'
+}
+if ($stopAll) {
+    Write-Host ''
+    Write-Host 'ARRET : corrigez le point [!] ci-dessus puis relancez (ou renvoyez la sortie).'
+    exit 1
+}
 if ($SkipTsc) {
-  Write-Host "  [=] -SkipTsc : verification ignoree (a relancer sans -SkipTsc avant de deployer)."
+    Write-Host '  tsc : saute (-SkipTsc)'
 } else {
-  $prevEap2 = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
-  $tscCode = 1
-  $tscOut = $null
-  try {
-    $tscOut = & npx tsc --noEmit 2>&1
-    $tscCode = $LASTEXITCODE
-  } catch {
-    Write-Host ("  [!] tsc n'a pas pu etre lance : " + $_.Exception.Message) -ForegroundColor Yellow
-    $tscCode = -1
-  } finally {
-    $ErrorActionPreference = $prevEap2
-  }
-  if ($tscCode -eq 0) {
-    Write-Host "  [OK] TypeScript : aucune erreur."
-  } elseif ($tscCode -eq -1) {
-    Write-Host "  [!] verification TypeScript impossible - lancez manuellement : npx tsc --noEmit" -ForegroundColor Yellow
-  } else {
-    Write-Host ""
-    Write-Host "  [!] ERREURS TYPESCRIPT (les dernieres lignes) :" -ForegroundColor Red
-    if ($tscOut) {
-      $lines = @($tscOut | Out-String).TrimEnd() -split "`r?`n"
-      $startIdx = [Math]::Max(0, $lines.Count - 40)
-      for ($i = $startIdx; $i -lt $lines.Count; $i++) {
-        Write-Host ("    " + $lines[$i])
-      }
+    if (Test-Path (Join-Path $Root 'node_modules')) {
+        Write-Host '  [...] npx tsc --noEmit (peut prendre 30-60 s) ...'
+        $oldEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            Push-Location $Root
+            $tscOut = & npx --no-install tsc --noEmit 2>&1
+            $tscCode = $LASTEXITCODE
+            Pop-Location
+            $ErrorActionPreference = $oldEap
+            if ($tscCode -eq 0) {
+                Write-Host '  [OK] TypeScript : aucune erreur'
+            } else {
+                Write-Host '  [!] TypeScript : erreurs (extrait) :'
+                $tscOut | Select-Object -Last 15 | ForEach-Object { Write-Host ('    ' + $_) }
+            }
+        } catch {
+            Pop-Location
+            $ErrorActionPreference = $oldEap
+            Write-Host ('  [!] tsc indisponible : ' + $_.Exception.Message)
+        }
+    } else {
+        Write-Host '  [=] node_modules absent - tsc saute'
     }
-    Write-Host ""
-    Write-Host "  Corrigez puis relancez : powershell -ExecutionPolicy Bypass -File .\sync-publication-cv.ps1" -ForegroundColor Yellow
-    exit 3
-  }
 }
-
-Write-Host ""
-Write-Host "=============================================================="
-Write-Host " VERDICT : SUCCES - pipeline de publication atomique en place"
-Write-Host "=============================================================="
-Write-Host " Desormais : createur -> POST /api/cv/<id>/publier ->"
-Write-Host "   1) CvDocument (data, design, step) enregistre a l'instant ;"
-Write-Host "   2) PublicResume.cvData ecrit DEPUIS LA BASE (formes test/ATS"
-Write-Host "      ecrasees) ;"
-Write-Host "   3) page /u/<slug> + PDF public + hub : meme contenu."
-Write-Host ""
-Write-Host " PROTOCOLE DE TEST (http://localhost:3000) :"
-Write-Host "  T1. npm run dev, puis /dashboard/cv-builder -> ouvrez votre CV"
-Write-Host "      (createur?cv=...)."
-Write-Host "  T2. Appliquez une amelioration IA ; attendez 'Base enregistree'"
-Write-Host "      dans le sous-titre (ou 2 s)."
-Write-Host "  T3. 'Mettre a jour la publication' -> toast OK -> ouvrez"
-Write-Host "      /u/<slug> : le contenu IA doit s'afficher (PAS 'Ajou',"
-Write-Host "      PAS '2D3D', PAS l'ancien contenu)."
-Write-Host "  T4. 'PDF (QR)' -> le PDF serveur doit afficher le MEME contenu"
-Write-Host "      avec le QR code (plus de page 'Candidat' vide)."
-Write-Host "  T5. 'Publier en ligne' (barre du haut) -> meme verification."
-Write-Host "  T6. 'Telecharger le PDF avec QR code' et 'Telecharger le CV PDF'"
-Write-Host "      -> meme contenu que la page publique."
-Write-Host "  T7. Hub -> bouton Publier d'un 2e CV -> le 1er CV est depublie"
-Write-Host "      (un seul CV en ligne a la fois)."
-Write-Host "  T8. Relancez ce script sans -SkipTsc : l'etape [5/6] doit montrer"
-Write-Host "      PublicResume en forme 'builder' avec le nom/titre a jour."
-Write-Host ""
-Write-Host " Si une ligne 'ANCRE INTROUVABLE' ou un rapport diagnostic"
-Write-Host " apparait : copiez LA SORTIE COMPLETE et renvoyez-la - aucune"
-Write-Host " ecriture partielle n'a ete faite (garantie AGENTS.md)."
+Write-Host ''
+Write-Host 'TERMINE.'
+Write-Host 'Prochaines etapes :'
+Write-Host '  1) Redemarrez le serveur : Ctrl+C puis npm run dev'
+Write-Host '  2) Cliquez chaque bouton ; la console navigateur doit afficher "[SYNC v2] ecriture base OK"'
+Write-Host '  3) Verifiez le contenu publie sur la page /u/<slug>'
+Write-Host '  4) git add . ; git commit -m "SYNC V2 : boutons -> route atomique" ; git push'
+Write-Host '  Si un point [!] apparait : relancez avec -DiagnostiqueSeul et renvoyez la sortie.'

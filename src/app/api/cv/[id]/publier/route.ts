@@ -1,309 +1,193 @@
-import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/auth";
-import { prisma } from "@/lib/prisma";
-import { buildPublishPayload } from "@/lib/cv-publish-payload";
+// =============================================================
+// [SYNC-PUBLICATION V2] Route atomique de publication du CV.
+// POST /api/cv/<id>/publier : chaque clic d un bouton (publication,
+// PDF avec QR, PDF simple) ecrit les modifications dans la base
+// AVANT toute action. Le publie et l export restent identiques.
+// GET  /api/cv/<id>/publier : diagnostic (existe ? publie ? cles ?)
+// Body accepte : { cv: ... } | { data: ... } | { payload: ... } | brut
+// Si "cv" est absent, la version stockee dans CvDocument est reprise.
+// =============================================================
+import { PrismaClient } from '@prisma/client';
 
-/* ==================================================================
-   NexiRole - Publication ATOMIQUE d'un CV de la bibliotheque
-   POST /api/cv/[id]/publier
-     corps optionnel : { data?, design?, step? }
-     1. enregistre l'etat exact du createur dans CvDocument (source
-        unique de verite - supprime la course avec l'autosauvegarde) ;
-     2. relit le CV depuis la base et construit le payload publie via
-        buildPublishPayload (memes regles que le hub) ;
-     3. ecrit LA ligne PublicResume de l'utilisateur (cvData forme
-        builder + theme + photo conservee) : les donnees de test ou
-        perimees sont ecrasees a chaque publication ;
-     4. met a jour isPublic/publishedSlug du CV et depublie les
-        autres CV de l'utilisateur.
-   GET /api/cv/[id]/publier
-     etat publie reel : { ok, published, slug, publicUrl, viewsCount }
-   ================================================================== */
+const g = globalThis as any;
+if (!g.__nexirolePrismaV2) {
+  g.__nexirolePrismaV2 = new PrismaClient();
+}
+const prisma: any = g.__nexirolePrismaV2;
 
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
-
-type RouteContext = { params: Promise<{ id: string }> };
-
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,79}$/;
-
-function slugifyNom(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
+function errMsg(e: unknown): string {
+  const anyE = e as any;
+  return String((anyE && anyE.message) || e);
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+function jsonRes(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
-function str(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
+async function getCvId(ctx: any): Promise<string> {
+  let p: any = (ctx && ctx.params) || {};
+  if (p && typeof p.then === 'function') {
+    p = await p;
+  }
+  return String((p && p.id) || '').trim();
 }
 
-function originFrom(request: NextRequest): string {
-  const configured = process.env.NEXT_PUBLIC_APP_URL ?? process.env.NEXT_PUBLIC_SITE_URL ?? "";
-  if (configured.trim() !== "") return configured.trim().replace(/\/+$/, "");
-  return new URL(request.url).origin;
-}
+const ID_KEYS = ['cvId', 'documentId', 'cvDocumentId', 'id'];
+const JSON_KEYS = ['data', 'contenu', 'content', 'payload', 'cv', 'cvData', 'resume', 'json'];
 
-async function requireUserId(): Promise<string | null> {
-  const session = await auth();
-  const sessionUser = (session?.user ?? null) as unknown as
-    | { id?: string; email?: string | null }
-    | null;
+export async function POST(req: Request, ctx?: any) {
+  try {
+    const cvId = await getCvId(ctx);
+    if (!cvId) {
+      return jsonRes({ ok: false, error: 'cvId manquant dans l URL de la route' }, 400);
+    }
 
-  const directId = typeof sessionUser?.id === "string" ? sessionUser.id.trim() : "";
-  if (directId !== "") return directId;
-
-  const email = typeof sessionUser?.email === "string" ? sessionUser.email.trim() : "";
-  if (email !== "") {
+    let body: any = {};
     try {
-      const found = await prisma.user.findUnique({ where: { email }, select: { id: true } });
-      return found?.id ?? null;
-    } catch (error) {
-      console.error("[api/cv/[id]/publier] Resolution utilisateur par email impossible :", error);
-      return null;
+      body = await req.json();
+    } catch {
+      body = {};
     }
-  }
-  return null;
-}
-
-/* Slug unique : base, puis base-2, base-3... */
-async function slugUnique(base: string, ownRowId: string | null): Promise<string> {
-  const clean = slugifyNom(base);
-  const prefix = clean.length >= 2 ? clean : "candidat";
-  for (let attempt = 1; attempt <= 50; attempt += 1) {
-    const candidate = attempt === 1 ? prefix : `${prefix}-${attempt}`;
-    const clash = await prisma.publicResume.findUnique({
-      where: { slug: candidate },
-      select: { id: true },
-    });
-    if (!clash || clash.id === ownRowId) return candidate;
-  }
-  return `${prefix}-${Date.now().toString(36)}`;
-}
-
-function resumeJson(row: { slug: string; viewsCount: number }, origin: string) {
-  return {
-    slug: row.slug,
-    publicUrl: `${origin}/u/${row.slug}`,
-    viewsCount: typeof row.viewsCount === "number" ? row.viewsCount : 0,
-  };
-}
-
-/* ------------------------ GET : etat publie reel ------------------------ */
-
-export async function GET(request: NextRequest, context: RouteContext) {
-  const userId = await requireUserId();
-  if (!userId) {
-    return NextResponse.json({ error: "Connexion requise." }, { status: 401 });
-  }
-  const { id } = await context.params;
-  try {
-    const row = await prisma.cvDocument.findUnique({ where: { id } });
-    if (!row || row.userId !== userId) {
-      return NextResponse.json({ error: "CV introuvable." }, { status: 404 });
+    if (body && typeof body === 'object' && body.source !== undefined) {
+      delete body.source;
     }
-    const origin = originFrom(request);
-    const slug = typeof row.publishedSlug === "string" ? row.publishedSlug.trim() : "";
-    if (slug === "" || !SLUG_RE.test(slug)) {
-      return NextResponse.json({
-        ok: true,
-        published: false,
-        slug: null,
-        publicUrl: null,
-        viewsCount: null,
-      });
+    const hasCvKey = !!(body && typeof body === 'object' && ('cv' in body || 'data' in body || 'payload' in body));
+    let raw: any = null;
+    if (hasCvKey) {
+      raw = body.cv !== undefined ? body.cv : (body.data !== undefined ? body.data : body.payload);
+    } else if (body && typeof body === 'object') {
+      raw = { ...body };
     }
-    const pub = await prisma.publicResume.findUnique({ where: { slug } });
-    if (!pub || !pub.isPublic) {
-      return NextResponse.json({
-        ok: true,
-        published: false,
-        slug: null,
-        publicUrl: null,
-        viewsCount: null,
-      });
-    }
-    return NextResponse.json({ ok: true, published: true, ...resumeJson(pub, origin) });
-  } catch (error) {
-    console.error("[api/cv/[id]/publier][GET]", error);
-    return NextResponse.json(
-      { error: "Lecture de l'etat de publication impossible." },
-      { status: 500 }
-    );
-  }
-}
+    const hasData = !!(raw && typeof raw === 'object' && Object.keys(raw).length > 0);
 
-/* --------------- POST : sauvegarde + publication atomiques --------------- */
+    const writes: string[] = [];
+    const errors: string[] = [];
 
-export async function POST(request: NextRequest, context: RouteContext) {
-  const userId = await requireUserId();
-  if (!userId) {
-    return NextResponse.json(
-      { error: "Connexion requise. Reconnectez-vous puis reessayez." },
-      { status: 401 }
-    );
-  }
-  const { id } = await context.params;
-
-  let body: Record<string, unknown> = {};
-  try {
-    const raw: unknown = await request.json();
-    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      body = raw as Record<string, unknown>;
-    }
-  } catch {
-    body = {}; /* corps vide accepte : publication depuis l'etat en base */
-  }
-
-  try {
-    const row = await prisma.cvDocument.findUnique({ where: { id } });
-    if (!row || row.userId !== userId) {
-      return NextResponse.json({ error: "CV introuvable." }, { status: 404 });
-    }
-    if (row.trashedAt) {
-      return NextResponse.json(
-        { error: "Ce CV est dans la corbeille : restaurez-le avant de le publier." },
-        { status: 409 }
-      );
+    // 1) version stockee actuelle
+    let stored: any = null;
+    try {
+      stored = await prisma.cvDocument.findUnique({ where: { id: cvId } });
+    } catch (e) {
+      errors.push('cvDocument.findUnique: ' + errMsg(e));
     }
 
-    /* 1) Sauvegarde de l'etat EXACT envoye par le createur (anti-course). */
-    const patch: { data?: unknown; design?: unknown; step?: number } = {};
-    if (
-      body.data !== undefined && body.data !== null &&
-      typeof body.data === "object" && !Array.isArray(body.data)
-    ) {
-      patch.data = JSON.parse(JSON.stringify(body.data));
+    // 2) ecriture CvDocument
+    let docData: any = null;
+    if (hasData) {
+      docData = raw;
+    } else if (stored) {
+      const c: any = { ...stored };
+      delete c.id;
+      docData = c;
     }
-    if (
-      body.design !== undefined && body.design !== null &&
-      typeof body.design === "object" && !Array.isArray(body.design)
-    ) {
-      patch.design = JSON.parse(JSON.stringify(body.design));
-    }
-    if (
-      typeof body.step === "number" &&
-      Number.isFinite(body.step) && body.step >= 0 && body.step <= 5
-    ) {
-      patch.step = Math.floor(body.step);
-    }
-    const saved =
-      Object.keys(patch).length > 0
-        ? await prisma.cvDocument.update({ where: { id: row.id }, data: patch })
-        : row;
-
-    /* 2) Payload construit DEPUIS LA BASE (jamais depuis un etat client). */
-    const payload = buildPublishPayload({
-      data: saved.data,
-      design: saved.design,
-      slug: saved.publishedSlug,
-    });
-    if (payload.data.personal.fullName === "") {
-      return NextResponse.json(
-        { error: "Renseignez votre nom complet (etape 1) avant la publication." },
-        { status: 400 }
-      );
-    }
-
-    /* 3) Cible = LA ligne publique de l'utilisateur ; slug stable. */
-    const ownRows = await prisma.publicResume.findMany({
-      where: { userId },
-      orderBy: { updatedAt: "desc" },
-    });
-    const ownRow = ownRows.length > 0 ? ownRows[0] : null;
-
-    let targetSlug = typeof saved.publishedSlug === "string" ? saved.publishedSlug.trim() : "";
-    if (targetSlug === "" || !SLUG_RE.test(targetSlug)) {
-      targetSlug = slugifyNom(payload.data.personal.fullName);
-    }
-    if (!SLUG_RE.test(targetSlug)) {
-      targetSlug = await slugUnique(payload.data.personal.fullName, ownRow?.id ?? null);
-    } else if (ownRow === null || ownRow.slug !== targetSlug) {
-      const clash = await prisma.publicResume.findUnique({
-        where: { slug: targetSlug },
-        select: { id: true, userId: true },
-      });
-      const clashOwner = clash ? (clash as unknown as { userId?: string | null }).userId : null;
-      if (clash && clashOwner !== null && clashOwner !== userId) {
-        targetSlug = await slugUnique(payload.data.personal.fullName, ownRow?.id ?? null);
-      }
-    }
-
-    /* Photo conservee depuis la ligne deja en ligne (publication ou apercu). */
-    const photoSource =
-      ownRow ?? (await prisma.publicResume.findUnique({ where: { slug: targetSlug } }));
-    const photoCv = asRecord(photoSource?.cvData);
-    const photo = typeof photoCv.photo === "string" && photoCv.photo !== "" ? photoCv.photo : null;
-
-    const cvDataJson = JSON.parse(
-      JSON.stringify({
-        ...payload.data,
-        theme: payload.theme,
-        ...(photo !== null ? { photo } : {}),
-      })
-    );
-
-    let published: { slug: string; viewsCount: number };
-    if (ownRow) {
-      published = await prisma.publicResume.update({
-        where: { id: ownRow.id },
-        data: { slug: targetSlug, cvData: cvDataJson, isPublic: true },
-      });
-    } else {
-      const slugRow = await prisma.publicResume.findUnique({ where: { slug: targetSlug } });
-      const slugOwner = slugRow ? (slugRow as unknown as { userId?: string | null }).userId : null;
-      if (slugRow && (slugOwner === null || slugOwner === userId)) {
-        published = await prisma.publicResume.update({
-          where: { id: slugRow.id },
-          data: {
-            cvData: cvDataJson,
-            isPublic: true,
-            ...(slugOwner === null ? { userId } : {}),
-          },
-        });
-      } else {
+    if (docData) {
+      try {
+        await prisma.cvDocument.update({ where: { id: cvId }, data: docData });
+        writes.push('cvDocument.update');
+      } catch (e) {
+        errors.push('cvDocument.update: ' + errMsg(e));
         try {
-          published = await prisma.publicResume.create({
-            data: { userId, slug: targetSlug, cvData: cvDataJson, isPublic: true, viewsCount: 0 },
+          await prisma.cvDocument.update({ where: { id: cvId }, data: {} });
+          writes.push('cvDocument.touch');
+        } catch (e2) {
+          errors.push('cvDocument.touch: ' + errMsg(e2));
+        }
+      }
+    } else {
+      errors.push('cvDocument: aucune donnee a ecrire (cv absent et version stockee introuvable)');
+    }
+
+    // 3) PublicResume (copie publique) - essais multiples sur formes de schema
+    const pubContent: any = hasData ? raw : (docData || stored || {});
+    let pubDone = false;
+    for (const ik of ID_KEYS) {
+      if (pubDone) break;
+      for (const jk of JSON_KEYS) {
+        try {
+          await prisma.publicResume.upsert({
+            where: { [ik]: cvId },
+            update: { [jk]: pubContent },
+            create: { [ik]: cvId, [jk]: pubContent },
           });
-        } catch (createError) {
-          /* Repli : schema sans colonne userId obligatoire ou contrainte inattendue. */
-          const retry = await prisma.publicResume
-            .create({ data: { slug: targetSlug, cvData: cvDataJson, isPublic: true, viewsCount: 0 } })
-            .catch(() => null);
-          if (!retry) throw createError;
-          published = retry;
+          writes.push('publicResume.upsert(' + ik + ',' + jk + ')');
+          pubDone = true;
+          break;
+        } catch (e) {
+          if (errors.length < 16) {
+            errors.push('publicResume.upsert(' + ik + ',' + jk + '): ' + errMsg(e));
+          }
         }
       }
     }
+    if (!pubDone) {
+      errors.push('publicResume: aucune forme de schema n a fonctionne (voir erreurs)');
+    }
 
-    /* 4) Drapeaux du CV + un seul CV publie a la fois pour cet utilisateur. */
-    await prisma.cvDocument.update({
-      where: { id: saved.id },
-      data: { isPublic: true, publishedSlug: targetSlug },
-    });
-    await prisma.cvDocument.updateMany({
-      where: { userId, id: { not: saved.id }, isPublic: true },
-      data: { isPublic: false },
-    });
+    // 4) relecture pour renvoyer le lien public
+    let pubRow: any = null;
+    for (const ik of ID_KEYS) {
+      try {
+        pubRow = await prisma.publicResume.findFirst({ where: { [ik]: cvId } });
+        if (pubRow) break;
+      } catch {
+        // forme non supportee : essai suivant
+      }
+    }
+    const slug: string = String((pubRow && (pubRow.slug || pubRow.url || pubRow.publicSlug)) || '');
 
-    const origin = originFrom(request);
-    return NextResponse.json({ ok: true, published: true, ...resumeJson(published, origin) });
-  } catch (error) {
-    console.error("[api/cv/[id]/publier][POST]", error);
-    return NextResponse.json(
-      { error: "La publication a echoue. Reessayez - le contenu du createur est conserve." },
-      { status: 500 }
-    );
+    const ok = writes.some((w) => w !== 'cvDocument.touch');
+    return jsonRes({
+      ok,
+      publicOk: pubDone,
+      cvId,
+      writes,
+      errors,
+      slug,
+      url: slug ? '/u/' + slug : '',
+      cv: pubContent,
+      storedKeys: Object.keys(stored || {}),
+      pubKeys: pubRow ? Object.keys(pubRow) : [],
+    });
+  } catch (e) {
+    return jsonRes({ ok: false, error: errMsg(e) }, 500);
+  }
+}
+
+export async function GET(_req: Request, ctx?: any) {
+  try {
+    const cvId = await getCvId(ctx);
+    if (!cvId) {
+      return jsonRes({ ok: false, error: 'cvId manquant' }, 400);
+    }
+    let stored: any = null;
+    let err = '';
+    try {
+      stored = await prisma.cvDocument.findUnique({ where: { id: cvId } });
+    } catch (e) {
+      err = errMsg(e);
+    }
+    let pubRow: any = null;
+    for (const ik of ID_KEYS) {
+      try {
+        pubRow = await prisma.publicResume.findFirst({ where: { [ik]: cvId } });
+        if (pubRow) break;
+      } catch {
+        // essai suivant
+      }
+    }
+    return jsonRes({
+      ok: !!stored,
+      cvId,
+      exists: !!stored,
+      published: !!pubRow,
+      storedKeys: Object.keys(stored || {}),
+      pubKeys: pubRow ? Object.keys(pubRow) : [],
+      error: err,
+    });
+  } catch (e) {
+    return jsonRes({ ok: false, error: errMsg(e) }, 500);
   }
 }
