@@ -1,35 +1,34 @@
 "use client";
 
-/* =====================================================================
-   NexiRole - Lettres de motivation (IA)
-   Page : /dashboard/lettres
-   - Liste des lettres, creation par formulaire + generation IA
-   - Editeur avec SAUVEGARDE AUTOMATIQUE en base (1,2 s apres la frappe)
-   - Regle d'or appliquee ici : avant Copier / Imprimer / Regenerer /
-     Retour, le contenu est TOUJORS sauvegarde en base d'abord.
-   - Export PDF via la fenetre d'impression du navigateur (zero dependance)
-   ===================================================================== */
+/**
+ * NexiRole — LETTRES DE MOTIVATION (page /dashboard/lettres).
+ *
+ * - Liste des lettres, création par formulaire + génération IA (Groq).
+ * - Éditeur avec SAUVEGARDE AUTOMATIQUE en base (1,2 s après la frappe).
+ * - Règle d'or appliquée ici : avant Copier / Imprimer / Régénérer /
+ *   Retour, le contenu est TOUJOURS sauvegardé en base d'abord —
+ *   l'export et la base sont donc toujours identiques.
+ * - Export PDF via la fenêtre d'impression du navigateur (zéro dépendance).
+ *
+ * Utilise la mini-bibliothèque UI maison (@/components/ui) et la charte
+ * NexiRole (navy / or) — aucun composant externe.
+ */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
+import { Button, Input, Textarea, Label, Skeleton, cx } from "@/components/ui";
 import {
-  AlertTriangle,
-  ArrowLeft,
-  Check,
-  Copy,
-  FileText,
-  Loader2,
-  Plus,
-  Printer,
-  RefreshCw,
-  Save,
-  Sparkles,
-  Trash2,
-} from "lucide-react";
+  IconAlertTriangle,
+  IconArrowLeft,
+  IconCheck,
+  IconCopy,
+  IconFileText,
+  IconLoader2,
+  IconPlus,
+  IconPrinter,
+  IconRefresh,
+  IconSparkles,
+  IconTrash,
+} from "@tabler/icons-react";
 
 type Lettre = {
   id: string;
@@ -50,8 +49,8 @@ type LettreListItem = Pick<
   "id" | "title" | "company" | "position" | "tone" | "language" | "createdAt" | "updatedAt"
 >;
 
-type IaStatus = {
-  ai: { provider: string; model: string } | null;
+type StatutIaDb = {
+  ia: { pret: boolean; provider: string; model: string };
   db: { ok: boolean; message: string };
 };
 
@@ -67,14 +66,14 @@ type NouveauFormulaire = {
 };
 
 const TONS: Array<{ value: string; label: string }> = [
-  { value: "professionnel", label: "Professionnel et pose" },
+  { value: "professionnel", label: "Professionnel et posé" },
   { value: "enthousiaste", label: "Enthousiaste et dynamique" },
   { value: "direct", label: "Direct et efficace" },
-  { value: "creatif", label: "Creatif mais credible" },
+  { value: "creatif", label: "Créatif mais crédible" },
 ];
 
 const LANGUES: Array<{ value: string; label: string }> = [
-  { value: "fr", label: "Francais" },
+  { value: "fr", label: "Français" },
   { value: "en", label: "Anglais" },
 ];
 
@@ -101,7 +100,7 @@ export default function LettresPage() {
   const [chargement, setChargement] = useState(true);
   const [generation, setGeneration] = useState(false);
   const [erreur, setErreur] = useState("");
-  const [ia, setIa] = useState<IaStatus | null>(null);
+  const [statut, setStatut] = useState<StatutIaDb | null>(null);
   const [copie, setCopie] = useState(false);
 
   const [form, setForm] = useState<NouveauFormulaire>({
@@ -170,7 +169,7 @@ export default function LettresPage() {
     programmerSauvegarde();
   }
 
-  /** Regle d'or : on sauvegarde en base AVANT toute action. */
+  /** Règle d'or : on sauvegarde en base AVANT toute action. */
   async function avantExport() {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
@@ -186,7 +185,7 @@ export default function LettresPage() {
     try {
       const res = await fetch("/api/lettre");
       if (res.status === 401) {
-        setErreur("Session expiree - reconnecte-toi puis recharge la page.");
+        setErreur("Session expirée — reconnecte-toi puis recharge la page.");
         return;
       }
       const data = (await res.json()) as { lettres?: LettreListItem[]; error?: string };
@@ -196,7 +195,7 @@ export default function LettresPage() {
       }
       setLettres(data.lettres || []);
     } catch {
-      setErreur("Chargement impossible (reseau).");
+      setErreur("Chargement impossible (réseau).");
     } finally {
       setChargement(false);
     }
@@ -207,9 +206,9 @@ export default function LettresPage() {
     void (async () => {
       try {
         const r = await fetch("/api/lettre/ia-status");
-        setIa((await r.json()) as IaStatus);
+        setStatut((await r.json()) as StatutIaDb);
       } catch {
-        // statut IA indisponible : non bloquant
+        // statut indisponible : non bloquant
       }
     })();
     return () => {
@@ -253,7 +252,7 @@ export default function LettresPage() {
       });
       const data = (await res.json()) as { lettre?: Lettre; error?: string };
       if (!res.ok || !data.lettre) {
-        setErreur(data.error || "Generation impossible.");
+        setErreur(data.error || "Génération impossible.");
         return;
       }
       const l = data.lettre;
@@ -268,7 +267,7 @@ export default function LettresPage() {
       await chargerLettres();
       setVue("editeur");
     } catch {
-      setErreur("Generation impossible (reseau).");
+      setErreur("Génération impossible (réseau).");
     } finally {
       setGeneration(false);
     }
@@ -276,7 +275,7 @@ export default function LettresPage() {
 
   async function regenerer() {
     if (!lettre) return;
-    if (!window.confirm("Remplacer le contenu actuel par une nouvelle generation IA ?")) return;
+    if (!window.confirm("Remplacer le contenu actuel par une nouvelle génération IA ?")) return;
     setErreur("");
     setGeneration(true);
     try {
@@ -294,7 +293,7 @@ export default function LettresPage() {
       });
       const data = (await res.json()) as { lettre?: Lettre; error?: string };
       if (!res.ok || !data.lettre) {
-        setErreur(data.error || "Generation impossible.");
+        setErreur(data.error || "Génération impossible.");
         return;
       }
       const nouveau = data.lettre.content;
@@ -303,7 +302,7 @@ export default function LettresPage() {
       majEtat("sale");
       programmerSauvegarde();
     } catch {
-      setErreur("Generation impossible (reseau).");
+      setErreur("Génération impossible (réseau).");
     } finally {
       setGeneration(false);
     }
@@ -311,11 +310,11 @@ export default function LettresPage() {
 
   async function supprimer() {
     if (!lettre) return;
-    if (!window.confirm("Supprimer definitivement cette lettre ?")) return;
+    if (!window.confirm("Supprimer définitivement cette lettre ?")) return;
     try {
       await fetch("/api/lettre/" + lettre.id, { method: "DELETE" });
     } catch {
-      // on retourne a la liste meme si l'appel echoue
+      // on retourne à la liste même si l'appel échoue
     }
     setLettre(null);
     lettreIdRef.current = null;
@@ -349,45 +348,62 @@ export default function LettresPage() {
 
   const texteEtat =
     etat === "sale"
-      ? "Modifications non enregistrees..."
+      ? "Modifications non enregistrées…"
       : etat === "sauvegarde"
-        ? "Enregistrement..."
+        ? "Enregistrement…"
         : derniereSauvegarde
-          ? "Enregistre a " + derniereSauvegarde
-          : "Enregistre";
+          ? "Enregistré à " + derniereSauvegarde
+          : "Enregistré";
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-6">
+    <div className="space-y-6 py-2">
       <style>{CSS_IMPRESSION}</style>
 
-      {/* Zone d'impression : visible uniquement a l'impression / export PDF */}
+      {/* Zone d'impression : visible uniquement à l'impression / export PDF */}
       <div className="zone-impression hidden">
         <pre className="whitespace-pre-wrap font-serif text-[13pt] leading-relaxed">{contenu}</pre>
       </div>
 
-      <div className="space-y-2">
-        <h1 className="text-2xl font-bold tracking-tight">Lettres de motivation</h1>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          {ia && ia.ai ? (
-            <span className="rounded-full bg-emerald-100 px-3 py-1 font-medium text-emerald-800">
-              IA prete : {ia.ai.provider} · {ia.ai.model}
-            </span>
-          ) : (
-            <span className="rounded-full bg-amber-100 px-3 py-1 font-medium text-amber-800">
-              IA non detectee - ajoute ta cle (ex. GROQ_API_KEY) dans .env puis redemarre
-            </span>
-          )}
-          {ia && !ia.db.ok ? (
-            <span className="rounded-full bg-red-100 px-3 py-1 font-medium text-red-800">
-              Base : lance « npx prisma db push »
-            </span>
-          ) : null}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="font-heading text-2xl font-bold text-navy">Lettres de motivation</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Générées par l&apos;IA, éditées ici, sauvegardées automatiquement en base.
+          </p>
         </div>
+        {vue === "liste" ? (
+          <Button
+            onClick={() => {
+              setErreur("");
+              setVue("formulaire");
+            }}
+          >
+            <IconPlus size={16} /> Nouvelle lettre
+          </Button>
+        ) : null}
+      </div>
+
+      {/* Badges de diagnostic : IA + base */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        {statut === null ? null : statut.ia.pret ? (
+          <span className="rounded-full bg-navy-50 px-3 py-1 font-semibold text-navy">
+            IA prête : {statut.ia.provider} · {statut.ia.model}
+          </span>
+        ) : (
+          <span className="rounded-full bg-gold-soft px-3 py-1 font-semibold text-gold-dark">
+            IA non configurée — ajoute GROQ_API_KEY dans .env.local puis redémarre
+          </span>
+        )}
+        {statut && !statut.db.ok ? (
+          <span className="rounded-full bg-red-50 px-3 py-1 font-semibold text-red-700">
+            Base : lance « npx prisma db push »
+          </span>
+        ) : null}
       </div>
 
       {erreur ? (
-        <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          <IconAlertTriangle size={16} className="mt-0.5 shrink-0" />
           <span>{erreur}</span>
         </div>
       ) : null}
@@ -395,56 +411,52 @@ export default function LettresPage() {
       {/* ------------------------------ LISTE ------------------------------ */}
       {vue === "liste" ? (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Mes lettres ({lettres.length})</h2>
-            <Button
-              onClick={() => {
-                setErreur("");
-                setVue("formulaire");
-              }}
-            >
-              <Plus className="mr-2 h-4 w-4" /> Nouvelle lettre
-            </Button>
-          </div>
+          <h2 className="text-lg font-semibold text-navy">Mes lettres ({lettres.length})</h2>
 
           {chargement ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" /> Chargement...
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Skeleton className="h-24" />
+              <Skeleton className="h-24" />
+              <Skeleton className="h-24" />
+              <Skeleton className="h-24" />
             </div>
           ) : lettres.length === 0 ? (
-            <Card>
-              <CardContent className="p-8 text-center text-sm text-muted-foreground">
-                Aucune lettre pour l&apos;instant. Clique sur « Nouvelle lettre » pour generer ta
-                premiere lettre de motivation avec l&apos;IA.
-              </CardContent>
-            </Card>
+            <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-muted-foreground shadow-sm">
+              Aucune lettre pour l&apos;instant. Clique sur « Nouvelle lettre » pour générer ta
+              première lettre de motivation avec l&apos;IA.
+            </div>
           ) : (
             <div className="grid gap-3 sm:grid-cols-2">
               {lettres.map((l) => (
-                <Card
+                <div
                   key={l.id}
-                  className="cursor-pointer transition hover:border-primary/40 hover:shadow-sm"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => void ouvrirLettre(l.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") void ouvrirLettre(l.id);
+                  }}
+                  className="w-full cursor-pointer rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-navy/40 hover:shadow-md"
                 >
-                  <CardContent className="p-4">
-                    <div className="flex items-start gap-2">
-                      <FileText className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{l.title}</p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {[l.position, l.company].filter(Boolean).join(" · ") || "Sans destination"}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {new Date(l.updatedAt).toLocaleDateString("fr-FR", {
-                            day: "numeric",
-                            month: "short",
-                            year: "numeric",
-                          })}
-                        </p>
-                      </div>
+                  <div className="flex items-start gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-navy-50">
+                      <IconFileText size={18} className="text-navy" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-navy">{l.title}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {[l.position, l.company].filter(Boolean).join(" · ") || "Sans destination"}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {new Date(l.updatedAt).toLocaleDateString("fr-FR", {
+                          day: "numeric",
+                          month: "short",
+                          year: "numeric",
+                        })}
+                      </p>
                     </div>
-                  </CardContent>
-                </Card>
+                  </div>
+                </div>
               ))}
             </div>
           )}
@@ -453,16 +465,16 @@ export default function LettresPage() {
 
       {/* ---------------------------- FORMULAIRE --------------------------- */}
       {vue === "formulaire" ? (
-        <Card>
-          <CardContent className="space-y-4 p-6">
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="poste">Poste vise</Label>
+                <Label htmlFor="poste">Poste visé</Label>
                 <Input
                   id="poste"
                   value={form.position}
                   onChange={(e) => setForm({ ...form, position: e.target.value })}
-                  placeholder="Ex. Developpeur Full-Stack"
+                  placeholder="Ex. Développeur Full-Stack"
                 />
               </div>
               <div className="space-y-1.5">
@@ -480,7 +492,7 @@ export default function LettresPage() {
                   id="ton"
                   value={form.tone}
                   onChange={(e) => setForm({ ...form, tone: e.target.value })}
-                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-navy shadow-sm outline-none transition-colors focus:border-navy/40 focus:ring-2 focus:ring-navy/10"
                 >
                   {TONS.map((t) => (
                     <option key={t.value} value={t.value}>
@@ -495,7 +507,7 @@ export default function LettresPage() {
                   id="langue"
                   value={form.language}
                   onChange={(e) => setForm({ ...form, language: e.target.value })}
-                  className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-navy shadow-sm outline-none transition-colors focus:border-navy/40 focus:ring-2 focus:ring-navy/10"
                 >
                   {LANGUES.map((l) => (
                     <option key={l.value} value={l.value}>
@@ -506,64 +518,71 @@ export default function LettresPage() {
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="offre">Offre d&apos;emploi (colle le texte de l&apos;annonce)</Label>
-              <Textarea
-                id="offre"
-                rows={6}
-                value={form.jobOffer}
-                onChange={(e) => setForm({ ...form, jobOffer: e.target.value })}
-                placeholder="Colle ici le texte complet de l'annonce..."
-              />
+            <div className="mt-4 space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="offre">Offre d&apos;emploi (colle le texte de l&apos;annonce)</Label>
+                <Textarea
+                  id="offre"
+                  rows={6}
+                  value={form.jobOffer}
+                  onChange={(e) => setForm({ ...form, jobOffer: e.target.value })}
+                  placeholder="Colle ici le texte complet de l'annonce…"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="cv">Texte de ton CV (copie-le depuis le Créateur de CV)</Label>
+                <Textarea
+                  id="cv"
+                  rows={6}
+                  value={form.cvText}
+                  onChange={(e) => setForm({ ...form, cvText: e.target.value })}
+                  placeholder="Colle ici le contenu de ton CV…"
+                />
+              </div>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="cv">Texte de ton CV (copie-le depuis le CV Builder)</Label>
-              <Textarea
-                id="cv"
-                rows={6}
-                value={form.cvText}
-                onChange={(e) => setForm({ ...form, cvText: e.target.value })}
-                placeholder="Colle ici le contenu de ton CV..."
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
+            <div className="mt-5 flex items-center justify-end gap-2">
               <Button variant="outline" onClick={() => setVue("liste")} disabled={generation}>
-                Annuler
+                <IconArrowLeft size={16} /> Annuler
               </Button>
               <Button
                 onClick={() => void generer()}
                 disabled={generation || (!form.jobOffer.trim() && !form.cvText.trim())}
               >
-                {generation ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Sparkles className="mr-2 h-4 w-4" />
-                )}
-                {generation ? "Generation en cours (10 a 30 s)..." : "Generer avec l'IA"}
+                {generation ? <IconLoader2 size={16} className="animate-spin" /> : <IconSparkles size={16} />}
+                {generation ? "Génération en cours (10 à 30 s)…" : "Générer avec l'IA"}
               </Button>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Astuce : plus l&apos;offre et le CV sont détaillés, plus la lettre est précise et
+            convaincante.
+          </p>
+        </div>
       ) : null}
 
-      {/* ----------------------------- EDITEUR ----------------------------- */}
+      {/* ----------------------------- ÉDITEUR ----------------------------- */}
       {vue === "editeur" && lettre ? (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <Button variant="ghost" onClick={() => void retourListe()}>
-              <ArrowLeft className="mr-2 h-4 w-4" /> Mes lettres
+              <IconArrowLeft size={16} /> Mes lettres
             </Button>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              {etat === "sauvegarde" ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : etat === "propre" ? (
-                <Check className="h-3.5 w-3.5 text-emerald-600" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
+              <span
+                className={cx(
+                  "size-2 rounded-full",
+                  etat === "propre"
+                    ? "bg-emerald-500"
+                    : etat === "sauvegarde"
+                      ? "animate-pulse bg-gold"
+                      : "bg-red-500"
+                )}
+              />
               <span>{texteEtat}</span>
+              {etat === "propre" ? <IconCheck size={14} className="text-emerald-600" /> : null}
             </div>
           </div>
 
@@ -577,31 +596,35 @@ export default function LettresPage() {
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void copier()}>
               {copie ? (
-                <Check className="mr-2 h-4 w-4 text-emerald-600" />
+                <IconCheck size={16} className="text-emerald-600" />
               ) : (
-                <Copy className="mr-2 h-4 w-4" />
+                <IconCopy size={16} />
               )}
-              {copie ? "Copie" : "Copier"}
+              {copie ? "Copié" : "Copier"}
             </Button>
-            <Button variant="outline" onClick={() => void imprimer()}>
-              <Printer className="mr-2 h-4 w-4" /> Imprimer / PDF
+            <Button onClick={() => void imprimer()}>
+              <IconPrinter size={16} /> Imprimer / PDF
             </Button>
             <Button variant="outline" onClick={() => void regenerer()} disabled={generation}>
               {generation ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <IconLoader2 size={16} className="animate-spin" />
               ) : (
-                <RefreshCw className="mr-2 h-4 w-4" />
+                <IconRefresh size={16} />
               )}
-              Regenerer
+              Régénérer
             </Button>
-            <Button variant="destructive" onClick={() => void supprimer()}>
-              <Trash2 className="mr-2 h-4 w-4" /> Supprimer
+            <Button
+              variant="outline"
+              className="border-red-200 text-red-700"
+              onClick={() => void supprimer()}
+            >
+              <IconTrash size={16} /> Supprimer
             </Button>
           </div>
 
           <p className="text-xs text-muted-foreground">
-            Astuce : l&apos;export PDF utilise la fenetre d&apos;impression du navigateur - choisis
-            « Enregistrer au format PDF ». Le contenu est toujours sauvegarde en base avant
+            Astuce : l&apos;export PDF utilise la fenêtre d&apos;impression du navigateur — choisis
+            « Enregistrer au format PDF ». Le contenu est toujours sauvegardé en base avant
             l&apos;export.
           </p>
 

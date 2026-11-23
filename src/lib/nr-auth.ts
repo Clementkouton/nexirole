@@ -20,8 +20,19 @@
    +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
    ===================================================================== */
 
-import { PrismaClient } from "@prisma/client";
-import { getServerSession } from "next-auth";
+type PrismaClient = {
+  user: {
+    findUnique(args: {
+      where: { email: string };
+      select: { id: true };
+    }): Promise<{ id: string } | null>;
+  };
+};
+
+const { PrismaClient } = require("@prisma/client") as {
+  PrismaClient: new () => PrismaClient;
+};
+import { auth } from "@/auth"
 import { authOptions } from "@/lib/auth";
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
@@ -36,7 +47,7 @@ export function getPrisma(): PrismaClient {
 /** Renvoie l'identifiant de l'utilisateur connecte, ou null. */
 export async function getUserId(): Promise<string | null> {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await auth();
     const u = session?.user as { id?: string; email?: string } | undefined;
 
     if (u && u.id) return u.id;
