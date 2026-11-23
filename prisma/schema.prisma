@@ -219,3 +219,23 @@ model CvDocument {
   @@index([userId])
   @@map("cv_documents")
 }
+
+
+model CoverLetter {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String   @default("Lettre de motivation")
+  company   String   @default("")
+  position  String   @default("")
+  tone      String   @default("professionnel")
+  language  String   @default("fr")
+  jobOffer  String   @default("")
+  cvText    String   @default("")
+  content   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+

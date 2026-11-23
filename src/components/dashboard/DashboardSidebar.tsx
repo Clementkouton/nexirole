@@ -8,8 +8,10 @@ import {
   IconCrown,
   IconFileText,
   IconHistory,
+  IconFileDescription,
   IconLayoutDashboard,
   IconLink,
+  IconPepper,
   IconRobot,
   IconWallet,
 } from "@tabler/icons-react";
@@ -20,6 +22,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/agent", label: "Agent IA", icon: IconRobot },
   { href: "/dashboard/dossier", label: "Dossier par lien", icon: IconLink },
   { href: "/dashboard/cv-builder", label: "Créateur de CV", icon: IconFileText },
+  { href: "/dashboard/lettres", label: "Lettres de motivation", icon: IconFileDescription },
   { href: "/dashboard/historique", label: "Historique", icon: IconHistory },
   { href: "/pricing", label: "Abonnement", icon: IconWallet },
 ];

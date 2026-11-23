@@ -14,3 +14,10 @@ src/generated
 
 *.bak
 *.bak-*
+
+*.bak*
+*.ps1
+diagnostic-cv-*
+cv-enrich-copie.txt
+elements-pour-correctif.txt
+rapport-bug-publication.txt
