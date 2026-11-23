@@ -1,9 +1,9 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
-import {
+import { IconCoin,
   IconClipboardList,
   IconCrown,
   IconFileText,
@@ -14,7 +14,7 @@ import {
   IconPepper,
   IconRobot,
   IconWallet,
-} from "@tabler/icons-react";
+ } from "@tabler/icons-react";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Tableau de bord", icon: IconLayoutDashboard },
@@ -23,6 +23,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/dossier", label: "Dossier par lien", icon: IconLink },
   { href: "/dashboard/cv-builder", label: "Créateur de CV", icon: IconFileText },
   { href: "/dashboard/lettres", label: "Lettres de motivation", icon: IconFileDescription },
+  { href: "/dashboard/negociation", label: "Coach Négociation", icon: IconCoin },
   { href: "/dashboard/historique", label: "Historique", icon: IconHistory },
   { href: "/pricing", label: "Abonnement", icon: IconWallet },
 ];

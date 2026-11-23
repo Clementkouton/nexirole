@@ -21,3 +21,27 @@ diagnostic-cv-*
 cv-enrich-copie.txt
 elements-pour-correctif.txt
 rapport-bug-publication.txt
+
+*.ps1
+*.bak*
+*.docx
+CV-*.pdf
+VOICI LE CV*.pdf
+le contenu du bouton*.pdf
+diagnostic-*
+cv-enrich-copie.txt
+elements-pour-correctif.txt
+rapport-bug-publication.txt
+nexirole-lettre-ia.zip
+
+*.ps1
+*.bak*
+*.docx
+CV-*.pdf
+VOICI LE CV*.pdf
+le contenu du bouton*.pdf
+diagnostic-*
+cv-enrich-copie.txt
+elements-pour-correctif.txt
+rapport-bug-publication.txt
+nexirole-lettre-ia.zip
