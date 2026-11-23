@@ -10,7 +10,6 @@ import {
   IconConfetti,
   IconX,
 } from "@tabler/icons-react";
-import { LICENSE_REFRESH_EVENT, type LicenseStatus } from "@/components/dashboard/license-panel";
 
 /**
  * PARTIE 1 — Gestion du retour de paiement Chariow (`/dashboard?payment=success`).
@@ -20,6 +19,17 @@ import { LICENSE_REFRESH_EVENT, type LicenseStatus } from "@/components/dashboar
  */
 
 const DISMISS_KEY = "nexirole:payment-banner-dismissed";
+const LICENSE_REFRESH_EVENT = "nexirole:license-refresh";
+
+type LicenseStatus = {
+  isActive: boolean;
+  plan: string;
+  expiresAt: string | null;
+  limits: {
+    searches: number;
+    generations: number;
+  };
+};
 
 export function PaymentSuccessBanner() {
   const searchParams = useSearchParams();

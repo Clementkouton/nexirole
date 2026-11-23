@@ -15,6 +15,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import type { ComponentType } from "react";
 import {
   IconArrowLeft,
   IconFileCv,
@@ -25,6 +26,10 @@ import {
   IconRobot,
 } from "@tabler/icons-react";
 import { LicensePanel } from "@/components/dashboard/license-panel";
+
+const LicensePanelWithUserEmail = LicensePanel as ComponentType<{
+  userEmail?: string | null;
+}>;
 
 /* ⚠ Chemins des pages du tableau de bord — ajustez ici si vos routes diffèrent. */
 const NAV_ITEMS = [
@@ -110,7 +115,7 @@ export function CandidateSidebar({ userEmail }: { userEmail?: string | null }) {
 
         <div className="mt-auto pb-4 pt-6">
           {/* Bloc licence : badge du plan + quotas + activation de clé */}
-          <LicensePanel userEmail={userEmail} />
+          <LicensePanelWithUserEmail userEmail={userEmail} />
 
           <div className="px-3">
             <Link

@@ -1,6 +1,5 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
-import type { DossierData } from "@/lib/types";
 import { getTemplate, type TemplateId } from "@/lib/cv-templates";
 
 /**
@@ -9,7 +8,26 @@ import { getTemplate, type TemplateId } from "@/lib/cv-templates";
  */
 
 interface LetterPdfDocumentProps {
-  data: DossierData;
+  data: {
+    identite: {
+      nom_complet: string;
+      email?: string;
+      telephone?: string;
+      ville?: string;
+      linkedin?: string;
+    };
+    lettre_motivation: {
+      objet?: string;
+      salutation?: string;
+      paragraphes: string[];
+      politesse: string;
+    };
+    offre?: {
+      entreprise?: string;
+      titre: string;
+      lieu?: string;
+    } | null;
+  };
   templateId: TemplateId;
 }
 
@@ -119,7 +137,7 @@ export function LetterPdfDocument({ data, templateId }: LetterPdfDocumentProps) 
           </Text>
         ))}
 
-        <Text style={styles.politesse}>{letter.politesse}</Text>
+        <Text style={styles.politeness}>{letter.politesse}</Text>
         <Text style={styles.signature}>{data.identite.nom_complet}</Text>
       </Page>
     </Document>

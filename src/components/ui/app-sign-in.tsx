@@ -418,7 +418,7 @@ function AppSignInInner({ initialMode }: { initialMode?: Mode }) {
   }
 
   return (
-    <div className="flex min-h-screen bg-[#F8FAFC]">
+    <div className="flex min-h-screen bg-[#ffffff]">
       <style>{KEYFRAMES}</style>
       <BenefitsPanel />
       <main className="flex flex-1 items-center justify-center px-4 py-10 sm:px-8">

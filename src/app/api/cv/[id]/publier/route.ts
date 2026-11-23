@@ -7,7 +7,9 @@
 // Body accepte : { cv: ... } | { data: ... } | { payload: ... } | brut
 // Si "cv" est absent, la version stockee dans CvDocument est reprise.
 // =============================================================
-import { PrismaClient } from '@prisma/client';
+import * as Prisma from '@prisma/client';
+
+const PrismaClient = (Prisma as any).PrismaClient;
 
 const g = globalThis as any;
 if (!g.__nexirolePrismaV2) {

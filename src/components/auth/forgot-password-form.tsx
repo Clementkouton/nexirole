@@ -17,7 +17,7 @@ export function ForgotPasswordForm() {
 
   if (state?.success) {
     return (
-      <div className="space-y-5">
+      <div className="space-y-5 ">
         <div className="rounded-2xl bg-emerald-50 px-4 py-4 text-sm text-emerald-700">
           <div className="flex items-start gap-2">
             <IconCircleCheck className="mt-0.5 size-4 shrink-0" />
@@ -38,7 +38,7 @@ export function ForgotPasswordForm() {
   return (
     <form action={formAction} className="space-y-4">
       {state?.error && (
-        <div className="flex items-start gap-2 rounded-2xl bg-red-50  px-4 py-3 text-sm text-red-600">
+        <div className="flex items-start gap-2 rounded-2xl max-w-3xl bg-red-50  px-4 py-3 text-sm text-red-600">
           <IconAlertCircle className="mt-0.5 size-4 shrink-0" />
           {state.error}
         </div>

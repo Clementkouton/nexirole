@@ -37,20 +37,7 @@ export function UserMenu({ mobile = false }: { mobile?: boolean }) {
 
   return (
     <div className={cx("flex items-center gap-2", mobile && "w-full")}>
-      <span
-        className={cx(
-          "inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white py-1.5 pl-1.5 pr-3 shadow-sm",
-          mobile && "flex-1 justify-start"
-        )}
-        title={session.user.email ?? undefined}
-      >
-        <span className="flex size-7 items-center justify-center rounded-full bg-navy text-xs font-bold text-white" aria-hidden>
-          {initial}
-        </span>
-        <span className="max-w-[140px] truncate text-sm font-semibold text-navy">
-          {session.user.name ?? session.user.email}
-        </span>
-      </span>
+      
       <button
         type="button"
                 onClick={() => signOut({ redirectTo: "/" })}

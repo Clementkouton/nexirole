@@ -30,8 +30,8 @@ function str(value: unknown): string {
 }
 
 function strList(value: unknown, max = 40): string[] {
-  return asArray(value)
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
+  return (Array.isArray(value) ? value : [])
+    .map((item: unknown) => (typeof item === "string" ? item.trim() : ""))
     .filter(Boolean)
     .slice(0, max);
 }

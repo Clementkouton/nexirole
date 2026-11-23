@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
           cv: cvData.data.cv,
           candidateName,
           contact: cvData.data.contact ?? {},
-        })
+        }) as Parameters<typeof renderToBuffer>[0]
       );
       filename = `CV-${candidateName}`;
     } else {
@@ -80,7 +80,7 @@ export async function POST(request: NextRequest) {
           jobTitle: letterData.data.jobTitle,
           company: letterData.data.company,
           contact: letterData.data.contact ?? {},
-        })
+        }) as Parameters<typeof renderToBuffer>[0]
       );
       filename = `Lettre-Motivation-${candidateName}`;
     }

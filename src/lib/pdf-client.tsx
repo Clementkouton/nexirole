@@ -7,8 +7,12 @@
  * donc aucune erreur SSR au `next build` (correction du « 1 Issue »).
  */
 
-import type { DossierData } from "@/lib/types";
+import type { CvPdfDocument } from "@/components/pdf/CvPdfDocument";
+import type { LetterPdfDocument } from "@/components/pdf/LetterPdfDocument";
 import { getTemplate, type TemplateId } from "@/lib/cv-templates";
+
+type DossierData = Parameters<typeof CvPdfDocument>[0]["data"];
+type LetterData = Parameters<typeof LetterPdfDocument>[0]["data"];
 
 function sanitizeFilename(name: string): string {
   const cleaned = name
@@ -50,7 +54,7 @@ export async function downloadCvPdf(
 
 /** Lettre : Lettre_NexiRole_[Template].pdf */
 export async function downloadLetterPdf(
-  data: DossierData,
+  data: LetterData,
   templateId: TemplateId
 ): Promise<void> {
   const [{ pdf }, { LetterPdfDocument }] = await Promise.all([

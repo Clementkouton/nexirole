@@ -270,7 +270,13 @@ export async function POST(request: NextRequest) {
           data: { cvData: payload, isPublic: true },
         })
       : await prisma.publicResume.create({
-          data: { slug, cvData: payload, isPublic: true, viewsCount: 0 },
+          data: {
+            slug,
+            cvData: payload,
+            isPublic: true,
+            viewsCount: 0,
+            user: { connect: { id: session.user.id } },
+          },
         });
 
     return NextResponse.json({ publicResume: resumeJson(row, request) });

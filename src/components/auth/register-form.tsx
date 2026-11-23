@@ -24,7 +24,7 @@ export function RegisterForm() {
   const confirmMismatch = confirmTouched && confirm.length > 0 && confirm !== password;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 ">
       {state?.error && (
         <div className="flex items-start gap-2  rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-600">
           <IconAlertCircle className="mt-0.5 size-4 shrink-0" />

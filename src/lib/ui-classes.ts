@@ -10,7 +10,7 @@ export function cx(
   return classes.filter(Boolean).join(" ");
 }
 
-type ButtonVariant = "default" | "outline" | "ghost";
+export type ButtonVariant = "default" | "outline" | "ghost";
 
 export function buttonClasses(variant: ButtonVariant = "default"): string {
   const variants: Record<ButtonVariant, string> = {

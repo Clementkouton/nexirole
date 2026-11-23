@@ -1,4 +1,7 @@
-import type { KeywordInsights } from "@/lib/types";
+type KeywordInsights = {
+  titre: string;
+  motsCles: string[];
+};
 
 const TITLE_PATTERNS = [
   "full stack", "front end", "front-end", "back end", "back-end", "devops",

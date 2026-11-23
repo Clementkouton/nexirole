@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 
+type CvUpdateData = Parameters<typeof prisma.cvDocument.update>[0]["data"];
+
 /* ==================================================================
    NexiRole — CV individuel (bibliothèque du créateur)
    GET    /api/cv/[id] → { cv }             contenu complet (créateur)
@@ -126,14 +128,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const data: {
-      name?: string;
-      data?: unknown;
-      design?: unknown;
-      step?: number;
-      isPublic?: boolean;
-      publishedSlug?: string | null;
-    } = {};
+    const data: CvUpdateData = {};
 
     if (body.name !== undefined) {
       const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -146,13 +141,13 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       if (body.data === null || typeof body.data !== "object" || Array.isArray(body.data)) {
         return NextResponse.json({ error: "Champ data invalide (objet attendu)." }, { status: 400 });
       }
-      data.data = JSON.parse(JSON.stringify(body.data));
+      data.data = JSON.parse(JSON.stringify(body.data)) as NonNullable<CvUpdateData["data"]>;
     }
     if (body.design !== undefined) {
       if (body.design === null || typeof body.design !== "object" || Array.isArray(body.design)) {
         return NextResponse.json({ error: "Champ design invalide (objet attendu)." }, { status: 400 });
       }
-      data.design = JSON.parse(JSON.stringify(body.design));
+      data.design = JSON.parse(JSON.stringify(body.design)) as NonNullable<CvUpdateData["design"]>;
     }
     if (body.step !== undefined) {
       if (typeof body.step !== "number" || !Number.isFinite(body.step) || body.step < 0 || body.step > 5) {
