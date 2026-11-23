@@ -38,7 +38,7 @@ model User {
   cvDocuments          CvDocument[]
   generatedApplications GeneratedApplication[]
   jobApplications       JobApplicationTracker[]
-  coverLetters CoverLetter[]
+  coverLetters          CoverLetter[]
   
   accounts            Account[]
   sessions            Session[]
@@ -236,9 +236,10 @@ model CoverLetter {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@map("cover_letters")
 }
 
 

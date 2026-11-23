@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { getClientIp, guardRateLimit } from "@/lib/rate-limit";
 import { hasGroqKey } from "@/lib/ai-guard";
 import { genererLettre } from "@/lib/ai-lettre";
+import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 
 /**
  * NexiRole — API LETTRES DE MOTIVATION.
@@ -13,10 +13,15 @@ import { genererLettre } from "@/lib/ai-lettre";
  * POST /api/lettre : génère une lettre avec l'IA (Groq, même moteur que le
  *                    CV) puis l'enregistre immédiatement en base.
  *
+ * Identité : résolution tolérante (session.id → session.email → cookie JWT)
+ * via src/lib/utilisateur-actuel.ts — plus de 401 injustifié quand la
+ * session ne contient pas d'id utilisateur exploitable.
+ *
  * Même garde-fou anti-abus que /api/improve-cv (PARTIE 3) : 20 requêtes/h
  * pour un utilisateur connecté, clé IP en complément, 429 en français.
  */
 
+export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const inputSchema = z.object({
@@ -69,17 +74,20 @@ function construirePrompt(p: {
 
 export async function GET() {
   try {
-    const session = await auth();
-    const userId = session?.user?.id;
-    if (!userId) {
+    const { utilisateur, diagnostic } = await resoudreUtilisateur();
+    if (!utilisateur) {
       return NextResponse.json(
-        { error: "Non authentifié. Reconnecte-toi." },
+        {
+          error:
+            "Session expirée — déconnecte-toi puis reconnecte-toi, et recharge la page.",
+          diagnostic,
+        },
         { status: 401 }
       );
     }
 
     const lettres = await prisma.coverLetter.findMany({
-      where: { userId },
+      where: { userId: utilisateur.userId },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true,
@@ -106,15 +114,19 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  /* Garde anti-abus identique à /api/improve-cv */
-  const session = await auth();
-  const userId = session?.user?.id;
-  if (!userId) {
+  /* Identité tolérante (3 voies) puis garde anti-abus identique à /api/improve-cv */
+  const { utilisateur, diagnostic } = await resoudreUtilisateur();
+  if (!utilisateur) {
     return NextResponse.json(
-      { error: "Non authentifié. Reconnecte-toi." },
+      {
+        error:
+          "Session expirée — déconnecte-toi puis reconnecte-toi, et recharge la page.",
+        diagnostic,
+      },
       { status: 401 }
     );
   }
+  const userId = utilisateur.userId;
 
   const ip = getClientIp(request);
   const guard = guardRateLimit(request, {

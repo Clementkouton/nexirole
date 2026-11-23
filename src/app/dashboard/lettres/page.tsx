@@ -12,6 +12,11 @@
  *
  * Utilise la mini-bibliothèque UI maison (@/components/ui) et la charte
  * NexiRole (navy / or) — aucun composant externe.
+ *
+ * v2 (correctif) : les messages d'erreur réels du serveur sont affichés
+ * fidèlement (plus de « réseau » trompeur), le chargement initial ne part
+ * qu'une seule fois même en mode StrictMode, et l'API reconnaît
+ * l'utilisateur via 3 voies (voir src/lib/utilisateur-actuel.ts).
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -94,6 +99,27 @@ const CSS_IMPRESSION = `
 }
 `;
 
+/**
+ * Lit le corps d'une réponse d'erreur SANS planter, que le serveur renvoie
+ * du JSON ({ error, diagnostic }) ou du HTML (erreur de compilation dev).
+ * Le « diagnostic » de l'API (si présent) est ajouté entre crochets.
+ */
+async function lireErreur(res: Response, fallback: string): Promise<string> {
+  let brut = "";
+  try {
+    brut = await res.text();
+  } catch {
+    return fallback;
+  }
+  try {
+    const data = JSON.parse(brut) as { error?: string; diagnostic?: string };
+    const base = data.error || fallback;
+    return data.diagnostic ? `${base} [Détail : ${data.diagnostic}]` : base;
+  } catch {
+    return `${fallback} (réponse non JSON — regarde le terminal « npm run dev »)`;
+  }
+}
+
 export default function LettresPage() {
   const [lettres, setLettres] = useState<LettreListItem[]>([]);
   const [vue, setVue] = useState<"liste" | "formulaire" | "editeur">("liste");
@@ -123,6 +149,8 @@ export default function LettresPage() {
   const titreRef = useRef("");
   const lettreIdRef = useRef<string | null>(null);
   const etatRef = useRef<Etat>("propre");
+  // StrictMode (dev) monte le composant 2 fois : ce garde évite 2 appels API.
+  const demarrageFaitRef = useRef(false);
 
   function majEtat(v: Etat) {
     etatRef.current = v;
@@ -184,15 +212,18 @@ export default function LettresPage() {
     setChargement(true);
     try {
       const res = await fetch("/api/lettre");
-      if (res.status === 401) {
-        setErreur("Session expirée — reconnecte-toi puis recharge la page.");
-        return;
-      }
-      const data = (await res.json()) as { lettres?: LettreListItem[]; error?: string };
       if (!res.ok) {
-        setErreur(data.error || "Chargement impossible.");
+        setErreur(
+          await lireErreur(
+            res,
+            res.status === 401
+              ? "Session expirée — déconnecte-toi, reconnecte-toi, puis recharge la page."
+              : "Chargement impossible (erreur " + res.status + ")."
+          )
+        );
         return;
       }
+      const data = (await res.json()) as { lettres?: LettreListItem[] };
       setLettres(data.lettres || []);
     } catch {
       setErreur("Chargement impossible (réseau).");
@@ -202,10 +233,13 @@ export default function LettresPage() {
   }
 
   useEffect(() => {
+    if (demarrageFaitRef.current) return;
+    demarrageFaitRef.current = true;
     void chargerLettres();
     void (async () => {
       try {
         const r = await fetch("/api/lettre/ia-status");
+        if (!r.ok) return;
         setStatut((await r.json()) as StatutIaDb);
       } catch {
         // statut indisponible : non bloquant
@@ -221,9 +255,13 @@ export default function LettresPage() {
     setErreur("");
     try {
       const res = await fetch("/api/lettre/" + id);
-      const data = (await res.json()) as { lettre?: Lettre; error?: string };
-      if (!res.ok || !data.lettre) {
-        setErreur(data.error || "Lettre introuvable.");
+      if (!res.ok) {
+        setErreur(await lireErreur(res, "Lettre introuvable."));
+        return;
+      }
+      const data = (await res.json()) as { lettre?: Lettre };
+      if (!data.lettre) {
+        setErreur("Réponse inattendue du serveur.");
         return;
       }
       const l = data.lettre;
@@ -250,9 +288,13 @@ export default function LettresPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
-      const data = (await res.json()) as { lettre?: Lettre; error?: string };
-      if (!res.ok || !data.lettre) {
-        setErreur(data.error || "Génération impossible.");
+      if (!res.ok) {
+        setErreur(await lireErreur(res, "Génération impossible."));
+        return;
+      }
+      const data = (await res.json()) as { lettre?: Lettre };
+      if (!data.lettre) {
+        setErreur("Réponse inattendue du serveur.");
         return;
       }
       const l = data.lettre;
@@ -291,9 +333,13 @@ export default function LettresPage() {
           cvText: lettre.cvText,
         }),
       });
-      const data = (await res.json()) as { lettre?: Lettre; error?: string };
-      if (!res.ok || !data.lettre) {
-        setErreur(data.error || "Génération impossible.");
+      if (!res.ok) {
+        setErreur(await lireErreur(res, "Génération impossible."));
+        return;
+      }
+      const data = (await res.json()) as { lettre?: Lettre };
+      if (!data.lettre) {
+        setErreur("Réponse inattendue du serveur.");
         return;
       }
       const nouveau = data.lettre.content;

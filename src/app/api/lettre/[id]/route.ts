@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 
 /**
  * NexiRole — API LETTRE (une lettre précise).
@@ -11,8 +11,12 @@ import { prisma } from "@/lib/prisma";
  *                           la sauvegarde automatique de l'éditeur.
  * DELETE /api/lettre/[id] : suppression.
  *
+ * Identité : résolution tolérante (session.id → session.email → cookie JWT)
+ * via src/lib/utilisateur-actuel.ts.
  * Toutes les opérations sont limitées au propriétaire de la lettre.
  */
+
+export const dynamic = "force-dynamic";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -23,20 +27,20 @@ const updateSchema = z.object({
   position: z.string().max(200).optional(),
 });
 
+const NON_AUTH = {
+  error: "Session expirée — déconnecte-toi puis reconnecte-toi, et recharge la page.",
+};
+
 export async function GET(_request: NextRequest, { params }: Params) {
   try {
     const { id } = await params;
-    const session = await auth();
-    const userId = session?.user?.id;
-    if (!userId) {
-      return NextResponse.json(
-        { error: "Non authentifié. Reconnecte-toi." },
-        { status: 401 }
-      );
+    const { utilisateur, diagnostic } = await resoudreUtilisateur();
+    if (!utilisateur) {
+      return NextResponse.json({ ...NON_AUTH, diagnostic }, { status: 401 });
     }
 
     const lettre = await prisma.coverLetter.findFirst({
-      where: { id, userId },
+      where: { id, userId: utilisateur.userId },
     });
     if (!lettre) {
       return NextResponse.json(
@@ -54,14 +58,11 @@ export async function GET(_request: NextRequest, { params }: Params) {
 export async function PUT(request: NextRequest, { params }: Params) {
   try {
     const { id } = await params;
-    const session = await auth();
-    const userId = session?.user?.id;
-    if (!userId) {
-      return NextResponse.json(
-        { error: "Non authentifié. Reconnecte-toi." },
-        { status: 401 }
-      );
+    const { utilisateur, diagnostic } = await resoudreUtilisateur();
+    if (!utilisateur) {
+      return NextResponse.json({ ...NON_AUTH, diagnostic }, { status: 401 });
     }
+    const userId = utilisateur.userId;
 
     let body: unknown;
     try {
@@ -111,17 +112,13 @@ export async function PUT(request: NextRequest, { params }: Params) {
 export async function DELETE(_request: NextRequest, { params }: Params) {
   try {
     const { id } = await params;
-    const session = await auth();
-    const userId = session?.user?.id;
-    if (!userId) {
-      return NextResponse.json(
-        { error: "Non authentifié. Reconnecte-toi." },
-        { status: 401 }
-      );
+    const { utilisateur, diagnostic } = await resoudreUtilisateur();
+    if (!utilisateur) {
+      return NextResponse.json({ ...NON_AUTH, diagnostic }, { status: 401 });
     }
 
     const existante = await prisma.coverLetter.findFirst({
-      where: { id, userId },
+      where: { id, userId: utilisateur.userId },
       select: { id: true },
     });
     if (!existante) {
