@@ -1,6 +1,5 @@
 import React from "react";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
-import type { DossierData } from "@/lib/types";
 import { getTemplate, type TemplateId } from "@/lib/cv-templates";
 
 /**
@@ -10,7 +9,17 @@ import { getTemplate, type TemplateId } from "@/lib/cv-templates";
  */
 
 interface KitPdfDocumentProps {
-  data: DossierData;
+  data: {
+    identite: { nom_complet: string };
+    offre?: { titre: string; entreprise: string } | null;
+    kit_entretien?: {
+      score?: number;
+      conseils: string[];
+      message_linkedin: string;
+      message_email: string;
+      questions: { question: string; reponse_suggeree: string; astuce: string }[];
+    } | null;
+  };
   templateId: TemplateId;
 }
 
