@@ -3,83 +3,49 @@ import { z } from "zod";
 import { generateStructured } from "@/lib/ai";
 import { hasGroqKey } from "@/lib/ai-guard";
 import { getClientIp, guardRateLimit } from "@/lib/rate-limit";
+import { prisma } from "@/lib/prisma";
 import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 import { etatCoach, consommerCoach, type EtatCoach } from "@/lib/coach-quota";
+import { trouverPaysParNom } from "@/lib/countries-currencies";
 
 /**
  * NexiRole — COACH DE NÉGOCIATION SALARIALE IA (route /api/salary-coach).
  *
- * POST : reçoit { jobTitle, experienceYears, marketRegion, keySkills,
- * currentOffer } et renvoie une analyse complète (fourchettes salariales,
- * arguments de valeur chiffrés, scripts de négociation prêts à l'emploi).
+ * GET : historique complet + statistiques + état du quota du plan :
+ *   - coachings : simulations sauvegardées de l'utilisateur (updatedAt desc),
+ *   - stats : { total, derniereCible, paysPrincipal },
+ *   - quota : mêmes champs qu'avant (plan, used/limit, illimité, carte
+ *     d'upgrade) — inchangés pour la bannière existante.
  *
- * GET : renvoie l'état du quota du plan d'abonnement de l'utilisateur
- * (plan, simulations utilisées / limite, illimité ou non) pour la bannière
- * de la page /dashboard/negociation.
+ * POST : génère l'analyse salariale (Groq llama-3.3-70b-versatile, moteur
+ *   central de l'app) adaptée AU PAYS ET À LA DEVISE exacts sélectionnés
+ *   (197 pays de src/lib/countries-currencies.ts), puis SAUVEGARDE
+ *   automatiquement le coaching en base (modèle SalaryNegotiation) et
+ *   renvoie l'enregistrement complet avec son id.
  *
- * - Authentification : résolution tolérante existante (3 voies) — la même
- *   que /api/lettre, via src/lib/utilisateur-actuel.ts.
- * - LIMITES PAR PLAN (src/lib/coach-quota.ts) : plan Découverte limité à
- *   2 simulations par fenêtre de 30 jours, Pass Boost et Carrière Pro
- *   illimités. En cas de dépassement : 403 QUOTA_EXCEEDED + upgradeUrl,
- *   le même contrat que les autres routes IA (l'intercepteur du tableau
- *   de bord peut ouvrir la modale d'abonnement).
- * - Garde-fous IA : limite horaire 15 requêtes + clé Groq (ai-guard).
- * - Moteur : generateObject du SDK Vercel AI via le moteur central de
- *   l'app (src/lib/ai.ts → Groq llama-3.3-70b-versatile) + schéma Zod
- *   strict — sortie 100 % structurée, jamais de texte libre à parser.
+ * LIMITES PAR PLAN (src/lib/coach-quota.ts, inchangées) : Découverte 2
+ *   simulations / mois, Pass Boost et Carrière Pro illimités. Dépassement :
+ *   403 QUOTA_EXCEEDED + upgradeUrl — le même contrat que les autres routes IA.
+ *
+ * Identité : résolution tolérante (3 voies) via src/lib/utilisateur-actuel.ts.
+ * Garde-fous : limite horaire 15 requêtes + clé Groq (ai-guard) — inchangés.
  */
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-/* ── Zones / devises supportées ──────────────────────────────────────── */
-
-const REGIONS = {
-  afrique_ouest_fcfa: {
-    devise: "FCFA",
-    periode: "par mois",
-    consigne:
-      "marché d'Afrique de l'Ouest (Abidjan, Dakar, Cotonou, Lomé, Ouagadougou, Bamako) ; montants MENSUELS en FCFA, format exact « 450 000 FCFA / mois » avec espace comme séparateur de milliers",
-  },
-  france_europe_eur: {
-    devise: "EUR",
-    periode: "par an",
-    consigne:
-      "marché France / Europe ; salaire BRUT ANNUEL en euros, format exact « 45 000 € / an »",
-  },
-  amerique_nord_usd: {
-    devise: "USD",
-    periode: "par an",
-    consigne:
-      "marché États-Unis / Canada ; salaire annuel brut en dollars, format exact « 85 000 $ / an »",
-  },
-  remote_usd: {
-    devise: "USD",
-    periode: "par an",
-    consigne:
-      "poste 100 % à distance pour un employeur international qui paie en USD ; format exact « 60 000 $ / an »",
-  },
-} as const;
-
-type RegionCle = keyof typeof REGIONS;
 
 /* ── Validation des entrées ──────────────────────────────────────────── */
 
 const inputSchema = z.object({
   jobTitle: z.string().min(2).max(120),
   experienceYears: z.coerce.number().min(0).max(50),
-  marketRegion: z.enum([
-    "afrique_ouest_fcfa",
-    "france_europe_eur",
-    "amerique_nord_usd",
-    "remote_usd",
-  ]),
+  countryName: z.string().min(2).max(100),
+  currencyCode: z.string().min(3).max(3).regex(/^[A-Za-z]{3}$/, "Devise invalide."),
   keySkills: z.string().min(2).max(800),
   currentOffer: z.string().max(2000).default(""),
 });
 
-/* ── Schéma de sortie strict (zod) ───────────────────────────────────── */
+/* ── Schéma de sortie strict (zod) — inchangé ────────────────────────── */
 
 const argumentValeurSchema = z.object({
   titre: z.string(),
@@ -108,35 +74,37 @@ type AnalyseSalariale = z.infer<typeof outputSchema>;
 
 /* ── Prompt système ──────────────────────────────────────────────────── */
 
-const SYSTEM_PROMPT = `Tu es « Coach Négociation », négociateur salarial senior formé dans un grand cabinet de recrutement et ancien recruteur. Tu connais les fourchettes réelles des marchés locaux et du remote international.
+const SYSTEM_PROMPT = `Tu es « Coach Négociation », négociateur salarial senior formé dans un grand cabinet de recrutement et ancien recruteur. Tu connais les fourchettes réelles des marchés locaux de tous les pays du monde et du remote international.
 
 Règles absolues :
 - Réponds UNIQUEMENT en français, en TEXTE BRUT : aucun markdown (pas de #, pas d'astérisques, pas de listes à puces, pas de blocs de code) dans aucune chaîne.
-- Les trois fourchettes sont des chaînes formatées selon la zone géographique fournie (montants réalistes pour le poste, la zone et l'expérience) : fourchette_min < fourchette_cible < fourchette_max.
-- fourchette_min : minimum acceptable en dessous duquel il faut refuser. fourchette_cible : montant idéal à demander. fourchette_max : plafond atteignable pour un profil confirmé négocié habilement.
-- Si une offre actuelle est fournie : place les fourchettes par rapport à elle. Si elle est basse pour le marché, la cible la dépasse et tu l'expliques.
-- analyse_marche : 2 à 3 phrases sur la tendance du marché pour ce poste et cette zone (demande, tension du recrutement, effet de l'expérience et des compétences listées).
-- arguments_valeur : EXACTEMENT 3 arguments, concrets et quantifiés, construits à partir des compétences du candidat. Chaque titre fait 8 mots maximum ; chaque explication fait 2 à 3 phrases et contient un impact métier chiffré ou observable (temps gagné, revenus, erreurs évitées...).
+- Les trois fourchettes sont des chaînes formatées selon le pays ET la devise exacts fournis : montants réalistes pour ce pays, ce poste et cette expérience ; fourchette_min < fourchette_cible < fourchette_max.
+- Format de chaque montant : « montant symbole-devises période », avec une espace comme séparateur de milliers et la période usuelle du marché indiqué (ex. « 450 000 FCFA / mois » pour un salaire mensuel en zone FCFA, « 45 000 € / an » pour un brut annuel en France, « 85 000 $ / an » aux États-Unis, « 180 000 NGN / mois » au Nigeria). Utilise le symbole de la devise si tu le connais (FCFA, €, $, DH, KSh...), sinon le code ISO.
+- Base-toi sur les niveaux de salaire RÉELS du pays indiqué (un développeur au Bénin, en France et au Canada n'ont pas du tout la même fourchette) : adapte les ordres de grandeur, le coût de la vie et les usages locaux.
+- Si une offre actuelle est fournie : place les fourchettes par rapport à elle. Si elle est basse pour le marché local, la cible la dépasse et tu l'expliques.
+- analyse_marche : 2 à 3 phrases sur la tendance du marché LOCAL pour ce poste (demande, tension du recrutement, effet de l'expérience et des compétences listées, contexte du pays).
+- arguments_valeur : EXACTEMENT 3 arguments, concrets et quantifiés, construits à partir des compétences du candidat. Chaque titre fait 8 mots maximum ; chaque explication fait 2 à 3 phrases et contient un impact métier chiffré ou observable (temps gagné, revenus, erreurs évitées...) exprimé dans la devise du pays.
 - scripts_reponse.question_entretien : réponse MOT À MOT à « Quelles sont vos prétentions salariales ? », à la première personne, 5 à 8 phrases, ton confiant et poli, qui cite la cible puis la fourchette, et finit par une ouverture sur la valeur globale du poste.
 - scripts_reponse.contre_proposition_email : e-mail complet en texte brut, commençant par la ligne « Objet : » suivie d'un objet précis, puis salutation, remerciement pour l'offre, 2 à 3 paragraphes fermes et polis qui citent la fourchette cible et justifient avec les arguments, proposition d'un échange téléphonique, formule de politesse, signature « [Prénom Nom] ».
 - scripts_reponse.alternatives_avantages : EXACTEMENT 3 leviers NON financiers à négocier si le fixe est bloqué (par exemple : télétravail, formation certifiante, jours de congé supplémentaires, horaires flexibles, budget équipement, titre de transport, titre du poste). Chaque titre fait 6 mots maximum, chaque description fait 1 à 2 phrases concrètes.`;
 
-/* ── Route ───────────────────────────────────────────────────────────── */
+/* ── Prompt utilisateur ──────────────────────────────────────────────── */
 
 function construirePrompt(params: {
   jobTitle: string;
   experienceYears: number;
-  marketRegion: RegionCle;
+  countryName: string;
+  currencyCode: string;
+  currencySymbol: string;
   keySkills: string;
   currentOffer: string;
 }): string {
-  const region = REGIONS[params.marketRegion];
   const lignes = [
     `Analyse salariale à produire.`,
     `Poste visé : ${params.jobTitle}.`,
     `Expérience du candidat : ${params.experienceYears} an(s).`,
     `Compétences clés du candidat : ${params.keySkills}.`,
-    `Zone géographique : ${region.consigne} — toutes les fourchettes sont exprimées ${region.periode} en ${region.devise} avec le format demandé.`,
+    `Pays du poste : ${params.countryName} — toutes les fourchettes utilisent EXCLUSIVEMENT la devise officielle ${params.currencyCode} (symbole usuel : ${params.currencySymbol}) avec la période usuelle de ce marché, au format exact demandé.`,
     params.currentOffer
       ? `Offre déjà reçue par le candidat : ${params.currentOffer}`
       : `Le candidat n'a pas encore reçu d'offre : base-toi uniquement sur le marché.`,
@@ -155,6 +123,72 @@ async function lireEtatTolerant(userId: string): Promise<EtatCoach | null> {
     return null;
   }
 }
+
+/* ── Table absente ? (l'utilisateur n'a pas encore lancé db push) ─────── */
+
+function estTableAbsente(error: unknown): boolean {
+  const e = error as { code?: string; message?: string };
+  return (
+    e?.code === "P2021" ||
+    String(e?.message ?? "").includes("salary_negotiations")
+  );
+}
+
+function reponseTableAbsente(): NextResponse {
+  return NextResponse.json(
+    {
+      error:
+        "La sauvegarde des coachings n'est pas encore active : lance « npx prisma db push » (voir LISEZMOI-COACH-V2.md) puis recharge la page.",
+    },
+    { status: 503 }
+  );
+}
+
+/* ── Statistiques globales de l'historique ───────────────────────────── */
+
+function quatrechetteCible(resultJson: unknown): string | null {
+  if (!resultJson || typeof resultJson !== "object") return null;
+  const brut = resultJson as Record<string, unknown>;
+  return typeof brut.fourchette_cible === "string" ? brut.fourchette_cible : null;
+}
+
+function calculerStats(
+  coachings: Array<{ countryName: string; currencyCode: string; resultJson: unknown }>
+) {
+  const parPays = new Map<string, { currencyCode: string; nombre: number }>();
+  for (const coaching of coachings) {
+    const precedent = parPays.get(coaching.countryName);
+    parPays.set(coaching.countryName, {
+      currencyCode: coaching.currencyCode,
+      nombre: (precedent?.nombre ?? 0) + 1,
+    });
+  }
+
+  let paysPrincipal: {
+    pays: string;
+    drapeau: string | null;
+    devise: string;
+    nombre: number;
+  } | null = null;
+  for (const [pays, valeur] of parPays.entries()) {
+    if (!paysPrincipal || valeur.nombre > paysPrincipal.nombre) {
+      paysPrincipal = {
+        pays,
+        drapeau: null, // le drapeau est ajouté côté client (liste pays)
+        devise: valeur.currencyCode,
+        nombre: valeur.nombre,
+      };
+    }
+  }
+
+  return {
+    total: coachings.length,
+    derniereCible: coachings.length > 0 ? quatrechetteCible(coachings[0].resultJson) : null,
+    paysPrincipal,
+  };
+}
+
+/* ── POST : générer + sauvegarder automatiquement ────────────────────── */
 
 export async function POST(request: NextRequest) {
   /* 1. Authentification (résolution tolérante existante, 3 voies) */
@@ -181,8 +215,7 @@ export async function POST(request: NextRequest) {
   if (!guard.ok) return guard.response;
 
   /* 3. Limite du plan d'abonnement (Découverte : 2/mois, payants : illimité).
-        En cas de dépassement : 403 QUOTA_EXCEEDED + upgradeUrl — le même
-        contrat que /api/generate-from-url, /api/search-jobs, etc.           */
+        Contrat 403 QUOTA_EXCEEDED + upgradeUrl identique aux autres routes IA. */
   const etat = await lireEtatTolerant(userId);
   if (etat?.reached) {
     const message = etat.compteurDedie
@@ -230,15 +263,36 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "Paramètres incomplets : vérifie le poste visé, les années d'expérience, la zone et les compétences clés.",
+          "Paramètres incomplets : vérifie le poste visé, les années d'expérience, le pays sélectionné et les compétences clés.",
       },
       { status: 400 }
     );
   }
 
-  const params = parsed.data;
+  /* 6. Le pays doit exister dans la liste officielle (197 pays) — la devise
+        et le symbole sont TOUJOURS pris depuis la liste, jamais du client. */
+  const pays = trouverPaysParNom(parsed.data.countryName);
+  if (!pays || pays.currencyCode !== parsed.data.currencyCode.toUpperCase()) {
+    return NextResponse.json(
+      {
+        error:
+          "Pays ou devise inconnu : sélectionne ton pays dans la liste déroulante « Pays et Devise ».",
+      },
+      { status: 400 }
+    );
+  }
 
-  /* 6. Génération structurée (generateObject + schéma zod strict) */
+  const params = {
+    jobTitle: parsed.data.jobTitle.trim(),
+    experienceYears: parsed.data.experienceYears,
+    countryName: pays.name,
+    currencyCode: pays.currencyCode,
+    currencySymbol: pays.currencySymbol,
+    keySkills: parsed.data.keySkills.trim(),
+    currentOffer: parsed.data.currentOffer.trim(),
+  };
+
+  /* 7. Génération structurée (generateObject + schéma zod strict) */
   try {
     const analyse = await generateStructured<AnalyseSalariale>({
       schema: outputSchema,
@@ -248,15 +302,37 @@ export async function POST(request: NextRequest) {
       maxOutputTokens: 4000,
     });
 
-    /* 7. Consommation du crédit du plan (après succès, plan Découverte
+    /* 8. Sauvegarde automatique du coaching en base */
+    let coaching;
+    try {
+      coaching = await prisma.salaryNegotiation.create({
+        data: {
+          userId,
+          jobTitle: params.jobTitle,
+          experienceYears: params.experienceYears,
+          countryName: params.countryName,
+          currencyCode: params.currencyCode,
+          currencySymbol: params.currencySymbol,
+          keySkills: params.keySkills,
+          currentOffer: params.currentOffer || null,
+          resultJson: analyse,
+        },
+      });
+    } catch (error) {
+      if (estTableAbsente(error)) return reponseTableAbsente();
+      throw error;
+    }
+
+    /* 9. Consommation du crédit du plan (après succès, plan Découverte
           uniquement — les plans payants sont illimités). */
     if (etat && etat.plan === "FREE") {
       await consommerCoach(userId, etat.compteurDedie);
     }
 
-    return NextResponse.json({ analyse });
+    return NextResponse.json({ coaching });
   } catch (error) {
     console.error("[salary-coach:POST]", error);
+    if (estTableAbsente(error)) return reponseTableAbsente();
     const message =
       error instanceof Error && error.message.includes("GROQ_API_KEY")
         ? error.message
@@ -265,7 +341,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/* ── GET : état du quota du plan, pour la bannière de la page ────────── */
+/* ── GET : historique + statistiques + état du quota ─────────────────── */
 
 export async function GET() {
   const { utilisateur } = await resoudreUtilisateur();
@@ -276,22 +352,49 @@ export async function GET() {
     );
   }
 
-  const etat = await lireEtatTolerant(utilisateur.userId);
-  if (!etat) {
-    // Bannière indicative uniquement : on ne casse pas la page.
-    return NextResponse.json({ indisponible: true });
+  /* Historique (le plus récemment modifié en premier). Une panne de base
+     ne casse pas la page : on renvoie une liste vide + le diagnostic. */
+  let coachings: Array<Record<string, unknown>> = [];
+  try {
+    const lignes = await prisma.salaryNegotiation.findMany({
+      where: { userId: utilisateur.userId },
+      orderBy: { updatedAt: "desc" },
+      take: 200,
+    });
+    coachings = lignes as unknown as Array<Record<string, unknown>>;
+  } catch (error) {
+    console.error("[salary-coach:GET]", error);
+    if (estTableAbsente(error)) {
+      return NextResponse.json({
+        indisponible: true,
+        raison: "TABLE_ABSENTE",
+        coachings: [],
+        stats: { total: 0, derniereCible: null, paysPrincipal: null },
+      });
+    }
+    return NextResponse.json({ error: "Erreur serveur." }, { status: 500 });
   }
 
-  return NextResponse.json({
-    plan: etat.plan,
-    planLabel: etat.planLabel,
-    used: etat.used,
-    limit: etat.limit,
-    unlimited: etat.unlimited,
-    remaining: etat.remaining,
-    reached: etat.reached,
-    compteurDedie: etat.compteurDedie,
-    isActive: etat.isActive,
-    daysRemaining: etat.daysRemaining,
-  });
+  const stats = calculerStats(
+    coachings as Array<{ countryName: string; currencyCode: string; resultJson: unknown }>
+  );
+
+  /* État du quota (bannière de plan) — indicatif, jamais bloquant. */
+  const etat = await lireEtatTolerant(utilisateur.userId);
+  const quota = etat
+    ? {
+        plan: etat.plan,
+        planLabel: etat.planLabel,
+        used: etat.used,
+        limit: etat.limit,
+        unlimited: etat.unlimited,
+        remaining: etat.remaining,
+        reached: etat.reached,
+        compteurDedie: etat.compteurDedie,
+        isActive: etat.isActive,
+        daysRemaining: etat.daysRemaining,
+      }
+    : null;
+
+  return NextResponse.json({ ...quota, indisponible: quota === null, coachings, stats });
 }

@@ -39,6 +39,7 @@ model User {
   generatedApplications GeneratedApplication[]
   jobApplications       JobApplicationTracker[]
   coverLetters          CoverLetter[]
+  salaryNegotiations SalaryNegotiation[]
   
   accounts            Account[]
   sessions            Session[]
@@ -243,3 +244,25 @@ model CoverLetter {
 }
 
 
+
+// --- Coach de Negotiation Salariale IA -- simulations sauvegardees ---
+model SalaryNegotiation {
+  id              String   @id @default(cuid())
+  userId          String
+  jobTitle        String
+  experienceYears Int
+  countryName     String
+  currencyCode    String
+  currencySymbol  String
+  keySkills       String
+  currentOffer    String?
+  resultJson      Json
+  shareToken      String?  @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("salary_negotiations")
+}
