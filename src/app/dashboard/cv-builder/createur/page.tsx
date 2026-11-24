@@ -1091,6 +1091,137 @@ export default function CvBuilderPage() {
        (une seule fois par session navigateur).
      ================================================================ */
   const [cvId, setCvId] = useState<string | null>(null);
+  /* [IMPORT DOSSIER V1] debut - ?importDossierId= / ?fromDossierId= :
+     charge le CV adapte du dossier par offre et cree un CV dans la
+     bibliotheque (POST /api/cv) : le studio ouvre ensuite une session
+     propre avec sauvegarde automatique en base (?cv=<id>). */
+  const importDossierRef = useRef(false);
+  useEffect(() => {
+    if (importDossierRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const dossierId = params.get("importDossierId") || params.get("fromDossierId");
+    if (!dossierId || params.get("cv")) return;
+    importDossierRef.current = true;
+    (async () => {
+      try {
+        const res = await fetch("/api/history?type=applications", { cache: "no-store" });
+        if (!res.ok) {
+          toast.error("Impossible de retrouver le dossier (chargement de l'historique).");
+          return;
+        }
+        const json = (await res.json().catch(() => null)) as { items?: unknown } | null;
+        const items: Array<Record<string, unknown>> =
+          json && Array.isArray(json.items) ? (json.items as Array<Record<string, unknown>>) : [];
+        const brut = items.find((item) => item && typeof item.id === "string" && item.id === dossierId);
+        if (!brut) {
+          toast.error("Dossier introuvable dans ton historique.");
+          return;
+        }
+        const cvJson =
+          brut.cvJson && typeof brut.cvJson === "object" && !Array.isArray(brut.cvJson)
+            ? (brut.cvJson as Record<string, unknown>)
+            : {};
+        const candidat =
+          brut.candidateJson && typeof brut.candidateJson === "object" && !Array.isArray(brut.candidateJson)
+            ? (brut.candidateJson as Record<string, unknown>)
+            : {};
+        const jobTitle = typeof brut.jobTitle === "string" ? brut.jobTitle : "";
+
+        /* Mapping du cvJson (CV adapte a l'offre) vers CvBuilderData du studio. */
+        const stamp = Date.now();
+        const exArray: unknown[] = Array.isArray(cvJson.experiences) ? (cvJson.experiences as unknown[]) : [];
+        const eduArray: unknown[] = Array.isArray(cvJson.education) ? (cvJson.education as unknown[]) : [];
+        const lngArray: unknown[] = Array.isArray(cvJson.languages) ? (cvJson.languages as unknown[]) : [];
+        const skillArray: unknown[] = Array.isArray(cvJson.skills) ? (cvJson.skills as unknown[]) : [];
+        const cvData = {
+          personal: {
+            fullName: typeof candidat.fullName === "string" ? candidat.fullName : "",
+            title: typeof cvJson.title === "string" ? cvJson.title : "",
+            email: typeof candidat.email === "string" ? candidat.email : "",
+            phone: typeof candidat.phone === "string" ? candidat.phone : "",
+            location: typeof candidat.location === "string" ? candidat.location : "",
+            linkedin: typeof candidat.linkedin === "string" ? candidat.linkedin : "",
+          },
+          summary: typeof cvJson.summary === "string" ? cvJson.summary : "",
+          experiences: exArray.map((rawExp, idx) => {
+            const exp =
+              rawExp && typeof rawExp === "object" && !Array.isArray(rawExp)
+                ? (rawExp as Record<string, unknown>)
+                : {};
+            const missions: unknown[] = Array.isArray(exp.achievements) ? (exp.achievements as unknown[]) : [];
+            return {
+              id: "exp-" + stamp + "-" + idx,
+              role: typeof exp.role === "string" ? exp.role : "",
+              company: typeof exp.company === "string" ? exp.company : "",
+              period: typeof exp.period === "string" ? exp.period : "",
+              location: typeof exp.location === "string" ? exp.location : "",
+              achievements: missions.filter((m): m is string => typeof m === "string"),
+            };
+          }),
+          education: eduArray.map((rawEdu, idx) => {
+            const edu =
+              rawEdu && typeof rawEdu === "object" && !Array.isArray(rawEdu)
+                ? (rawEdu as Record<string, unknown>)
+                : {};
+            return {
+              id: "edu-" + stamp + "-" + idx,
+              degree: typeof edu.degree === "string" ? edu.degree : "",
+              school: typeof edu.school === "string" ? edu.school : "",
+              period: typeof edu.period === "string" ? edu.period : "",
+            };
+          }),
+          skills: skillArray.filter((s): s is string => typeof s === "string"),
+          languages: lngArray.map((rawLng, idx) => {
+            const lng =
+              rawLng && typeof rawLng === "object" && !Array.isArray(rawLng)
+                ? (rawLng as Record<string, unknown>)
+                : {};
+            return {
+              id: "lng-" + stamp + "-" + idx,
+              name: typeof lng.name === "string" ? lng.name : "",
+              level: typeof lng.level === "string" ? lng.level : "",
+            };
+          }),
+        };
+
+        /* Charge les donnees dans le studio (design moderne, etape 0). */
+        setData(sanitizeData(cvData));
+        setDesign(sanitizeDesign(DEFAULT_DESIGN));
+        setStep(0);
+
+        /* Cree le CV dans la bibliotheque puis ouvre une session propre. */
+        const resPost = await fetch("/api/cv", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: ("CV - " + (jobTitle || "dossier importe")).slice(0, 80),
+            data: cvData,
+            design: DEFAULT_DESIGN,
+            step: 0,
+          }),
+        });
+        const postJson = (await resPost.json().catch(() => null)) as
+          | { cv?: { id?: unknown } | null }
+          | null;
+        const newId =
+          postJson && postJson.cv && typeof postJson.cv.id === "string" ? postJson.cv.id : "";
+        if (resPost.ok && newId) {
+          setCvId(newId);
+          const url = new URL(window.location.href);
+          url.searchParams.delete("importDossierId");
+          url.searchParams.delete("fromDossierId");
+          url.searchParams.set("cv", newId);
+          window.history.replaceState(null, "", url.toString());
+          toast.success("CV du dossier importe dans le studio : template ATS, photo et export PDF/Word disponibles.");
+        } else {
+          toast.success("CV du dossier charge dans le studio (enregistrement en bibliotheque indisponible).");
+        }
+      } catch {
+        toast.error("Import du dossier impossible - recharge la page et reessaie.");
+      }
+    })();
+  }, []);
+  /* [IMPORT DOSSIER V1] fin */
   const [dbState, setDbState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [dbSavedAt, setDbSavedAt] = useState<Date | null>(null);
   const cvHydratedRef = useRef(false);

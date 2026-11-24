@@ -3,9 +3,8 @@
 /**
  * NexiRole — LETTRES DE MOTIVATION (page /dashboard/lettres).
  *
- * Refonte « Historique & Dossiers » harmonisée sur le modèle EXACT de la
- * page Négociation (/dashboard/negociation) : la page s'organise autour de
- * DEUX vues fluides :
+ * Harmonisée sur le modèle EXACT de la page Négociation (/dashboard/negociation) :
+ * la page s'organise autour de DEUX vues fluides —
  *
  *   Vue A — Tableau de bord & liste des lettres (par défaut) :
  *     3 cartes statistiques (lettres sauvegardées, dernière entreprise
@@ -17,18 +16,25 @@
  *     formulaire (poste, entreprise, ton, langue, offre, CV) → génération
  *     Groq, puis éditeur avec SAUVEGARDE AUTOMATIQUE (1,2 s après la frappe).
  *
- * - Règle d'or conservée : avant Copier / Imprimer / Régénérer / Retour, le
- *   contenu est TOUJOURS sauvegardé en base d'abord — l'export et la base
- *   sont donc toujours identiques.
- * - Export PDF via la fenêtre d'impression du navigateur (zéro dépendance).
- * - Notifications via sonner (Toaster monté dans src/app/layout.tsx).
+ * NOUVEAUTÉS DE CETTE VERSION :
+ *  - 3 méthodes pour fournir le CV dans le formulaire :
+ *      Option A — Sélectionner un CV sauvegardé (bibliothèque /api/cv,
+ *                 le texte du CV est chargé en 1 clic dans le champ) ;
+ *      Option B — Importer un fichier CV (PDF / DOCX / TXT) via
+ *                 /api/parse-cv (extraction instantanée dans le champ) ;
+ *      Option C — Texte libre (le champ reste modifiable à tout moment).
+ *  - Téléchargement PDF RÉEL « Lettre_NexiRole.pdf » (@react-pdf/renderer)
+ *    depuis l'éditeur, la modale de lecture et la liste — fin de
+ *    window.print().
+ *  - Bouton « Éditer & Sauvegarder » (PATCH /api/lettre/[id]).
+ *  - Migration depuis un dossier : /dashboard/lettres?fromDossierId=<id>
+ *    importe la lettre du dossier dans l'éditeur (POST /api/lettre en mode
+ *    direct) pour la retravailler avec différents tons.
  *
- * API : GET/POST /api/lettre, GET/PATCH/PUT/DELETE /api/lettre/[id],
- * GET /api/lettre/ia-status (statut moteur IA + base).
- *
- * Utilise la mini-bibliothèque UI maison (@/components/ui) et la charte
- * NexiRole (navy #051937 / or #FFC107) — aucun composant externe.
- * Icônes : exclusivement @tabler/icons-react.
+ * Règle d'or conservée : avant Copier / PDF / Régénérer / Retour, le
+ * contenu est TOUJOURS sauvegardé en base d'abord.
+ * Notifications via sonner (Toaster monté dans src/app/layout.tsx).
+ * Icônes : exclusivement @tabler/icons-react. Charte : #051937 / #FFC107.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -41,20 +47,24 @@ import {
   IconCalendarEvent,
   IconCheck,
   IconCopy,
+  IconDeviceFloppy,
   IconEdit,
   IconEye,
   IconFileDescription,
+  IconFileText,
   IconFiles,
   IconFileTypePdf,
+  IconLibrary,
   IconLoader2,
   IconPlus,
-  IconPrinter,
   IconRefresh,
   IconShare,
   IconSparkles,
   IconTrash,
+  IconUpload,
   IconX,
 } from "@tabler/icons-react";
+import { exportPdfSecurise, telechargerLettreTextePdf } from "@/components/dashboard/dossier-preview";
 
 /* ── Types ───────────────────────────────────────────────────────────── */
 
@@ -78,11 +88,17 @@ type LettreListItem = Pick<
   "id" | "title" | "company" | "position" | "tone" | "language" | "createdAt" | "updatedAt"
 >;
 
-/** Réponse de GET /api/lettre/ia-status. */
-type StatutIaDb = {
-  ia: { pret: boolean; provider: string; model: string };
-  db: { ok: boolean; message: string };
+/** Réponse de GET /api/lettre/ia-status (contrat { ready, model } + compat). */
+type StatutIa = {
+  ready?: boolean;
+  model?: string;
+  provider?: string;
+  ia?: { pret: boolean; provider: string; model: string };
+  db?: { ok: boolean; message: string };
 };
+
+/** CV de la bibliothèque (GET /api/cv). */
+type CvBibliotheque = { id: string; name: string; updatedAt?: string };
 
 type Etat = "propre" | "sale" | "sauvegarde";
 
@@ -107,29 +123,8 @@ const LANGUES: Array<{ value: string; label: string }> = [
   { value: "en", label: "Anglais" },
 ];
 
-const CSS_IMPRESSION = `
-@media print {
-  body * { visibility: hidden !important; }
-  .zone-impression, .zone-impression * { visibility: visible !important; }
-  .zone-impression {
-    display: block !important;
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    padding: 32px;
-    background: #ffffff;
-    color: #000000;
-  }
-}
-`;
+/* ── Aides réseau & formatage ────────────────────────────────────────── */
 
-/* ── Aides réseau & formatage (copie du modèle négociation) ──────────── */
-
-/**
- * Lit le corps d'une réponse d'erreur SANS planter, que le serveur renvoie
- * du JSON ({ error, diagnostic }) ou du HTML (erreur de compilation dev).
- */
 async function lireErreur(res: Response, fallback: string): Promise<string> {
   let brut = "";
   try {
@@ -179,6 +174,128 @@ async function copierTexte(texte: string): Promise<boolean> {
   }
 }
 
+/* ── Conversion d'un CV (bibliothèque ou dossier) en texte lisible ───── */
+
+function ch(...valeurs: unknown[]): string {
+  for (const valeur of valeurs) {
+    if (typeof valeur === "string" && valeur.trim() !== "") return valeur.trim();
+  }
+  return "";
+}
+
+function tab(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is Record<string, unknown> =>
+      item !== null && typeof item === "object" && !Array.isArray(item)
+  );
+}
+
+function strList(value: unknown, max: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    .map((item) => item.trim())
+    .slice(0, max);
+}
+
+/** CvBuilderData (créateur) OU cvJson optimisé (dossier) → texte CV lisible. */
+function cvEnTexte(data: unknown): string {
+  const d = data && typeof data === "object" && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : {};
+  const personal = tab([d.personal])[0] ?? {};
+  const identite = tab([d.identite])[0] ?? {};
+  const lignes: string[] = [];
+
+  const nom = ch(personal.fullName, personal.nom, identite.nom_complet);
+  const titrePro = ch(personal.title, identite.titre, d.title, d.titre);
+  if (nom || titrePro) lignes.push([nom, titrePro].filter(Boolean).join(" — "));
+
+  const contacts = [
+    ch(personal.email, identite.email) && `E-mail : ${ch(personal.email, identite.email)}`,
+    ch(personal.phone, personal.telephone, identite.telephone) &&
+      `Téléphone : ${ch(personal.phone, personal.telephone, identite.telephone)}`,
+    ch(personal.location, personal.ville, identite.ville) &&
+      `Ville : ${ch(personal.location, personal.ville, identite.ville)}`,
+    ch(personal.linkedin, identite.linkedin) &&
+      `LinkedIn : ${ch(personal.linkedin, identite.linkedin)}`,
+  ].filter(Boolean) as string[];
+  if (contacts.length > 0) lignes.push(contacts.join(" | "));
+
+  const resume = ch(d.summary, d.resume);
+  if (resume) lignes.push(`Profil : ${resume}`);
+
+  const experiences = tab(d.experiences);
+  if (experiences.length > 0) {
+    lignes.push("Expériences professionnelles :");
+    for (const exp of experiences) {
+      const enTete = [
+        ch(exp.role, exp.poste),
+        ch(exp.company, exp.entreprise),
+        ch(exp.period, exp.periode),
+        ch(exp.location, exp.lieu),
+      ]
+        .filter(Boolean)
+        .join(" — ");
+      lignes.push(`- ${enTete || "Expérience"}`);
+      for (const mission of strList(exp.achievements ?? exp.missions, 6)) {
+        lignes.push(`  • ${mission}`);
+      }
+    }
+  }
+
+  const formations = tab(d.education ?? d.formations);
+  if (formations.length > 0) {
+    lignes.push("Formation :");
+    for (const formation of formations) {
+      const ligne = [
+        ch(formation.degree, formation.diplome),
+        ch(formation.school, formation.ecole, formation.etablissement),
+        ch(formation.period, formation.periode),
+      ]
+        .filter(Boolean)
+        .join(" — ");
+      lignes.push(`- ${ligne || "Formation"}`);
+    }
+  }
+
+  const competences = strList(d.skills ?? d.competences, 20);
+  if (competences.length > 0) lignes.push(`Compétences : ${competences.join(", ")}`);
+
+  const langues = tab(d.languages ?? d.langues);
+  if (langues.length > 0) {
+    const langueLignes = langues
+      .map((l) => `${ch(l.name, l.nom)} (${ch(l.level, l.niveau) || "niveau non précisé"})`)
+      .filter((ligne) => !ligne.startsWith(" ("))
+      .join(", ");
+    if (langueLignes) lignes.push(`Langues : ${langueLignes}`);
+  }
+
+  return lignes.join("\n").slice(0, 12000);
+}
+
+/** Lettre d'un dossier (JSON {subject, greeting, paragraphs, closing} ou brut) → texte. */
+function lettreDossierEnTexte(coverLetter: unknown): string {
+  if (typeof coverLetter !== "string") return "";
+  const texte = coverLetter.trim();
+  if (!texte) return "";
+  try {
+    const parse: unknown = JSON.parse(texte);
+    if (!parse || typeof parse !== "object" || Array.isArray(parse)) return texte;
+    const o = parse as Record<string, unknown>;
+    const lignes: string[] = [];
+    const objet = ch(o.subject, o.objet);
+    if (objet) lignes.push(`Objet : ${objet}`, "");
+    if (ch(o.greeting, o.salutation)) lignes.push(ch(o.greeting, o.salutation), "");
+    for (const p of strList(o.paragraphs ?? o.paragraphes, 8)) lignes.push(p, "");
+    if (ch(o.closing, o.politesse)) lignes.push(ch(o.closing, o.politesse));
+    return lignes.length > 0 ? lignes.join("\n").trim() : texte;
+  } catch {
+    return texte;
+  }
+}
+
 /* ── Page ────────────────────────────────────────────────────────────── */
 
 export default function LettresPage() {
@@ -189,7 +306,7 @@ export default function LettresPage() {
   const [lettres, setLettres] = useState<LettreListItem[]>([]);
   const [chargement, setChargement] = useState(true);
   const [erreurListe, setErreurListe] = useState("");
-  const [statut, setStatut] = useState<StatutIaDb | null>(null);
+  const [statut, setStatut] = useState<StatutIa | null>(null);
   const [statutEnCours, setStatutEnCours] = useState(true);
 
   /* Formulaire (création IA). */
@@ -202,6 +319,14 @@ export default function LettresPage() {
     cvText: "",
   });
 
+  /* Options A & B : CV sauvegardé (bibliothèque) et fichier importé. */
+  const [cvs, setCvs] = useState<CvBibliotheque[]>([]);
+  const [cvChoisi, setCvChoisi] = useState("");
+  const [cvChargement, setCvChargement] = useState(false);
+  const [fichierNom, setFichierNom] = useState("");
+  const [importEnCours, setImportEnCours] = useState(false);
+  const [sourceCv, setSourceCv] = useState<"libre" | "bibliotheque" | "fichier">("libre");
+
   /* Éditeur (lettre ouverte, sauvegarde automatique). */
   const [lettre, setLettre] = useState<Lettre | null>(null);
   const [titre, setTitre] = useState("");
@@ -211,6 +336,7 @@ export default function LettresPage() {
   const [generation, setGeneration] = useState(false);
   const [erreur, setErreur] = useState("");
   const [copie, setCopie] = useState(false);
+  const [pdfEnCours, setPdfEnCours] = useState(false);
 
   /* Actions sur les lettres de la liste. */
   const [lectureId, setLectureId] = useState<string | null>(null);
@@ -219,7 +345,6 @@ export default function LettresPage() {
   const [pdfId, setPdfId] = useState<string | null>(null);
   const [partageId, setPartageId] = useState<string | null>(null);
   const [suppressionId, setSuppressionId] = useState<string | null>(null);
-  const [contenuImpression, setContenuImpression] = useState("");
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contenuRef = useRef("");
@@ -228,6 +353,7 @@ export default function LettresPage() {
   const etatRef = useRef<Etat>("propre");
   // StrictMode (dev) monte le composant 2 fois : ce garde évite 2 appels API.
   const demarrageFaitRef = useRef(false);
+  const importDossierFaitRef = useRef(false);
 
   function majEtat(v: Etat) {
     etatRef.current = v;
@@ -287,7 +413,7 @@ export default function LettresPage() {
     }
   }
 
-  /* ── Chargement de la liste + statut IA (GET /api/lettre) ────────── */
+  /* ── Chargement de la liste + statut IA + migration dossier ──────── */
 
   async function chargerLettres() {
     setChargement(true);
@@ -321,7 +447,7 @@ export default function LettresPage() {
     void (async () => {
       try {
         const r = await fetch("/api/lettre/ia-status");
-        if (r.ok) setStatut((await r.json()) as StatutIaDb);
+        if (r.ok) setStatut((await r.json()) as StatutIa);
       } catch {
         // statut indisponible : non bloquant
       } finally {
@@ -334,6 +460,84 @@ export default function LettresPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /* Migration depuis un dossier : /dashboard/lettres?fromDossierId=<id>. */
+  useEffect(() => {
+    if (importDossierFaitRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const dossierId = params.get("fromDossierId") || params.get("importDossierId");
+    if (!dossierId) return;
+    importDossierFaitRef.current = true;
+    void (async () => {
+      try {
+        const res = await fetch("/api/history?type=applications", { cache: "no-store" });
+        if (!res.ok) {
+          toast.error("Impossible de retrouver le dossier — ouvre-le depuis l'historique.");
+          return;
+        }
+        const data = (await res.json().catch(() => null)) as { items?: unknown[] } | null;
+        const itemBrut = Array.isArray(data?.items)
+          ? data!.items.find(
+              (item) =>
+                item && typeof item === "object" && (item as Record<string, unknown>).id === dossierId
+            )
+          : undefined;
+        if (!itemBrut) {
+          toast.error("Dossier introuvable dans ton historique.");
+          return;
+        }
+        const dossier = itemBrut as Record<string, unknown>;
+        const contenuDossier = lettreDossierEnTexte(dossier.coverLetter);
+        if (contenuDossier.length < 20) {
+          toast.error("Ce dossier ne contient pas de lettre exploitable.");
+          return;
+        }
+        const jobTitle = ch(dossier.jobTitle);
+        const companyName = ch(dossier.companyName);
+        const jobUrl = ch(dossier.jobUrl);
+        const cvTexte = cvEnTexte(dossier.cvJson);
+
+        /* Enregistre la lettre du dossier comme une lettre autonome
+           (POST /api/lettre — mode import direct, sans appel IA). */
+        const resPost = await fetch("/api/lettre", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: contenuDossier,
+            title: ("Lettre — " + jobTitle + (companyName ? " — " + companyName : "")).slice(0, 120),
+            company: companyName,
+            position: jobTitle,
+            tone: "professionnel",
+            language: "fr",
+            jobOffer: (jobTitle + (companyName ? " — " + companyName : "") + (jobUrl ? "\n" + jobUrl : "")).slice(0, 12000),
+            cvText: cvTexte,
+          }),
+        });
+        if (!resPost.ok) {
+          toast.error(await lireErreur(resPost, "Import de la lettre impossible."));
+          return;
+        }
+        const post = (await resPost.json()) as { lettre?: Lettre };
+        if (post.lettre) {
+          chargerDansEditeur(post.lettre);
+          setVue("creation");
+          toast.success(
+            "Lettre importée depuis le dossier — change le ton puis clique « Régénérer » pour la retravailler."
+          );
+          void chargerLettres();
+        }
+      } catch {
+        toast.error("Import impossible — vérifie ta connexion.");
+      } finally {
+        // Nettoie l'URL pour éviter une ré-importation au rechargement.
+        const url = new URL(window.location.href);
+        url.searchParams.delete("fromDossierId");
+        url.searchParams.delete("importDossierId");
+        window.history.replaceState(null, "", url.toString());
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* Fermeture de la modale de lecture avec la touche Échap. */
   useEffect(() => {
     if (!lettreLue) return;
@@ -343,6 +547,82 @@ export default function LettresPage() {
     document.addEventListener("keydown", surEchap);
     return () => document.removeEventListener("keydown", surEchap);
   }, [lettreLue]);
+
+  /* ── Options A & B : CV de la bibliothèque / fichier importé ──────── */
+
+  /** Liste des CV sauvegardés (chargée quand on ouvre la vue création). */
+  async function chargerBibliothequeCv() {
+    try {
+      const res = await fetch("/api/cv", { cache: "no-store" });
+      if (!res.ok) {
+        setCvs([]);
+        return;
+      }
+      const data = (await res.json().catch(() => null)) as { cvs?: CvBibliotheque[] } | null;
+      setCvs(Array.isArray(data?.cvs) ? data!.cvs : []);
+    } catch {
+      setCvs([]);
+    }
+  }
+
+  /** Option A : sélection d'un CV sauvegardé → remplit le champ en 1 clic. */
+  async function chargerCvBibliotheque(id: string) {
+    setCvChoisi(id);
+    if (!id) {
+      setSourceCv("libre");
+      return;
+    }
+    setCvChargement(true);
+    try {
+      const res = await fetch(`/api/cv/${id}`, { cache: "no-store" });
+      if (!res.ok) {
+        toast.error("Impossible de charger ce CV — réessaie.");
+        return;
+      }
+      const data = (await res.json().catch(() => null)) as
+        | { cv?: { data?: unknown } | null }
+        | null;
+      if (data?.cv?.data) {
+        const texte = cvEnTexte(data.cv.data);
+        if (texte.length > 40) {
+          setForm((precedent) => ({ ...precedent, cvText: texte }));
+          setSourceCv("bibliotheque");
+          toast.success("CV chargé depuis ta bibliothèque — le champ reste modifiable.");
+        } else {
+          toast.error("Ce CV est encore trop vide — complète-le dans le studio de CV.");
+        }
+      }
+    } catch {
+      toast.error("Réseau indisponible : réessaie dans un instant.");
+    } finally {
+      setCvChargement(false);
+    }
+  }
+
+  /** Option B : import de fichier (PDF / DOCX / TXT) → texte extrait. */
+  async function importerFichierCv(file: File) {
+    setImportEnCours(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/parse-cv", { method: "POST", body: formData });
+      const data = (await res.json().catch(() => null)) as
+        | { text?: string; name?: string; error?: string }
+        | null;
+      if (!res.ok || !data?.text) {
+        toast.error(data?.error ?? "Impossible de lire ce fichier.");
+        return;
+      }
+      setForm((precedent) => ({ ...precedent, cvText: data.text! }));
+      setFichierNom(data.name ?? file.name);
+      setSourceCv("fichier");
+      toast.success("CV importé : le texte extrait remplit le champ (modifiable).");
+    } catch {
+      toast.error("Réseau indisponible : réessaie dans un instant.");
+    } finally {
+      setImportEnCours(false);
+    }
+  }
 
   /* ── Navigation entre les vues ────────────────────────────────────── */
 
@@ -378,9 +658,13 @@ export default function LettresPage() {
       jobOffer: "",
       cvText: "",
     });
+    setCvChoisi("");
+    setFichierNom("");
+    setSourceCv("libre");
     reinitialiserEditeur();
     setErreur("");
     setVue("creation");
+    void chargerBibliothequeCv();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -443,7 +727,22 @@ export default function LettresPage() {
     }
   }
 
-  /** Télécharger PDF : GET /api/lettre/[id] puis fenêtre d'impression. */
+  /* ── Exports PDF réels (Lettre_NexiRole.pdf) ──────────────────────── */
+
+  async function telechargerPdf(lettreCible: Lettre) {
+    setPdfEnCours(true);
+    await exportPdfSecurise(() =>
+      telechargerLettreTextePdf({
+        contenu: lettreCible.content,
+        entreprise: lettreCible.company || undefined,
+        poste: lettreCible.position || undefined,
+        nomFichier: "Lettre_NexiRole",
+      })
+    );
+    setPdfEnCours(false);
+  }
+
+  /** Télécharger PDF depuis la liste : GET /api/lettre/[id] puis export réel. */
   async function telechargerPdfDepuisListe(id: string) {
     setPdfId(id);
     try {
@@ -457,11 +756,7 @@ export default function LettresPage() {
         toast.error("Réponse inattendue du serveur.");
         return;
       }
-      setContenuImpression(data.lettre.content);
-      // Laisse le navigateur peindre la zone d'impression avant window.print().
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-      window.print();
-      toast.success("Fenêtre d'impression ouverte — choisis « Enregistrer au format PDF ».");
+      await telechargerPdf(data.lettre);
     } catch {
       toast.error("Téléchargement impossible — vérifie ta connexion.");
     } finally {
@@ -605,6 +900,21 @@ export default function LettresPage() {
     }
   }
 
+  /** Changement de ton dans l'éditeur : PATCH immédiat (utilisé par Régénérer). */
+  async function changerTon(tone: string) {
+    if (!lettre) return;
+    setLettre({ ...lettre, tone });
+    try {
+      await fetch("/api/lettre/" + lettre.id, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tone }),
+      });
+    } catch {
+      /* non bloquant : le ton sera renvoyé à la prochaine sauvegarde */
+    }
+  }
+
   /* ── Actions de l'éditeur (règle d'or : sauvegarde avant export) ──── */
 
   async function copierEditeur() {
@@ -618,11 +928,29 @@ export default function LettresPage() {
     }
   }
 
-  async function imprimer() {
+  /** Bouton « Éditer & Sauvegarder » : enregistre immédiatement (PATCH). */
+  async function editerEtSauvegarder() {
     await avantExport();
-    setContenuImpression(contenuRef.current);
-    await new Promise((resolve) => window.setTimeout(resolve, 80));
-    window.print();
+    await sauvegarder();
+    toast.success("Lettre enregistrée dans ton historique.");
+  }
+
+  /** Export PDF réel de la lettre ouverte (sauvegarde d'abord — règle d'or). */
+  async function telechargerPdfEditeur() {
+    await avantExport();
+    await telechargerPdf({
+      id: lettre?.id ?? "",
+      title: titreRef.current,
+      company: lettre?.company ?? "",
+      position: lettre?.position ?? "",
+      tone: lettre?.tone ?? "professionnel",
+      language: lettre?.language ?? "fr",
+      jobOffer: lettre?.jobOffer ?? "",
+      cvText: lettre?.cvText ?? "",
+      content: contenuRef.current,
+      createdAt: lettre?.createdAt ?? "",
+      updatedAt: lettre?.updatedAt ?? "",
+    });
   }
 
   /* ── Valeurs dérivées ──────────────────────────────────────────────── */
@@ -652,6 +980,9 @@ export default function LettresPage() {
   const plusRecente = lettres[0] ?? null;
   const derniereEntreprise = plusRecente?.company?.trim() ? plusRecente.company : "—";
 
+  const iaPret = statut?.ready ?? statut?.ia?.pret ?? false;
+  const iaModel = statut?.model ?? statut?.ia?.model ?? "groq";
+
   /** Copie le contenu de la modale de lecture dans le presse-papier. */
   async function copierLettreLue() {
     const reussi = await copierTexte(lettreLue?.content ?? "");
@@ -664,15 +995,6 @@ export default function LettresPage() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
-      <style>{CSS_IMPRESSION}</style>
-
-      {/* Zone d'impression : visible uniquement à l'impression / export PDF */}
-      <div className="zone-impression hidden">
-        <pre className="whitespace-pre-wrap font-serif text-[13pt] leading-relaxed">
-          {contenuImpression}
-        </pre>
-      </div>
-
       {/* ── En-tête ─────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -747,14 +1069,14 @@ export default function LettresPage() {
                   <div className="flex items-center gap-2">
                     <IconSparkles size={20} className="text-[#051937]" />
                     <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Statut IA
+                      Statut IA (Groq · Llama 3.3)
                     </span>
                   </div>
                   <p className="mt-3">
-                    {statut?.ia.pret ? (
+                    {iaPret ? (
                       <span className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-sm font-bold text-emerald-700">
                         <span aria-hidden className="size-2 rounded-full bg-emerald-500" />
-                        {statut.ia.provider} · {statut.ia.model}
+                        groq · {iaModel}
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1.5 text-sm font-bold text-slate-500">
@@ -764,9 +1086,9 @@ export default function LettresPage() {
                     )}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
-                    {statut && !statut.db.ok
+                    {statut && statut.db && !statut.db.ok
                       ? "Base à initialiser — lance « npx prisma db push »."
-                      : statut && !statut.ia.pret
+                      : !iaPret && statut !== null
                         ? "Ajoute GROQ_API_KEY dans .env.local puis redémarre."
                         : "Moteur IA utilisé pour rédiger tes lettres."}
                   </p>
@@ -853,7 +1175,7 @@ export default function LettresPage() {
                             type="button"
                             onClick={() => void telechargerPdfDepuisListe(l.id)}
                             disabled={pdfId === l.id}
-                            title="Télécharger en PDF (fenêtre d'impression)"
+                            title="Télécharger Lettre_NexiRole.pdf"
                             aria-label="Télécharger en PDF"
                             className="rounded-lg border border-slate-200 p-2 text-[#051937] transition-colors hover:bg-[#051937]/5 disabled:cursor-not-allowed disabled:opacity-50"
                           >
@@ -986,15 +1308,88 @@ export default function LettresPage() {
                     />
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cv">Texte de ton CV (copie-le depuis le Créateur de CV)</Label>
+                  {/* ── Le CV : 3 méthodes (A, B, C) ─────────────────────── */}
+                  <div className="space-y-2">
+                    <Label>Ton CV — 3 méthodes possibles</Label>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* Option A : CV sauvegardé (bibliothèque) */}
+                      <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                        <IconLibrary size={16} className="text-[#051937]" />
+                        <span className="text-xs font-semibold text-slate-600">
+                          A — CV sauvegardé :
+                        </span>
+                        <select
+                          aria-label="Sélectionner un CV sauvegardé"
+                          value={cvChoisi}
+                          onChange={(e) => void chargerCvBibliotheque(e.target.value)}
+                          disabled={cvChargement || cvs.length === 0}
+                          className="max-w-[210px] rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-[#051937] outline-none focus:border-[#051937]/40 disabled:opacity-60"
+                        >
+                          <option value="">
+                            {cvs.length === 0 ? "Aucun CV en bibliothèque" : "— Choisir un CV —"}
+                          </option>
+                          {cvs.map((cv) => (
+                            <option key={cv.id} value={cv.id}>
+                              {cv.name}
+                            </option>
+                          ))}
+                        </select>
+                        {cvChargement ? (
+                          <IconLoader2 size={14} className="animate-spin text-slate-400" />
+                        ) : null}
+                      </span>
+
+                      {/* Option B : import de fichier */}
+                      <label
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-[#051937]/40 hover:text-[#051937]"
+                        title="PDF, DOCX ou TXT — le texte est extrait instantanément"
+                      >
+                        {importEnCours ? (
+                          <IconLoader2 size={16} className="animate-spin text-[#051937]" />
+                        ) : (
+                          <IconUpload size={16} className="text-[#051937]" />
+                        )}
+                        B — Importer un fichier (PDF / DOCX / TXT)
+                        <input
+                          type="file"
+                          accept=".pdf,.docx,.txt,.md"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) void importerFichierCv(file);
+                            e.target.value = "";
+                          }}
+                        />
+                      </label>
+
+                      {/* Indicateur de source */}
+                      {sourceCv === "bibliotheque" ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+                          <IconCheck size={14} /> CV chargé depuis la bibliothèque
+                        </span>
+                      ) : sourceCv === "fichier" ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+                          <IconFileText size={14} /> Fichier importé : {fichierNom}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {/* Option C : texte libre (toujours modifiable) */}
                     <Textarea
                       id="cv"
                       rows={6}
                       value={form.cvText}
-                      onChange={(e) => setForm({ ...form, cvText: e.target.value })}
-                      placeholder="Colle ici le contenu de ton CV…"
+                      onChange={(e) => {
+                        setForm({ ...form, cvText: e.target.value });
+                        if (sourceCv !== "libre") setSourceCv("libre");
+                      }}
+                      placeholder="C — Texte libre : colle ou modifie ici le contenu de ton CV (rempli automatiquement par les options A et B)…"
                     />
+                    <p className="text-[11px] text-slate-400">
+                      {form.cvText.trim().length} caractères — le champ reste modifiable à tout
+                      moment, quelle que soit la méthode utilisée.
+                    </p>
                   </div>
                 </div>
 
@@ -1004,7 +1399,7 @@ export default function LettresPage() {
                   </Button>
                   <Button
                     onClick={() => void generer()}
-                    disabled={generation || (!form.jobOffer.trim() && !form.cvText.trim())}
+                    disabled={generation || (!form.jobOffer.trim() && form.cvText.trim().length < 40)}
                   >
                     {generation ? (
                       <IconLoader2 size={16} className="animate-spin" />
@@ -1053,7 +1448,27 @@ export default function LettresPage() {
                 className="text-base font-semibold"
               />
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  onClick={() => void editerEtSauvegarder()}
+                  disabled={etat === "sauvegarde"}
+                  className="bg-[#051937] text-white hover:bg-[#0b2a5b]"
+                >
+                  {etat === "sauvegarde" ? (
+                    <IconLoader2 size={16} className="animate-spin" />
+                  ) : (
+                    <IconDeviceFloppy size={16} />
+                  )}
+                  Éditer &amp; Sauvegarder
+                </Button>
+                <Button onClick={() => void telechargerPdfEditeur()} disabled={pdfEnCours}>
+                  {pdfEnCours ? (
+                    <IconLoader2 size={16} className="animate-spin" />
+                  ) : (
+                    <IconFileTypePdf size={16} />
+                  )}
+                  {pdfEnCours ? "Génération du PDF…" : "Télécharger Lettre_NexiRole.pdf"}
+                </Button>
                 <Button variant="outline" onClick={() => void copierEditeur()}>
                   {copie ? (
                     <IconCheck size={16} className="text-emerald-600" />
@@ -1062,9 +1477,21 @@ export default function LettresPage() {
                   )}
                   {copie ? "Copié" : "Copier"}
                 </Button>
-                <Button onClick={() => void imprimer()}>
-                  <IconPrinter size={16} /> Imprimer / PDF
-                </Button>
+                <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5">
+                  <span className="text-xs font-semibold text-slate-500">Ton :</span>
+                  <select
+                    aria-label="Ton de la lettre"
+                    value={lettre.tone}
+                    onChange={(e) => void changerTon(e.target.value)}
+                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-[#051937] outline-none focus:border-[#051937]/40"
+                  >
+                    {TONS.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </span>
                 <Button variant="outline" onClick={() => void regenerer()} disabled={generation}>
                   {generation ? (
                     <IconLoader2 size={16} className="animate-spin" />
@@ -1089,9 +1516,10 @@ export default function LettresPage() {
               </div>
 
               <p className="text-xs text-slate-500">
-                Astuce : l&apos;export PDF utilise la fenêtre d&apos;impression du navigateur —
-                choisis « Enregistrer au format PDF ». Le contenu est toujours sauvegardé en base
-                avant l&apos;export.
+                Astuce : « Télécharger » produit un vrai fichier PDF (Lettre_NexiRole.pdf) sans
+                passer par la fenêtre d&apos;impression. Change le ton puis clique « Régénérer »
+                pour retravailler la lettre. Le contenu est toujours sauvegardé en base avant
+                l&apos;export.
               </p>
 
               <Textarea
@@ -1146,7 +1574,7 @@ export default function LettresPage() {
                 {lettreLue.content}
               </pre>
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-slate-100 p-4">
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 p-4">
               <button
                 type="button"
                 onClick={() => void copierLettreLue()}
@@ -1157,10 +1585,31 @@ export default function LettresPage() {
               </button>
               <button
                 type="button"
-                onClick={() => setLettreLue(null)}
+                onClick={() => {
+                  setLettreLue(null);
+                  void telechargerPdf(lettreLue);
+                }}
+                disabled={pdfEnCours}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-[#051937] transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {pdfEnCours ? (
+                  <IconLoader2 size={14} className="animate-spin" />
+                ) : (
+                  <IconFileTypePdf size={14} />
+                )}
+                Télécharger PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const id = lettreLue.id;
+                  setLettreLue(null);
+                  void ouvrirEdition(id);
+                }}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-[#051937] px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#0b2a5b]"
               >
-                Fermer
+                <IconEdit size={14} />
+                Éditer &amp; Sauvegarder
               </button>
             </div>
           </div>

@@ -15,7 +15,8 @@ import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 // POST   /api/history                    → enregistre un dossier → 201 { item }
 //         Corps accepté : { jobTitle|titre, companyName|entreprise,
 //         jobUrl|url, cvJson?, coverLetter?, interviewKitJson?,
-//         candidateJson?, initialScore?, optimizedScore?, templateId? }
+//         candidateJson?, initialScore?, optimizedScore?, templateId?,
+//         withPhoto? }
 // PATCH  /api/history                    → { id, ...champs } (édition)
 // DELETE /api/history?id=...&type=applications|resumes → { ok: true }
 //
@@ -170,6 +171,7 @@ export async function POST(request: NextRequest) {
         jobUrl:
           pickString(body.jobUrl, body.url, body.lien, body.link).slice(0, 500) || null,
         templateId: pickString(body.templateId) || "moderne",
+        withPhoto: body.withPhoto === true,
         cvJson: pickJson(body.cvJson) ?? {},
         coverLetter: pickTexte(body.coverLetter) ?? "",
         interviewKitJson: pickJson(body.interviewKitJson) ?? Prisma.JsonNull,

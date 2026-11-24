@@ -1,11 +1,34 @@
 "use client";
 
+/**
+ * NexiRole — PANNEAU « CV & Lettre par offre » (dossiers par offre).
+ *
+ * Flux conservé : offre importée depuis l'Agent (localStorage + événement),
+ * upload CV via /api/parse-cv, génération POST /api/dossier.
+ *
+ * Résultat REFONDU :
+ *  - interface à 4 onglets <DossierOnglets /> (Synthèse & Score ATS,
+ *    CV adapté, Lettre éditable & sauvegardable, Kit d'entretien) ;
+ *  - 3 exports PDF RÉELS (@react-pdf/renderer) : CV, Lettre, Kit —
+ *    fin des fichiers .md et de window.print() ;
+ *  - boutons de migration 1 clic : Créateur de CV
+ *    (/dashboard/cv-builder/createur?importDossierId=...), Lettres de
+ *    motivation (/dashboard/lettres?fromDossierId=...), Suivi des
+ *    candidatures (POST /api/tracker).
+ *
+ * Sauvegarde : la route POST /api/dossier enregistre le dossier complet en
+ * base (GeneratedApplication) ; si l'id manque dans la réponse, repli
+ * best-effort sur POST /api/history avec le même payload structuré.
+ * Icônes : exclusivement @tabler/icons-react. Charte : #051937 + #FFC107.
+ */
+
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import {
   IconAlertTriangle,
+  IconArrowRight,
   IconCheck,
   IconCopy,
-  IconDownload,
   IconFileText,
   IconLoader2,
   IconSparkles,
@@ -13,6 +36,19 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import type { DossierResponse } from "@/lib/types";
+import {
+  BoutonPdf,
+  DossierOnglets,
+  aCv,
+  aKit,
+  aLettre,
+  exportPdfSecurise,
+  normaliserDossierComplet,
+  telechargerCvPdf,
+  telechargerKitPdf,
+  telechargerLettrePdf,
+  type DonneesDossier,
+} from "@/components/dashboard/dossier-preview";
 
 const STORAGE_KEY = "nexirole:dossier-offer";
 const EVENT_NAME = "nexirole:open-dossier";
@@ -35,56 +71,20 @@ function readStoredOffer(): ImportedOffer | null {
   }
 }
 
-type ResultCardProps = {
-  title: string;
-  filename: string;
-  content: string;
-  copied: boolean;
-  onCopy: () => void;
-  onDownload: () => void;
+/** Réponse enrichie de POST /api/dossier (dossier structuré complet). */
+type DossierReponse = DossierResponse & {
+  dossier?: {
+    jobTitle: string;
+    companyName: string;
+    jobUrl: string | null;
+    cvJson: unknown;
+    coverLetter: string;
+    interviewKitJson: unknown;
+    candidateJson: unknown;
+    initialScore: number | null;
+    optimizedScore: number | null;
+  };
 };
-
-function ResultCard({
-  title,
-  filename,
-  content,
-  copied,
-  onCopy,
-  onDownload,
-}: ResultCardProps) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="font-heading text-base font-bold text-navy">{title}</h3>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onCopy}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
-          >
-            {copied ? (
-              <IconCheck className="h-4 w-4 text-emerald-600" />
-            ) : (
-              <IconCopy className="h-4 w-4" />
-            )}
-            {copied ? "Copié" : "Copier"}
-          </button>
-          <button
-            type="button"
-            onClick={onDownload}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
-          >
-            <IconDownload className="h-4 w-4" />
-            {filename}
-          </button>
-        </div>
-      </div>
-      <pre className="nice-scrollbar mt-4 max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-xs leading-relaxed text-slate-700">
-        {content}
-      </pre>
-    </div>
-  );
-}
 
 export function DossierPanel() {
   const [offerUrl, setOfferUrl] = useState("");
@@ -98,8 +98,14 @@ export function DossierPanel() {
   const [parsing, setParsing] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [result, setResult] = useState<DossierResponse | null>(null);
+  const [result, setResult] = useState<DossierReponse | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+
+  /* Résultat refondu : données normalisées + id de sauvegarde en base. */
+  const [donnees, setDonnees] = useState<DonneesDossier | null>(null);
+  const [dossierId, setDossierId] = useState<string | null>(null);
+  const [pdfEnCours, setPdfEnCours] = useState<string | null>(null);
+  const [envoiSuivi, setEnvoiSuivi] = useState(false);
 
   const applyOffer = (offer: ImportedOffer) => {
     if (offer.offerTitle) setOfferTitle(offer.offerTitle);
@@ -178,6 +184,8 @@ export function DossierPanel() {
     setLoading(true);
     setError("");
     setResult(null);
+    setDonnees(null);
+    setDossierId(null);
     try {
       const res = await fetch("/api/dossier", {
         method: "POST",
@@ -190,7 +198,7 @@ export function DossierPanel() {
         }),
       });
       const data = (await res.json().catch(() => null)) as
-        | (DossierResponse & { error?: string })
+        | (DossierReponse & { error?: string })
         | null;
       if (!res.ok || !data || data.error) {
         setError(
@@ -198,12 +206,55 @@ export function DossierPanel() {
         );
         return;
       }
-      // Prévient la page Dossier qu'un dossier vient d'être sauvegardé
-      // en base (savedId) : la liste d'historique se rafraîchit aussitôt.
-      if (data.savedId) {
+
+      /* Sauvegarde en base : normalement faite par POST /api/dossier.
+         Repli tolérant : POST /api/history avec le même payload structuré. */
+      let id = data.savedId ?? null;
+      if (!id && data.dossier) {
+        try {
+          const repli = await fetch("/api/history", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data.dossier),
+          });
+          const repliJson = (await repli.json().catch(() => null)) as {
+            item?: { id?: string };
+          } | null;
+          if (repli.ok && repliJson?.item?.id) id = repliJson.item.id;
+        } catch {
+          /* best-effort : les boutons de migration resteront masqués */
+        }
+      }
+      setDossierId(id);
+
+      if (id) {
+        // Prévient la page Dossier qu'un dossier vient d'être sauvegardé
+        // en base : la liste d'historique se rafraîchit aussitôt.
         window.dispatchEvent(new CustomEvent("nexirole:dossier-sauvegarde"));
       }
+
+      /* Données pour l'affichage à onglets. */
+      if (data.dossier) {
+        const brut: Record<string, unknown> = {
+          jobTitle: data.dossier.jobTitle,
+          companyName: data.dossier.companyName,
+          jobUrl: data.dossier.jobUrl,
+          cvJson: data.dossier.cvJson,
+          coverLetter: data.dossier.coverLetter,
+          interviewKitJson: data.dossier.interviewKitJson,
+          candidateJson: data.dossier.candidateJson,
+          initialScore: data.dossier.initialScore,
+          optimizedScore: data.dossier.optimizedScore,
+        };
+        setDonnees(normaliserDossierComplet(brut));
+      }
+
       setResult(data);
+      toast.success(
+        id
+          ? "Dossier généré et sauvegardé automatiquement dans ton historique."
+          : "Dossier généré."
+      );
     } catch {
       setError("Réseau indisponible : réessaie dans un instant.");
     } finally {
@@ -221,15 +272,80 @@ export function DossierPanel() {
     }
   };
 
-  const downloadText = (filename: string, content: string) => {
-    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  /* ── Exports PDF réels (@react-pdf/renderer) ───────────────────────── */
+
+  const exportCv = async () => {
+    if (!donnees) return;
+    setPdfEnCours("cv");
+    await exportPdfSecurise(() => telechargerCvPdf(donnees, "modern-accent"));
+    setPdfEnCours(null);
   };
+
+  const exportLettre = async () => {
+    if (!donnees || !aLettre(donnees)) return;
+    setPdfEnCours("lettre");
+    await exportPdfSecurise(() => telechargerLettrePdf(donnees));
+    setPdfEnCours(null);
+  };
+
+  const exportKit = async () => {
+    if (!donnees || !aKit(donnees)) return;
+    setPdfEnCours("kit");
+    await exportPdfSecurise(() => telechargerKitPdf(donnees));
+    setPdfEnCours(null);
+  };
+
+  /* ── Migration vers les éditeurs & suivi ──────────────────────────── */
+
+  function ouvrirDansCreateur() {
+    if (!dossierId) return;
+    window.location.assign(`/dashboard/cv-builder/createur?importDossierId=${dossierId}`);
+  }
+
+  function ouvrirDansLettres() {
+    if (!dossierId) return;
+    window.location.assign(`/dashboard/lettres?fromDossierId=${dossierId}`);
+  }
+
+  async function envoyerVersSuivi() {
+    if (!result) return;
+    setEnvoiSuivi(true);
+    try {
+      const res = await fetch("/api/tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobTitle: result.dossier?.jobTitle || offerTitle.trim(),
+          companyName: result.dossier?.companyName || "",
+          jobUrl: result.dossier?.jobUrl || offerUrl.trim(),
+          notes: "Dossier créé avec NexiRole (CV adapté + lettre + kit entretien).",
+        }),
+      });
+      if (!res.ok) {
+        toast.error(await lireErreur(res, "Ajout au suivi impossible."));
+        return;
+      }
+      toast.success("Candidature ajoutée à ton Suivi de candidatures.");
+    } catch {
+      toast.error("Connexion au serveur impossible — ajout non effectué.");
+    } finally {
+      setEnvoiSuivi(false);
+    }
+  }
+
+  /* Édition de la lettre dans l'onglet Lettre → PATCH /api/history. */
+  async function enregistrerLettre(texte: string) {
+    if (!dossierId) throw new Error("dossier non sauvegardé");
+    const res = await fetch("/api/history", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: dossierId, coverLetter: texte }),
+    });
+    if (!res.ok) throw new Error("échec PATCH");
+    setDonnees((precedent) =>
+      precedent ? { ...precedent, lettre: { ...precedent.lettre, texteBrut: texte, paragraphes: [] } } : precedent
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -358,10 +474,10 @@ export function DossierPanel() {
           <div className="mt-4">
             <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-200 px-4 py-6 text-sm font-semibold text-slate-500 transition hover:border-navy hover:text-navy">
               <IconUpload className="h-5 w-5" />
-              {parsing ? "Lecture du fichier..." : "Clique pour choisir ton CV (PDF)"}
+              {parsing ? "Lecture du fichier..." : "Clique pour choisir ton CV (PDF, DOCX, TXT)"}
               <input
                 type="file"
-                accept=".pdf,.txt,.md"
+                accept=".pdf,.txt,.md,.docx"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -435,8 +551,8 @@ export function DossierPanel() {
             <IconSparkles className="h-5 w-5 text-gold" />
           )}
           {loading
-            ? "Génération en cours (CV, lettre, score)..."
-            : "Générer CV et lettre"}
+            ? "Génération en cours (CV, lettre, kit, score)..."
+            : "Générer le dossier complet"}
         </button>
         {!canGenerate && !loading && missing.length > 0 && (
           <p className="mt-3 text-xs text-slate-400">
@@ -444,13 +560,13 @@ export function DossierPanel() {
           </p>
         )}
         <p className="mt-2 text-[11px] text-slate-400">
-          Compte 20 à 60 secondes : le CV, la lettre et le score de compatibilité sont
-          produits par l'IA.
+          Compte 20 à 60 secondes : le CV adapté, la lettre, le kit d&apos;entretien et les
+          scores ATS sont produits par l&apos;IA puis sauvegardés automatiquement.
         </p>
       </div>
 
-      {/* Résultats */}
-      {result && (
+      {/* Résultats — interface à 4 onglets + exports PDF réels + migration */}
+      {result && donnees ? (
         <div className="space-y-4">
           {result.warnings?.length ? (
             <div className="space-y-1 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
@@ -466,7 +582,86 @@ export function DossierPanel() {
             </div>
           ) : null}
 
-          {typeof result.score === "number" && (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            <p className="flex items-start gap-2">
+              <IconCheck className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                {dossierId
+                  ? "Dossier complet sauvegardé en base — retrouve-le dans ton historique de dossiers."
+                  : "Dossier généré — sauvegarde en base momentanément indisponible."}
+              </span>
+            </p>
+          </div>
+
+          {/* 3 exports PDF réels */}
+          <div className="flex flex-wrap gap-2">
+            <BoutonPdf
+              libelle="Télécharger le CV (PDF)"
+              onClick={() => void exportCv()}
+              enCours={pdfEnCours === "cv"}
+              disabled={!aCv(donnees)}
+            />
+            <BoutonPdf
+              libelle="Télécharger la Lettre (PDF)"
+              onClick={() => void exportLettre()}
+              enCours={pdfEnCours === "lettre"}
+              disabled={!aLettre(donnees)}
+            />
+            <BoutonPdf
+              libelle="Télécharger le Kit Entretien (PDF)"
+              onClick={() => void exportKit()}
+              enCours={pdfEnCours === "kit"}
+              disabled={!aKit(donnees)}
+            />
+          </div>
+
+          {/* 4 onglets : Synthèse / CV / Lettre / Kit */}
+          <DossierOnglets donnees={donnees} onEnregistrerLettre={dossierId ? enregistrerLettre : undefined} />
+
+          {/* Migration vers les éditeurs & suivi */}
+          {dossierId ? (
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <h3 className="text-sm font-bold uppercase tracking-wide text-slate-400">
+                Améliorer ce dossier dans les autres outils
+              </h3>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={ouvrirDansCreateur}
+                  className="inline-flex items-center gap-2 rounded-xl bg-[#051937] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#0b2a5b]"
+                >
+                  <IconArrowRight size={16} />
+                  Ouvrir &amp; Modifier ce CV dans le Créateur de CV
+                </button>
+                <button
+                  type="button"
+                  onClick={ouvrirDansLettres}
+                  className="inline-flex items-center gap-2 rounded-xl border border-[#051937]/20 bg-white px-4 py-2.5 text-sm font-semibold text-[#051937] transition hover:bg-[#051937]/5"
+                >
+                  <IconArrowRight size={16} />
+                  Ouvrir &amp; Modifier dans Lettres de motivation
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void envoyerVersSuivi()}
+                  disabled={envoiSuivi}
+                  className="inline-flex items-center gap-2 rounded-xl bg-[#FFC107] px-4 py-2.5 text-sm font-bold text-[#051937] shadow-sm transition hover:bg-[#e6ae00] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {envoiSuivi ? (
+                    <IconLoader2 size={16} className="animate-spin" />
+                  ) : (
+                    <IconArrowRight size={16} />
+                  )}
+                  Envoyer vers Suivi de candidatures
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : result && !donnees ? (
+        /* Repli : dossier ancien format sans structure exploitable */
+        <div className="space-y-4">
+          {typeof result.score === "number" ? (
             <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5">
               <div className="flex items-center gap-2 text-amber-800">
                 <IconSparkles className="h-5 w-5" />
@@ -474,37 +669,51 @@ export function DossierPanel() {
                   {result.score}% de compatibilité avec cette offre
                 </p>
               </div>
-              {result.conseils?.length ? (
-                <ul className="mt-3 space-y-2 text-sm text-amber-900">
-                  {result.conseils.map((conseil, i) => (
-                    <li key={i} className="flex gap-2">
-                      <span className="font-bold">•</span>
-                      <span>{conseil}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
             </div>
-          )}
-
-          <ResultCard
-            title="CV adapté à l'offre"
-            filename="CV_NexiRole.md"
-            content={result.cv}
-            copied={copied === "cv"}
-            onCopy={() => void copyText("cv", result.cv)}
-            onDownload={() => downloadText("CV_NexiRole.md", result.cv)}
-          />
-          <ResultCard
-            title="Lettre de motivation"
-            filename="Lettre_NexiRole.md"
-            content={result.lettre}
-            copied={copied === "lettre"}
-            onCopy={() => void copyText("lettre", result.lettre)}
-            onDownload={() => downloadText("Lettre_NexiRole.md", result.lettre)}
-          />
+          ) : null}
+          {[
+            { titre: "CV adapté à l'offre", contenu: result.cv, id: "cv" },
+            { titre: "Lettre de motivation", contenu: result.lettre, id: "lettre" },
+          ].map((bloc) => (
+            <div key={bloc.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h3 className="font-heading text-base font-bold text-navy">{bloc.titre}</h3>
+                <button
+                  type="button"
+                  onClick={() => void copyText(bloc.id, bloc.contenu)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                >
+                  {copied === bloc.id ? (
+                    <IconCheck className="h-4 w-4 text-emerald-600" />
+                  ) : (
+                    <IconCopy className="h-4 w-4" />
+                  )}
+                  {copied === bloc.id ? "Copié" : "Copier"}
+                </button>
+              </div>
+              <pre className="nice-scrollbar mt-4 max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-xs leading-relaxed text-slate-700">
+                {bloc.contenu}
+              </pre>
+            </div>
+          ))}
         </div>
-      )}
+      ) : null}
     </div>
   );
+}
+
+/* Lecture d'erreur réseau tolérante (JSON ou HTML). */
+async function lireErreur(res: Response, fallback: string): Promise<string> {
+  let brut = "";
+  try {
+    brut = await res.text();
+  } catch {
+    return fallback;
+  }
+  try {
+    const data = JSON.parse(brut) as { error?: string };
+    return data.error || fallback;
+  } catch {
+    return fallback;
+  }
 }

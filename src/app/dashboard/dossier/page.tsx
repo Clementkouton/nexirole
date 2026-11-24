@@ -10,24 +10,20 @@
  *     3 cartes statistiques (dossiers sauvegardés, score ATS moyen,
  *     dernière entreprise ciblée) + liste complète des dossiers
  *     enregistrés (GET /api/history?type=applications) avec barre
- *     d'actions : Voir / Éditer / Télécharger PDF / Partager / Supprimer.
+ *     d'actions : Voir / Éditer / PDF / Partager / Supprimer.
  *
  *   Vue B — Création : conserve TOUT le flux existant (carte « Offre
- *     chargée » depuis localStorage, évanouissement si aucune offre,
- *     <DossierPanel /> avec upload CV /api/parse-cv, génération POST
- *     /api/dossier, aperçu, modèles, PDF).
+ *     chargée » depuis localStorage — mécanisme de l'Agent, puis
+ *     <DossierPanel /> : upload CV /api/parse-cv, génération POST
+ *     /api/dossier, résultat à 4 onglets, exports PDF réels, migration).
  *
- * SYNCHRONISATION : après une génération réussie, le panneau émet
- * l'événement « nexirole:dossier-sauvegarde » ; la page relance son GET
- * pour rafraîchir la liste.
+ * Modale « Voir » refondue : interface à 4 onglets (Synthèse & Score ATS,
+ * CV adapté, Lettre éditable & sauvegardable, Kit d'entretien) + 3 exports
+ * PDF RÉELS (@react-pdf/renderer, via src/components/pdf/CvPdfDocument.tsx
+ * pour le CV) + boutons de migration 1 clic vers le Créateur de CV,
+ * les Lettres de motivation et le Suivi de candidatures.
  *
- * Aperçu complet (modale plein écran) : le composant DossierPreview est
- * alimenté par les champs cvJson / coverLetter / interviewKitJson /
- * candidateJson normalisés ; si le dossier ne contient pas de CV
- * structuré, rendu inline de secours (lettre, kit, scores).
- * Export PDF : même mécanisme que la page lettres (window.print() sur une
- * « zone-impression » dédiée). Icônes : exclusivement @tabler/icons-react.
- * Charte : navy #051937 + or #FFC107.
+ * Icônes : exclusivement @tabler/icons-react. Charte : #051937 + #FFC107.
  */
 
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
@@ -36,6 +32,7 @@ import { toast } from "sonner";
 import {
   IconAlertTriangle,
   IconArrowLeft,
+  IconArrowRight,
   IconBriefcase,
   IconCalendarEvent,
   IconDeviceFloppy,
@@ -46,7 +43,6 @@ import {
   IconFolder,
   IconLoader2,
   IconPlus,
-  IconPrinter,
   IconRobot,
   IconShare,
   IconTargetArrow,
@@ -54,13 +50,20 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import * as PanelModule from "@/components/dashboard/dossier-panel";
-import { DossierPreview } from "@/components/dashboard/dossier-preview";
-import { isTemplateId, type TemplateId } from "@/lib/cv-templates";
 import {
-  offerSignature,
-  readDossierOffer,
-  saveDossierToHistory,
-} from "@/lib/dashboard-client";
+  BoutonPdf,
+  DossierOnglets,
+  aCv,
+  aKit,
+  aLettre,
+  exportPdfSecurise,
+  normaliserDossierComplet,
+  telechargerCvPdf,
+  telechargerKitPdf,
+  telechargerLettrePdf,
+  type DonneesDossier,
+} from "@/components/dashboard/dossier-preview";
+import { isTemplateId, type TemplateId } from "@/lib/cv-templates";
 
 /* ── Types ───────────────────────────────────────────────────────────── */
 
@@ -81,54 +84,6 @@ type DossierItem = {
   createdAt: string;
 };
 
-/**
- * Clone structurel des props attendues par <DossierPreview /> (le type
- * DossierData n'étant pas exporté). Construit depuis cvJson + coverLetter
- * + interviewKitJson + candidateJson.
- */
-type DonneesApercu = {
-  identite: {
-    nom_complet: string;
-    email?: string;
-    telephone?: string;
-    ville?: string;
-    linkedin?: string;
-  };
-  titre: string;
-  resume?: string;
-  experiences: Array<{
-    poste: string;
-    periode: string;
-    entreprise: string;
-    lieu: string;
-    missions: string[];
-  }>;
-  formations: Array<{ diplome: string; periode: string }>;
-  competences: string[];
-  langues: Array<{ nom: string; niveau: string }>;
-  lettre_motivation: {
-    paragraphes: string[];
-    objet?: string;
-    salutation?: string;
-    politesse?: string;
-  };
-  offre?: { entreprise?: string; titre: string; lieu?: string };
-  kit_entretien?: {
-    questions: Array<{ question: string; reponse_suggeree: string; astuce: string }>;
-    conseils: string[];
-    score?: number;
-    message_linkedin: string;
-    message_email: string;
-  };
-};
-
-type LettreExtraite = {
-  objet: string;
-  salutation: string;
-  paragraphes: string[];
-  politesse: string;
-};
-
 /* ── Panneau existant (import défensif, inchangé) ────────────────────── */
 
 const panelExports = PanelModule as unknown as Record<string, unknown>;
@@ -136,25 +91,7 @@ const DossierPanel = (panelExports.DossierPanel ?? panelExports.default) as Comp
 
 const EVENT_SAUVEGARDE = "nexirole:dossier-sauvegarde";
 
-/* Impression / export PDF : même mécanisme que la page lettres. */
-const CSS_IMPRESSION = `
-@media print {
-  body * { visibility: hidden !important; }
-  .zone-impression, .zone-impression * { visibility: visible !important; }
-  .zone-impression {
-    display: block !important;
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    padding: 32px;
-    background: #ffffff;
-    color: #000000;
-  }
-}
-`;
-
-/* ── Aides réseau & normalisation (copie du modèle négociation) ──────── */
+/* ── Aides réseau & normalisation ────────────────────────────────────── */
 
 async function lireErreur(res: Response, fallback: string): Promise<string> {
   let brut = "";
@@ -170,24 +107,6 @@ async function lireErreur(res: Response, fallback: string): Promise<string> {
   } catch {
     return `${fallback} (réponse non JSON — regarde le terminal « npm run dev »)`;
   }
-}
-
-function extraireObjet(valeur: unknown): Record<string, unknown> | null {
-  if (valeur && typeof valeur === "object" && !Array.isArray(valeur)) {
-    return valeur as Record<string, unknown>;
-  }
-  return null;
-}
-
-function extraireChaine(...valeurs: unknown[]): string {
-  for (const valeur of valeurs) {
-    if (typeof valeur === "string" && valeur.trim() !== "") return valeur.trim();
-  }
-  return "";
-}
-
-function extraireTableau(valeur: unknown): unknown[] {
-  return Array.isArray(valeur) ? valeur : [];
 }
 
 function normaliserDossier(brut: Record<string, unknown>): DossierItem | null {
@@ -209,6 +128,21 @@ function normaliserDossier(brut: Record<string, unknown>): DossierItem | null {
   };
 }
 
+/** Données complètes de la modale, calculées depuis un item de la liste. */
+function donneesDuDossier(item: DossierItem): DonneesDossier | null {
+  return normaliserDossierComplet({
+    jobTitle: item.jobTitle,
+    companyName: item.companyName,
+    jobUrl: item.jobUrl,
+    cvJson: item.cvJson,
+    coverLetter: item.coverLetter,
+    interviewKitJson: item.interviewKitJson,
+    candidateJson: item.candidateJson,
+    initialScore: item.initialScore,
+    optimizedScore: item.optimizedScore,
+  });
+}
+
 /** Score affiché : score optimisé s'il existe, sinon score initial. */
 function scoreDossier(item: DossierItem): number | null {
   if (typeof item.optimizedScore === "number") return item.optimizedScore;
@@ -227,143 +161,34 @@ function formatDate(iso: string): string {
   });
 }
 
-/** Lettre : JSON.parse si possible (sujet / salutation / paragraphes), sinon texte brut. */
-function extraireLettre(coverLetter: string): LettreExtraite {
-  const vide: LettreExtraite = { objet: "", salutation: "", paragraphes: [], politesse: "" };
-  const texte = coverLetter.trim();
-  if (!texte) return vide;
+/* ── Aides offre importée depuis l'Agent (mécanisme localStorage existant) ── */
+
+const CLE_OFFRE = "nexirole:dossier-offer";
+
+function lireOffre(): Record<string, unknown> | null {
   try {
-    const parse: unknown = JSON.parse(texte);
-    const objet = extraireObjet(parse);
-    if (!objet) return vide;
-    const paragraphes = extraireTableau(objet.paragraphs ?? objet.paragraphes).filter(
-      (paragraphe): paragraphe is string =>
-        typeof paragraphe === "string" && paragraphe.trim() !== ""
-    );
-    return {
-      objet: extraireChaine(objet.subject, objet.objet),
-      salutation: extraireChaine(objet.greeting, objet.salutation),
-      paragraphes,
-      politesse: extraireChaine(objet.closing, objet.politesse),
-    };
+    const brut = window.localStorage.getItem(CLE_OFFRE);
+    if (!brut) return null;
+    const parsed: unknown = JSON.parse(brut);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
-    return { objet: "", salutation: "", paragraphes: [texte], politesse: "" };
+    return null;
   }
 }
 
-/**
- * Reconstruit les données attendues par <DossierPreview /> depuis les
- * champs stockés. Retourne null si le CV n'est pas structuré (entrées
- * anciennes de l'historique) → rendu inline de secours.
- */
-function construireDonneesApercu(item: DossierItem): DonneesApercu | null {
-  const cv = extraireObjet(item.cvJson);
-  if (!cv) return null;
-
-  const experiences = extraireTableau(cv.experiences).map((brut) => {
-    const e = extraireObjet(brut) ?? {};
-    return {
-      poste: extraireChaine(e.role, e.poste),
-      periode: extraireChaine(e.period, e.periode),
-      entreprise: extraireChaine(e.company, e.entreprise),
-      lieu: extraireChaine(e.location, e.lieu),
-      missions: extraireTableau(e.achievements ?? e.missions).filter(
-        (mission): mission is string => typeof mission === "string"
-      ),
-    };
-  });
-
-  const formations = extraireTableau(cv.education ?? cv.formations).map((brut) => {
-    const f = extraireObjet(brut) ?? {};
-    const diplome = extraireChaine(f.degree, f.diplome);
-    const ecole = extraireChaine(f.school, f.ecole);
-    return {
-      diplome: ecole ? `${diplome} — ${ecole}` : diplome,
-      periode: extraireChaine(f.period, f.periode),
-    };
-  });
-
-  const competences = extraireTableau(cv.skills ?? cv.competences).filter(
-    (competence): competence is string => typeof competence === "string"
-  );
-
-  const langues = extraireTableau(cv.languages ?? cv.langues).map((brut) => {
-    const l = extraireObjet(brut) ?? {};
-    return { nom: extraireChaine(l.name, l.nom), niveau: extraireChaine(l.level, l.niveau) };
-  });
-
-  const resume = extraireChaine(cv.summary, cv.resume);
-  const aDuContenu =
-    experiences.length > 0 ||
-    formations.length > 0 ||
-    competences.length > 0 ||
-    langues.length > 0 ||
-    resume !== "";
-  if (!aDuContenu) return null;
-
-  const candidat = extraireObjet(item.candidateJson) ?? {};
-  const lettre = extraireLettre(item.coverLetter);
-  const kit = extraireObjet(item.interviewKitJson);
-  const score = scoreDossier(item);
-
-  const questions = kit
-    ? extraireTableau(kit.questions).map((brut) => {
-        const q = extraireObjet(brut) ?? {};
-        return {
-          question: extraireChaine(q.question),
-          reponse_suggeree: extraireChaine(q.suggestedAnswer, q.reponse_suggeree),
-          astuce: extraireChaine(q.tip, q.astuce),
-        };
-      })
-    : [];
-
-  const messageLinkedin = kit
-    ? extraireChaine(kit.outreachLinkedin, kit.message_linkedin)
-    : "";
-  const messageEmail = kit ? extraireChaine(kit.outreachEmail, kit.message_email) : "";
-
-  const entreprise = item.companyName && item.companyName !== "Non précisée" ? item.companyName : undefined;
-
-  return {
-    identite: {
-      nom_complet:
-        extraireChaine(candidat.fullName, candidat.nom_complet) || "Candidat NexiRole",
-      email: extraireChaine(candidat.email) || undefined,
-      telephone: extraireChaine(candidat.phone, candidat.telephone) || undefined,
-      ville: extraireChaine(candidat.location, candidat.ville) || undefined,
-      linkedin: extraireChaine(candidat.linkedin) || undefined,
-    },
-    titre: extraireChaine(cv.title, cv.titre) || item.jobTitle,
-    resume: resume || undefined,
-    experiences,
-    formations,
-    competences,
-    langues,
-    lettre_motivation: {
-      paragraphes: lettre.paragraphes,
-      objet: lettre.objet || undefined,
-      salutation: lettre.salutation || undefined,
-      politesse: lettre.politesse || undefined,
-    },
-    offre: { entreprise, titre: item.jobTitle || "Offre ciblée" },
-    kit_entretien:
-      kit && (questions.length > 0 || messageLinkedin !== "" || messageEmail !== "")
-        ? {
-            questions,
-            conseils: [],
-            score: score ?? undefined,
-            message_linkedin: messageLinkedin,
-            message_email: messageEmail,
-          }
-        : undefined,
-  };
+function signatureOffre(offer: Record<string, unknown> | null): string {
+  if (!offer) return "";
+  const titre = typeof offer.offerTitle === "string" ? offer.offerTitle : "";
+  const description = typeof offer.offerDescription === "string" ? offer.offerDescription : "";
+  const url = typeof offer.offerUrl === "string" ? offer.offerUrl : "";
+  return `${titre}::${url}::${description.slice(0, 200)}`;
 }
-
-/* ── Aides offre importée (conservées de la page actuelle) ───────────── */
 
 function titreOffre(offer: Record<string, unknown> | null): string {
   if (!offer) return "";
-  const brut = offer.titre ?? offer.title ?? offer.poste;
+  const brut = offer.offerTitle ?? offer.titre ?? offer.title ?? offer.poste;
   return typeof brut === "string" ? brut : "";
 }
 
@@ -371,224 +196,6 @@ function entrepriseOffre(offer: Record<string, unknown> | null): string {
   if (!offer) return "";
   const brut = offer.entreprise ?? offer.company ?? offer.societe;
   return typeof brut === "string" ? brut : "";
-}
-
-/* ── Aperçu inline de secours (dossier sans CV structuré) ────────────── */
-
-function ApercuBrut({ item }: { item: DossierItem }) {
-  const cvBrut =
-    item.cvJson === null || item.cvJson === undefined
-      ? ""
-      : typeof item.cvJson === "string"
-        ? item.cvJson
-        : JSON.stringify(item.cvJson, null, 2);
-  const cvInteressant = cvBrut !== "" && cvBrut !== "{}";
-  const lettre = extraireLettre(item.coverLetter);
-  const kit = extraireObjet(item.interviewKitJson);
-  const questions = kit ? extraireTableau(kit.questions) : [];
-  const score = scoreDossier(item);
-
-  return (
-    <div className="space-y-4">
-      {cvInteressant ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h3 className="font-semibold text-[#051937]">CV enregistré (format brut)</h3>
-          <pre className="nice-scrollbar mt-3 max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-xs leading-relaxed text-slate-700">
-            {cvBrut}
-          </pre>
-        </div>
-      ) : null}
-
-      {lettre.paragraphes.length > 0 ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h3 className="font-semibold text-[#051937]">Lettre de motivation</h3>
-          {lettre.objet ? (
-            <p className="mt-2 text-sm font-bold text-[#051937]">Objet : {lettre.objet}</p>
-          ) : null}
-          {lettre.salutation ? (
-            <p className="mt-2 text-sm text-slate-700">{lettre.salutation}</p>
-          ) : null}
-          <div className="mt-2 space-y-2">
-            {lettre.paragraphes.map((paragraphe, i) => (
-              <p key={i} className="text-sm leading-relaxed text-slate-700">
-                {paragraphe}
-              </p>
-            ))}
-          </div>
-          {lettre.politesse ? (
-            <p className="mt-3 text-sm text-slate-700">{lettre.politesse}</p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {questions.length > 0 ? (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h3 className="font-semibold text-[#051937]">Kit d&apos;entretien</h3>
-          <div className="mt-3 space-y-3">
-            {questions.map((brut, i) => {
-              const q = extraireObjet(brut) ?? {};
-              return (
-                <div key={i} className="rounded-xl border border-slate-200 p-3">
-                  <p className="text-sm font-bold text-[#051937]">
-                    Q{i + 1}. {extraireChaine(q.question) || "Question"}
-                  </p>
-                  <p className="mt-1 text-sm leading-relaxed text-slate-700">
-                    {extraireChaine(q.suggestedAnswer, q.reponse_suggeree)}
-                  </p>
-                  <p className="mt-1 text-xs italic text-slate-500">
-                    Astuce : {extraireChaine(q.tip, q.astuce)}
-                  </p>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
-
-      {score !== null ? (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
-          Score de compatibilité : {score}%
-        </div>
-      ) : null}
-
-      {!cvInteressant && lettre.paragraphes.length === 0 && questions.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-8 text-center text-sm text-slate-500">
-          Ce dossier ne contient pas de documents exploitables (entrée ancienne de
-          l&apos;historique).
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/* ── Zone d'impression : visible uniquement à l'impression / export PDF ─ */
-
-function ZoneImpression({ item }: { item: DossierItem }) {
-  const donnees = construireDonneesApercu(item);
-  const lettre = extraireLettre(item.coverLetter);
-  const kit = extraireObjet(item.interviewKitJson);
-  const candidat = extraireObjet(item.candidateJson) ?? {};
-  const nom = extraireChaine(candidat.fullName, candidat.nom_complet) || "Candidat";
-  const questions = kit
-    ? extraireTableau(kit.questions).map((brut) => {
-        const q = extraireObjet(brut) ?? {};
-        return {
-          question: extraireChaine(q.question),
-          reponse: extraireChaine(q.suggestedAnswer, q.reponse_suggeree),
-          astuce: extraireChaine(q.tip, q.astuce),
-        };
-      })
-    : [];
-  const scoreInitial = item.initialScore === null ? "non calculé" : `${item.initialScore}%`;
-  const scoreOptimise = item.optimizedScore === null ? "non calculé" : `${item.optimizedScore}%`;
-
-  return (
-    <div className="zone-impression hidden">
-      <p className="font-serif text-[14pt] font-bold">{nom}</p>
-      <p className="font-serif text-[11pt]">
-        Dossier : {item.jobTitle} — {item.companyName || "Entreprise non précisée"}
-      </p>
-      {item.jobUrl ? <p className="font-serif text-[9pt]">{item.jobUrl}</p> : null}
-
-      {donnees && donnees.resume ? (
-        <>
-          <p className="mt-3 font-serif text-[11pt] font-bold">Profil</p>
-          <p className="font-serif text-[10pt] leading-relaxed">{donnees.resume}</p>
-        </>
-      ) : null}
-
-      {donnees && donnees.experiences.length > 0 ? (
-        <>
-          <p className="mt-3 font-serif text-[11pt] font-bold">Expérience professionnelle</p>
-          {donnees.experiences.map((exp, i) => (
-            <div key={i} className="mt-1.5">
-              <p className="font-serif text-[10pt] font-bold">
-                {exp.poste}
-                {exp.periode ? ` — ${exp.periode}` : ""}
-              </p>
-              <p className="font-serif text-[10pt]">
-                {exp.entreprise}
-                {exp.lieu ? ` (${exp.lieu})` : ""}
-              </p>
-              <ul className="ml-4">
-                {exp.missions.map((mission, j) => (
-                  <li key={j} className="font-serif text-[10pt] leading-snug">
-                    • {mission}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </>
-      ) : null}
-
-      {donnees && donnees.formations.length > 0 ? (
-        <>
-          <p className="mt-3 font-serif text-[11pt] font-bold">Formation</p>
-          {donnees.formations.map((formation, i) => (
-            <p key={i} className="font-serif text-[10pt]">
-              {formation.diplome}
-              {formation.periode ? ` — ${formation.periode}` : ""}
-            </p>
-          ))}
-        </>
-      ) : null}
-
-      {donnees && donnees.competences.length > 0 ? (
-        <>
-          <p className="mt-3 font-serif text-[11pt] font-bold">Compétences</p>
-          <p className="font-serif text-[10pt]">{donnees.competences.join(" · ")}</p>
-        </>
-      ) : null}
-
-      {donnees && donnees.langues.length > 0 ? (
-        <>
-          <p className="mt-3 font-serif text-[11pt] font-bold">Langues</p>
-          <p className="font-serif text-[10pt]">
-            {donnees.langues.map((langue) => `${langue.nom} — ${langue.niveau}`).join(" · ")}
-          </p>
-        </>
-      ) : null}
-
-      {lettre.paragraphes.length > 0 ? (
-        <>
-          <p className="mt-4 font-serif text-[11pt] font-bold">Lettre de motivation</p>
-          {lettre.objet ? (
-            <p className="font-serif text-[10pt] font-bold">Objet : {lettre.objet}</p>
-          ) : null}
-          {lettre.salutation ? <p className="font-serif text-[10pt]">{lettre.salutation}</p> : null}
-          {lettre.paragraphes.map((paragraphe, i) => (
-            <p key={i} className="font-serif text-[10pt] leading-relaxed">
-              {paragraphe}
-            </p>
-          ))}
-          {lettre.politesse ? <p className="font-serif text-[10pt]">{lettre.politesse}</p> : null}
-        </>
-      ) : null}
-
-      {questions.length > 0 ? (
-        <>
-          <p className="mt-4 font-serif text-[11pt] font-bold">Kit d&apos;entretien</p>
-          {questions.map((question, i) => (
-            <div key={i} className="mt-1.5">
-              <p className="font-serif text-[10pt] font-bold">
-                Q{i + 1}. {question.question}
-              </p>
-              <p className="font-serif text-[10pt] leading-snug">{question.reponse}</p>
-              {question.astuce ? (
-                <p className="font-serif text-[9pt] italic">Astuce : {question.astuce}</p>
-              ) : null}
-            </div>
-          ))}
-        </>
-      ) : null}
-
-      <p className="mt-4 font-serif text-[9pt]">
-        Scores de compatibilité : initial {scoreInitial} · optimisé {scoreOptimise} — préparé avec
-        NexiRole.
-      </p>
-    </div>
-  );
 }
 
 /* ── Page ────────────────────────────────────────────────────────────── */
@@ -606,8 +213,10 @@ export default function DossierPage() {
   const [chargement, setChargement] = useState(true);
   const [erreur, setErreur] = useState("");
 
-  /* Aperçu complet (modale plein écran). */
+  /* Aperçu complet (modale plein écran à 4 onglets). */
   const [apercuId, setApercuId] = useState<string | null>(null);
+  const [pdfEnCours, setPdfEnCours] = useState<string | null>(null);
+  const [envoiSuivi, setEnvoiSuivi] = useState(false);
 
   /* Édition légère (modale). */
   const [edition, setEdition] = useState<{
@@ -673,16 +282,33 @@ export default function DossierPage() {
 
   /* Reprise de l'offre chargée depuis l'Agent (flux existant conservé). */
   useEffect(() => {
-    const current = readDossierOffer();
+    const current = lireOffre();
     if (!current) return;
-    setOffer(current as Record<string, unknown>);
+    setOffer(current);
     // Ouvre le panneau existant avec l'offre chargée depuis l'Agent
     window.dispatchEvent(new CustomEvent("nexirole:open-dossier", { detail: current }));
-    // FIX historique : enregistre le dossier (miroir local + POST serveur best-effort)
-    const signature = offerSignature(current);
+    // Enregistre l'offre en historique (miroir best-effort, POST /api/history).
+    const signature = signatureOffre(current);
     if (savedRef.current !== signature) {
       savedRef.current = signature;
-      void saveDossierToHistory(current);
+      const titre = titreOffre(current);
+      if (titre) {
+        void (async () => {
+          try {
+            await fetch("/api/history", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jobTitle: titre,
+                companyName: entrepriseOffre(current),
+                jobUrl: typeof current.offerUrl === "string" ? current.offerUrl : "",
+              }),
+            });
+          } catch {
+            /* best-effort : non bloquant */
+          }
+        })();
+      }
     }
   }, []);
 
@@ -713,10 +339,86 @@ export default function DossierPage() {
 
   /* ── Actions sur les dossiers ──────────────────────────────────────── */
 
-  function telechargerPdf(item: DossierItem) {
-    setApercuId(item.id);
-    // Laisse le temps à la modale + zone d'impression de se monter.
-    window.setTimeout(() => window.print(), 300);
+  /* Exports PDF réels (fin de window.print()). */
+  const dossierApercu = apercuId ? dossiers.find((d) => d.id === apercuId) ?? null : null;
+  const donneesApercu = dossierApercu ? donneesDuDossier(dossierApercu) : null;
+  const templateIdApercu: TemplateId =
+    dossierApercu && isTemplateId(dossierApercu.templateId)
+      ? dossierApercu.templateId
+      : "modern-accent";
+
+  function exporterCv() {
+    if (!donneesApercu) return;
+    setPdfEnCours("cv");
+    void exportPdfSecurise(() => telechargerCvPdf(donneesApercu, templateIdApercu)).finally(
+      () => setPdfEnCours(null)
+    );
+  }
+
+  function exporterLettre() {
+    if (!donneesApercu || !aLettre(donneesApercu)) return;
+    setPdfEnCours("lettre");
+    void exportPdfSecurise(() => telechargerLettrePdf(donneesApercu)).finally(() =>
+      setPdfEnCours(null)
+    );
+  }
+
+  function exporterKit() {
+    if (!donneesApercu || !aKit(donneesApercu)) return;
+    setPdfEnCours("kit");
+    void exportPdfSecurise(() => telechargerKitPdf(donneesApercu)).finally(() =>
+      setPdfEnCours(null)
+    );
+  }
+
+  /* Édition de la lettre directement dans la modale (PATCH /api/history). */
+  async function enregistrerLettreApercu(texte: string) {
+    if (!dossierApercu) throw new Error("dossier introuvable");
+    const res = await fetch("/api/history", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: dossierApercu.id, coverLetter: texte }),
+    });
+    if (!res.ok) throw new Error("échec PATCH");
+    setDossiers((precedent) =>
+      precedent.map((dossier) =>
+        dossier.id === dossierApercu.id ? { ...dossier, coverLetter: texte } : dossier
+      )
+    );
+  }
+
+  /* Migration 1 clic vers les éditeurs & le suivi. */
+  function ouvrirDansCreateur(id: string) {
+    window.location.assign(`/dashboard/cv-builder/createur?importDossierId=${id}`);
+  }
+
+  function ouvrirDansLettres(id: string) {
+    window.location.assign(`/dashboard/lettres?fromDossierId=${id}`);
+  }
+
+  async function envoyerVersSuivi(item: DossierItem) {
+    setEnvoiSuivi(true);
+    try {
+      const res = await fetch("/api/tracker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobTitle: item.jobTitle,
+          companyName: item.companyName,
+          jobUrl: item.jobUrl ?? "",
+          notes: "Dossier créé avec NexiRole (CV adapté + lettre + kit entretien).",
+        }),
+      });
+      if (!res.ok) {
+        toast.error(await lireErreur(res, "Ajout au suivi impossible."));
+        return;
+      }
+      toast.success("Candidature ajoutée à ton Suivi de candidatures.");
+    } catch {
+      toast.error("Connexion au serveur impossible — ajout non effectué.");
+    } finally {
+      setEnvoiSuivi(false);
+    }
   }
 
   async function partager(item: DossierItem) {
@@ -815,17 +517,8 @@ export default function DossierPage() {
 
   const derniereEntreprise = dossiers.length > 0 ? dossiers[0].companyName : "";
 
-  const dossierApercu = apercuId ? dossiers.find((d) => d.id === apercuId) ?? null : null;
-  const donneesApercu = dossierApercu ? construireDonneesApercu(dossierApercu) : null;
-  const templateIdApercu: TemplateId =
-    dossierApercu && isTemplateId(dossierApercu.templateId)
-      ? dossierApercu.templateId
-      : "modern-accent";
-
   return (
     <div className="mx-auto max-w-6xl space-y-8">
-      <style>{CSS_IMPRESSION}</style>
-
       {/* ── En-tête ─────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -838,7 +531,7 @@ export default function DossierPage() {
             </h1>
             <p className="mt-1 text-sm text-slate-500">
               {vue === "liste"
-                ? "Ton historique complet : relis, édite, imprime et partage les dossiers générés par l'IA."
+                ? "Ton historique complet : relis, édite, exporte en PDF et partage les dossiers générés par l'IA."
                 : "CV, lettre de motivation et kit d'entretien générés par l'IA pour une offre ciblée."}
             </p>
           </div>
@@ -985,7 +678,7 @@ export default function DossierPage() {
                             <button
                               type="button"
                               onClick={() => setApercuId(dossier.id)}
-                              title="Voir l'aperçu complet (CV, lettre, kit)"
+                              title="Voir l'aperçu complet et exporter les PDF"
                               aria-label="Voir l'aperçu complet"
                               className="rounded-lg border border-slate-200 p-2 text-[#051937] transition-colors hover:bg-[#051937]/5"
                             >
@@ -1002,9 +695,9 @@ export default function DossierPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => telechargerPdf(dossier)}
-                              title="Télécharger le dossier en PDF"
-                              aria-label="Télécharger le dossier en PDF"
+                              onClick={() => setApercuId(dossier.id)}
+                              title="Aperçu + 3 exports PDF (CV, lettre, kit)"
+                              aria-label="Exports PDF du dossier"
                               className="rounded-lg border border-slate-200 p-2 text-[#051937] transition-colors hover:bg-[#051937]/5"
                             >
                               <IconFileTypePdf size={18} />
@@ -1069,7 +762,7 @@ export default function DossierPage() {
               <IconRobot size={36} stroke={1.5} className="mx-auto text-slate-300" />
               <p className="mt-3 text-sm font-semibold text-slate-500">
                 Aucune offre chargée — lance d&apos;abord l&apos;Agent de recherche puis clique
-                « Générer le dossier ».
+                « Générer le dossier », ou saisis directement l&apos;offre ci-dessous.
               </p>
               <Link
                 href="/dashboard/agent"
@@ -1086,14 +779,14 @@ export default function DossierPage() {
             <div className="rounded-2xl border border-amber-300 bg-amber-50 p-5">
               <p className="text-sm font-semibold text-amber-800">
                 Le composant DossierPanel est introuvable — ajuste le chemin d&apos;import en haut
-                de ce fichier (commande de localisation fournie à l&apos;étape 0 du protocole).
+                de ce fichier.
               </p>
             </div>
           )}
         </div>
       )}
 
-      {/* ── Modale : aperçu complet du dossier ──────────────────────── */}
+      {/* ── Modale : aperçu complet du dossier (4 onglets + PDF + migration) ── */}
       {dossierApercu ? (
         <div
           className="fixed inset-0 z-50 overflow-y-auto bg-[#051937]/70 p-4 sm:p-6"
@@ -1112,53 +805,94 @@ export default function DossierPage() {
                   {formatDate(dossierApercu.createdAt)}
                 </p>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => window.print()}
-                  className="inline-flex items-center gap-2 rounded-xl border border-[#051937]/20 px-4 py-2 text-sm font-semibold text-[#051937] transition-colors hover:bg-[#051937]/5"
-                >
-                  <IconPrinter size={16} />
-                  Imprimer / PDF
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setApercuId(null)}
-                  title="Fermer l'aperçu"
-                  aria-label="Fermer l'aperçu"
-                  className="rounded-lg border border-slate-200 p-2 text-[#051937] transition-colors hover:bg-[#051937]/5"
-                >
-                  <IconX size={18} />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setApercuId(null)}
+                title="Fermer l'aperçu"
+                aria-label="Fermer l'aperçu"
+                className="rounded-lg border border-slate-200 p-2 text-[#051937] transition-colors hover:bg-[#051937]/5"
+              >
+                <IconX size={18} />
+              </button>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Score initial
-                </p>
-                <p className="mt-1 text-xl font-extrabold text-[#051937]">
-                  {dossierApercu.initialScore === null ? "—" : `${dossierApercu.initialScore}%`}
-                </p>
+            {/* 3 exports PDF réels */}
+            {donneesApercu ? (
+              <div className="flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <BoutonPdf
+                  libelle="Télécharger le CV (PDF)"
+                  onClick={exporterCv}
+                  enCours={pdfEnCours === "cv"}
+                  disabled={!aCv(donneesApercu)}
+                />
+                <BoutonPdf
+                  libelle="Télécharger la Lettre (PDF)"
+                  onClick={exporterLettre}
+                  enCours={pdfEnCours === "lettre"}
+                  disabled={!aLettre(donneesApercu)}
+                />
+                <BoutonPdf
+                  libelle="Télécharger le Kit Entretien (PDF)"
+                  onClick={exporterKit}
+                  enCours={pdfEnCours === "kit"}
+                  disabled={!aKit(donneesApercu)}
+                />
               </div>
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Score optimisé
-                </p>
-                <p className="mt-1 text-xl font-extrabold text-[#051937]">
-                  {dossierApercu.optimizedScore === null
-                    ? "—"
-                    : `${dossierApercu.optimizedScore}%`}
-                </p>
-              </div>
-            </div>
+            ) : null}
 
             {donneesApercu ? (
-              <DossierPreview data={donneesApercu} templateId={templateIdApercu} photo={null} />
+              <DossierOnglets
+                donnees={donneesApercu}
+                onEnregistrerLettre={enregistrerLettreApercu}
+              />
             ) : (
-              <ApercuBrut item={dossierApercu} />
+              <div className="flex items-start gap-2 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-sm text-amber-800">
+                <IconAlertTriangle size={18} className="mt-0.5 shrink-0" />
+                <span>
+                  Ce dossier ne contient pas de documents exploitables (entrée ancienne de
+                  l&apos;historique) — régénère-le pour obtenir le CV adapté, la lettre et le
+                  kit d&apos;entretien.
+                </span>
+              </div>
             )}
+
+            {/* Migration 1 clic vers les éditeurs & le suivi */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 className="text-xs font-bold uppercase tracking-wide text-slate-400">
+                Améliorer ce dossier dans les autres outils
+              </h3>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => ouvrirDansCreateur(dossierApercu.id)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-[#051937] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#0b2a5b]"
+                >
+                  <IconArrowRight size={16} />
+                  Ouvrir &amp; Modifier ce CV dans le Créateur de CV
+                </button>
+                <button
+                  type="button"
+                  onClick={() => ouvrirDansLettres(dossierApercu.id)}
+                  className="inline-flex items-center gap-2 rounded-xl border border-[#051937]/20 bg-white px-4 py-2.5 text-sm font-semibold text-[#051937] transition hover:bg-[#051937]/5"
+                >
+                  <IconArrowRight size={16} />
+                  Ouvrir &amp; Modifier dans Lettres de motivation
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void envoyerVersSuivi(dossierApercu)}
+                  disabled={envoiSuivi}
+                  className="inline-flex items-center gap-2 rounded-xl bg-[#FFC107] px-4 py-2.5 text-sm font-bold text-[#051937] shadow-sm transition hover:bg-[#e6ae00] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {envoiSuivi ? (
+                    <IconLoader2 size={16} className="animate-spin" />
+                  ) : (
+                    <IconArrowRight size={16} />
+                  )}
+                  Envoyer vers Suivi de candidatures
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       ) : null}
@@ -1254,9 +988,6 @@ export default function DossierPage() {
           </div>
         </div>
       ) : null}
-
-      {/* ── Zone d'impression (montée avec l'aperçu, invisible à l'écran) ─ */}
-      {dossierApercu ? <ZoneImpression item={dossierApercu} /> : null}
     </div>
   );
 }

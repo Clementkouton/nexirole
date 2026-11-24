@@ -6,19 +6,28 @@ import { fetchJobPageFromUrl, JobScrapeError } from "@/lib/job-apis";
 import { requireAiAccess } from "@/lib/ai-guard";
 import { sanitizeExtractedText } from "@/lib/file-security";
 import { prisma } from "@/lib/prisma";
+import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 import type { CandidateInfo } from "@/lib/types";
+import { Prisma } from "@/generated/prisma/client";
 
 /**
  * PARTIE 2 — Route « CV & Lettre par offre » utilisée par DossierPanel.
  *
- * Cette route était ABSENTE du dépôt (appel POST /api/dossier sans handler) :
- * c'est exactement la cause du bug « les dossiers générés ne sont pas stockés
- * dans les historiques ». Elle est désormais complète :
- *  - génération du dossier complet (CV optimisé, lettre, kit entretien),
- *  - calcul du score de compatibilité offre ↔ CV,
- *  - rendu Markdown prêt à l'affichage (contrat du panneau),
- *  - SAUVEGARDE AUTOMATIQUE dans l'historique (GeneratedApplication),
- *  - quotas de licence + anti-abus (PARTIE 3).
+ * Génération du dossier complet (CV optimisé, lettre, kit d'entretien),
+ * calcul des scores de compatibilité AVANT/Après optimisation, rendu
+ * Markdown rétro-compatible, et SAUVEGARDE AUTOMATIQUE COMPLÈTE en base
+ * (GeneratedApplication) : jobTitle, companyName, jobUrl, cvJson (CV
+ * adapté structuré), coverLetter (texte complet), interviewKitJson
+ * (questions/réponses + pitch recruteur), candidateJson, initialScore et
+ * optimizedScore — plus jamais de dossier « sans documents exploitables ».
+ *
+ * La réponse contient en plus l'objet structuré `dossier` (tous les champs
+ * ci-dessus) : le panneau affiche le résultat à 4 onglets, propose les 3
+ * exports PDF réels et les boutons de migration (Créateur de CV, Lettres,
+ * Suivi de candidatures) sans nouvel aller-retour serveur.
+ *
+ * Identité : requireAiAccess (session) avec repli tolérant par e-mail
+ * (utilisateur-actuel.ts) pour la sauvegarde — jamais de dossier perdu.
  */
 
 export const maxDuration = 120;
@@ -81,7 +90,7 @@ function compatibilityScore(cvText: string, offerText: string): number {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Rendu Markdown (contrat d'affichage de DossierPanel)               */
+/*  Rendu Markdown (contrat d'affichage rétro-compatible)              */
 /* ------------------------------------------------------------------ */
 
 interface CvForMarkdown {
@@ -281,30 +290,68 @@ export async function POST(request: NextRequest) {
       throw new Error("structure du dossier incomplète");
     }
 
-    /* 4. Score + conseils (astuces du kit d'entretien) ------------------ */
-    const score = compatibilityScore(candidateText, fullOfferText);
+    /* 4. Scores avant / après optimisation ------------------------------ */
+    const scoreInitial = compatibilityScore(candidateText, fullOfferText);
+    const cvOptimiseTexte = [
+      data.cv.title,
+      data.cv.summary,
+      ...data.cv.experiences.flatMap((exp) => [
+        exp.role,
+        exp.company,
+        ...exp.achievements,
+      ]),
+      ...data.cv.education.flatMap((edu) => [edu.degree, edu.school]),
+      ...data.cv.skills,
+      ...data.cv.languages.map((langue) => `${langue.name} ${langue.level}`),
+    ].join("\n");
+    const scoreOptimise = Math.max(
+      scoreInitial,
+      compatibilityScore(cvOptimiseTexte, fullOfferText)
+    );
     const conseils = (data.interviewKit?.questions ?? [])
       .map((question) => question.tip)
       .filter(Boolean)
       .slice(0, 3);
 
-    /* 5. SAUVEGARDE AUTOMATIQUE dans l'historique (correctif du bug) ---- */
+    /* 5. SAUVEGARDE AUTOMATIQUE COMPLÈTE en base ------------------------ */
+    /* Champs structurés du dossier (réponse + sauvegarde). */
+    const dossier = {
+      jobTitle: data.job?.title?.trim() || offerTitle,
+      companyName: data.job?.company?.trim() || "Non précisée",
+      jobUrl: offerUrl || null,
+      cvJson: data.cv,
+      coverLetter: JSON.stringify(data.coverLetter),
+      interviewKitJson: data.interviewKit ?? null,
+      candidateJson: data.candidate ?? null,
+      initialScore: scoreInitial,
+      optimizedScore: scoreOptimise,
+    };
+
+    /* Identité de sauvegarde : userId de la session, avec repli tolérant
+       (session.email → cookie JWT) via utilisateur-actuel.ts. */
+    let userId = access.ctx.userId ?? null;
+    if (!userId) {
+      const resolution = await resoudreUtilisateur();
+      userId = resolution.utilisateur?.userId ?? null;
+    }
+
     let savedId: string | null = null;
-    if (access.ctx.userId) {
+    if (userId) {
       try {
         const saved = await prisma.generatedApplication.create({
           data: {
-            userId: access.ctx.userId,
-            jobTitle: data.job?.title?.trim() || offerTitle,
-            companyName: data.job?.company?.trim() || "Non précisée",
-            jobUrl: offerUrl || null,
+            userId,
+            jobTitle: dossier.jobTitle.slice(0, 160),
+            companyName: dossier.companyName.slice(0, 160),
+            jobUrl: dossier.jobUrl,
             templateId: "moderne",
             withPhoto: false,
-            cvJson: (data.cv ?? {}) as unknown as import("@/generated/prisma/client").Prisma.InputJsonValue,
-            coverLetter: JSON.stringify(data.coverLetter ?? {}),
-            interviewKitJson: (data.interviewKit ?? null) as import("@/generated/prisma/client").Prisma.InputJsonValue,
-            candidateJson: (data.candidate ?? null) as unknown as import("@/generated/prisma/client").Prisma.InputJsonValue,
-            initialScore: score,
+            cvJson: dossier.cvJson as unknown as Prisma.InputJsonValue,
+            coverLetter: dossier.coverLetter.slice(0, 60000),
+            interviewKitJson: (dossier.interviewKitJson ?? Prisma.JsonNull) as unknown as Prisma.InputJsonValue,
+            candidateJson: (dossier.candidateJson ?? Prisma.JsonNull) as unknown as Prisma.InputJsonValue,
+            initialScore: dossier.initialScore,
+            optimizedScore: dossier.optimizedScore,
           },
         });
         savedId = saved.id;
@@ -313,15 +360,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    /* 6. Réponse au panneau (Markdown prêt à l'affichage) --------------- */
+    /* 6. Réponse au panneau : Markdown rétro-compatible + dossier structuré */
     return NextResponse.json({
       cv: cvToMarkdown(data.cv, data.candidate ?? null),
       lettre: letterToMarkdown(data.coverLetter),
-      score,
+      score: scoreOptimise,
       conseils,
       warnings: [] as string[],
       savedId,
       saved: Boolean(savedId),
+      /* Objet structuré complet : affichage 4 onglets + PDF + migration. */
+      dossier,
     });
   } catch (error) {
     console.error("[dossier]", error);
