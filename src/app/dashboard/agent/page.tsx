@@ -30,6 +30,8 @@
  * reste affichée telle quelle dans le bandeau d'erreur de recherche.
  * Icônes : exclusivement @tabler/icons-react. Charte : navy #051937 +
  * or #FFC107.
+ * 
+ * 
  */
 
 import { useEffect, useRef, useState } from "react";
