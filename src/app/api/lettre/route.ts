@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getClientIp, guardRateLimit } from "@/lib/rate-limit";
 import { hasGroqKey } from "@/lib/ai-guard";
 import { genererLettre } from "@/lib/ai-lettre";
-import { getToken } from "next-auth/jwt";
+import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 
 /**
  * NexiRole — API LETTRES DE MOTIVATION.
@@ -52,18 +52,6 @@ const TONS: Record<string, string> = {
   creatif: "créatif mais crédible",
 };
 
-async function resoudreUtilisateur(request: NextRequest) {
-  try {
-    const token = await getToken({ req: request });
-    const userId = token?.sub || (typeof token?.id === "string" ? token.id : null);
-    return userId
-      ? { utilisateur: { userId }, diagnostic: undefined }
-      : { utilisateur: null, diagnostic: "Aucun utilisateur authentifié dans la session." };
-  } catch {
-    return { utilisateur: null, diagnostic: "Impossible de vérifier la session." };
-  }
-}
-
 function construirePrompt(p: {
   company: string;
   position: string;
@@ -84,9 +72,9 @@ function construirePrompt(p: {
   return lignes.filter(Boolean).join("\n\n");
 }
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const { utilisateur, diagnostic } = await resoudreUtilisateur(request);
+    const { utilisateur, diagnostic } = await resoudreUtilisateur();
     if (!utilisateur) {
       return NextResponse.json(
         {
@@ -127,7 +115,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   /* Identité tolérante (3 voies) puis garde anti-abus identique à /api/improve-cv */
-  const { utilisateur, diagnostic } = await resoudreUtilisateur(request);
+  const { utilisateur, diagnostic } = await resoudreUtilisateur();
   if (!utilisateur) {
     return NextResponse.json(
       {

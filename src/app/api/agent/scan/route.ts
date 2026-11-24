@@ -3,6 +3,8 @@ import { z } from "zod";
 import { generateStructured } from "@/lib/ai";
 import { fetchArbeitnowJobs, fetchRemotiveJobs, type RawJob } from "@/lib/job-apis";
 import { hasGroqKey, requireAiAccess } from "@/lib/ai-guard";
+import { prisma } from "@/lib/prisma";
+import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 
 /**
  * Agent de recherche en direct :
@@ -12,6 +14,10 @@ import { hasGroqKey, requireAiAccess } from "@/lib/ai-guard";
  *    avec repli local par mots-clés si l'IA est indisponible.
  * PARTIE 3 : quota plan Découverte (3 recherches/mois) + 5 requêtes/h/IP
  * pour les visiteurs anonymes (403 QUOTA_EXCEEDED ou 429 RATE_LIMITED).
+ *
+ * PERSISTANCE (règle d'or) : chaque scan est enregistré automatiquement en
+ * base (modèle AgentScanHistory) pour l'utilisateur connecté, puis réaffiché
+ * via GET /api/agent/scan et supprimable via DELETE /api/agent/scan?id=...
  */
 
 export const maxDuration = 120;
@@ -358,6 +364,43 @@ export async function POST(request: NextRequest) {
 
   scoredJobs.sort((a, b) => b.score - a.score);
 
+  /* 5. PERSISTANCE (règle d'or) : enregistrement automatique du scan pour
+     l'utilisateur connecté. requireAiAccess fournit ctx.userId (session.id) ;
+     repli tolérant par email / cookie via utilisateur-actuel.ts. En cas
+     d'échec d'enregistrement, le résultat est quand même renvoyé (non fatal). */
+  const userIdSauvegarde =
+    access.ctx.userId ?? (await resoudreUtilisateur()).utilisateur?.userId ?? null;
+
+  let scanId: string | null = null;
+  let persisted = false;
+  if (userIdSauvegarde) {
+    try {
+      const saved = await Reflect.get(prisma, "agentScanHistory").create({
+        data: {
+          userId: userIdSauvegarde,
+          targetRole: metier.trim().slice(0, 120),
+          location: lieu.trim().slice(0, 120),
+          keywords: competences as unknown as import("@/generated/prisma/client").Prisma.InputJsonValue,
+          resultsJson: {
+            jobs: scoredJobs,
+            totalFound,
+            totalKept,
+            aiAvailable,
+            warnings,
+          } as unknown as import("@/generated/prisma/client").Prisma.InputJsonValue,
+          bestScore: scoredJobs.length > 0 ? scoredJobs[0].score : 0,
+        },
+      });
+      scanId = saved.id;
+      persisted = true;
+    } catch (error) {
+      console.error("[agent/scan] sauvegarde du scan impossible :", error);
+      warnings.push(
+        "Scan non enregistré en base — lance « npx prisma db push » pour créer la table agent_scan_history."
+      );
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     jobs: scoredJobs,
@@ -365,5 +408,77 @@ export async function POST(request: NextRequest) {
     totalKept,
     aiAvailable,
     warnings,
+    scanId,
+    persisted,
   });
+}
+
+/* ─────────────── GET : historique des scans sauvegardés ─────────────── */
+
+export async function GET() {
+  const { utilisateur, diagnostic } = await resoudreUtilisateur();
+  if (!utilisateur) {
+    return NextResponse.json(
+      {
+        error: "Session expirée — déconnecte-toi puis reconnecte-toi, et recharge la page.",
+        diagnostic,
+      },
+      { status: 401 }
+    );
+  }
+
+  try {
+    const scans = await Reflect.get(prisma, "agentScanHistory").findMany({
+      where: { userId: utilisateur.userId },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+    return NextResponse.json({ scans });
+  } catch (error) {
+    console.error("[agent/scan][GET]", error);
+    return NextResponse.json(
+      {
+        error:
+          "Historique des scans indisponible. Si la table est absente, lance : npx prisma db push",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+/* ─────────────── DELETE : suppression d'un scan sauvegardé ─────────────── */
+
+export async function DELETE(request: NextRequest) {
+  const { utilisateur, diagnostic } = await resoudreUtilisateur();
+  if (!utilisateur) {
+    return NextResponse.json(
+      {
+        error: "Session expirée — déconnecte-toi puis reconnecte-toi, et recharge la page.",
+        diagnostic,
+      },
+      { status: 401 }
+    );
+  }
+
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get("id") ?? "";
+  if (!id) {
+    return NextResponse.json({ error: "Identifiant du scan manquant." }, { status: 400 });
+  }
+
+  try {
+    const scanHistory = Reflect.get(prisma, "agentScanHistory");
+    const existing = await scanHistory.findFirst({
+      where: { id, userId: utilisateur.userId },
+      select: { id: true },
+    });
+    if (!existing) {
+      return NextResponse.json({ error: "Scan introuvable." }, { status: 404 });
+    }
+    await scanHistory.delete({ where: { id: existing.id } });
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    console.error("[agent/scan][DELETE]", error);
+    return NextResponse.json({ error: "La suppression du scan a échoué." }, { status: 500 });
+  }
 }

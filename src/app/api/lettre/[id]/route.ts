@@ -109,6 +109,11 @@ export async function PUT(request: NextRequest, { params }: Params) {
   }
 }
 
+/** PATCH — alias de PUT : la barre d'actions harmonisée des pages appelle PATCH. */
+export async function PATCH(request: NextRequest, contexte: Params) {
+  return PUT(request, contexte);
+}
+
 export async function DELETE(_request: NextRequest, { params }: Params) {
   try {
     const { id } = await params;

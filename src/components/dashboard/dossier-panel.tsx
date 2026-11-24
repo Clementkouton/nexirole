@@ -198,6 +198,11 @@ export function DossierPanel() {
         );
         return;
       }
+      // Prévient la page Dossier qu'un dossier vient d'être sauvegardé
+      // en base (savedId) : la liste d'historique se rafraîchit aussitôt.
+      if (data.savedId) {
+        window.dispatchEvent(new CustomEvent("nexirole:dossier-sauvegarde"));
+      }
       setResult(data);
     } catch {
       setError("Réseau indisponible : réessaie dans un instant.");

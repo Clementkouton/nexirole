@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
-import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
+import { resoudreUtilisateur } from "@/lib/utilisateur-actuel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTRAT D'API
@@ -8,7 +8,10 @@ import { prisma } from "@/lib/prisma";
 // POST   /api/tracker                → création ({ jobTitle, companyName, jobUrl?, notes? })
 // POST   /api/tracker                → { action: "generate-followup", applicationId }
 //                                      → { subject, body, daysSinceLastAction, source }
-// PATCH  /api/tracker                → { id, status } (+ date de référence = maintenant)
+// PATCH  /api/tracker                → { id, status?, jobTitle?, companyName?,
+//                                      jobUrl?, notes? } — édition complète ;
+//                                      le changement de statut met aussi à jour
+//                                      la date de référence (= maintenant).
 // DELETE /api/tracker?id=...         → { success: true }
 //
 // NB — VOTRE SCHÉMA : le modèle Prisma existant utilise `followUpDate` (DateTime?)
@@ -64,37 +67,15 @@ function serializeApplication(row: TrackerRow) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Résolution utilisateur : avec la stratégie JWT de next-auth v5, session.user
-// ne contient par défaut que name/email/image — PAS d'id. On utilise l'id
-// s'il existe, sinon l'email (toujours présent dans la session).
+// Résolution utilisateur : passe par src/lib/utilisateur-actuel.ts (tolérante :
+// session.id → session.email → décodage du cookie JWT), comme les autres
+// routes du projet — plus aucune erreur 401 injustifiée.
 // ─────────────────────────────────────────────────────────────────────────────
 async function requireUserId(): Promise<string | null> {
-  const session = await auth();
-  const sessionUser = (session?.user ?? null) as unknown as
-    | { id?: string; email?: string | null }
-    | null;
-
-  // Log de diagnostic — à retirer une fois la fonctionnalité validée
-  console.log(
-    "[api/tracker] session présente :", Boolean(session),
-    "| champs user :", Object.keys(session?.user ?? {}).join(", ") || "aucun",
-  );
-
-  const directId = typeof sessionUser?.id === "string" ? sessionUser.id.trim() : "";
-  if (directId !== "") return directId;
-
-  const email = typeof sessionUser?.email === "string" ? sessionUser.email.trim() : "";
-  if (email !== "") {
-    try {
-      const found = await prisma.user.findUnique({ where: { email }, select: { id: true } });
-      return found?.id ?? null;
-    } catch (error) {
-      console.error("[api/tracker] Résolution utilisateur par email impossible :", error);
-      return null;
-    }
-  }
-
-  return null;
+  /* Résolution tolérante (session.id → session.email → cookie JWT) via
+     src/lib/utilisateur-actuel.ts — identique aux autres routes du projet. */
+  const { utilisateur } = await resoudreUtilisateur();
+  return utilisateur?.userId ?? null;
 }
 
 function unauthorized(): NextResponse {
@@ -328,21 +309,56 @@ export async function PATCH(request: Request) {
   if (!body) return NextResponse.json({ error: "Corps de requête JSON invalide." }, { status: 400 });
 
   const id = typeof body.id === "string" ? body.id : "";
-  const nextStatus: unknown = body.status;
   if (!id) return NextResponse.json({ error: "Identifiant de candidature manquant." }, { status: 400 });
-  if (!isAllowedStatus(nextStatus)) return NextResponse.json({ error: "Statut invalide." }, { status: 400 });
+
+  /* Édition complète : statut (changement rapide conservé) + tous les champs. */
+  const data: {
+    status?: TrackerStatus;
+    jobTitle?: string;
+    companyName?: string;
+    jobUrl?: string | null;
+    notes?: string | null;
+    lastActionDate?: Date;
+  } = {};
+
+  const nextStatus: unknown = body.status;
+  if (nextStatus !== undefined && nextStatus !== null && nextStatus !== "") {
+    if (!isAllowedStatus(nextStatus)) {
+      return NextResponse.json({ error: "Statut invalide." }, { status: 400 });
+    }
+    data.status = nextStatus;
+    data.lastActionDate = new Date();
+  }
+  if (typeof body.jobTitle === "string" && body.jobTitle.trim() !== "") {
+    data.jobTitle = body.jobTitle.trim().slice(0, 160);
+  }
+  if (typeof body.companyName === "string" && body.companyName.trim() !== "") {
+    data.companyName = body.companyName.trim().slice(0, 160);
+  }
+  if (body.jobUrl !== undefined) {
+    data.jobUrl =
+      typeof body.jobUrl === "string" && body.jobUrl.trim() !== "" ? body.jobUrl.trim() : null;
+  }
+  if (body.notes !== undefined) {
+    data.notes =
+      typeof body.notes === "string" && body.notes.trim() !== "" ? body.notes.trim() : null;
+  }
+
+  if (Object.keys(data).length === 0) {
+    return NextResponse.json({ error: "Rien à mettre à jour." }, { status: 400 });
+  }
 
   try {
     const existing = await prisma.jobApplicationTracker.findFirst({ where: { id, userId } });
     if (!existing) return NextResponse.json({ error: "Candidature introuvable." }, { status: 404 });
     const updated = await prisma.jobApplicationTracker.update({
       where: { id: existing.id },
-      data: { status: nextStatus, lastActionDate: new Date() },
+      data,
     });
     return NextResponse.json({ application: serializeApplication(updated) });
   } catch (error) {
     console.error("[api/tracker][PATCH]", error);
-    return NextResponse.json({ error: "La mise à jour du statut a échoué." }, { status: 500 });
+    return NextResponse.json({ error: "La mise à jour de la candidature a échoué." }, { status: 500 });
   }
 }
 

@@ -88,8 +88,10 @@ export function DashboardSidebar() {
         </nav>
       </div>
 
-      {/* Bloc Plan actuel — aucune saisie manuelle de clé de licence */}
-      <div className="rounded-xl bg-white/5 p-4">
+      {/* Bloc Plan actuel — aucune saisie manuelle de clé de licence.
+          pb-16 : laisse la place à l'icône flottante en bas à gauche,
+          le bouton ne passe plus derrière elle. */}
+      <div className="rounded-xl bg-white/5 p-4 pb-16">
         {isPaid && licenceActive ? (
           <div className="space-y-2">
             <span className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-400/30">
@@ -108,10 +110,10 @@ export function DashboardSidebar() {
             <p className="text-sm font-semibold text-white">{planLabel}</p>
             <Link
               href="/pricing"
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-[#FFC107] px-3 py-2.5 text-sm font-semibold text-[#051937] transition hover:bg-[#e6ae00]"
+              className="flex w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-[#FFC107] px-3 py-2.5 text-xs font-semibold text-[#051937] transition hover:bg-[#e6ae00]"
             >
-              <IconCrown className="h-4 w-4" />
-              Passer au Pass Boost / Pro
+              <IconCrown className="h-4 w-4 shrink-0" />
+              Passer au Pass Boost
             </Link>
           </div>
         )}

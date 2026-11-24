@@ -1,0 +1,268 @@
+// NexiRole — Authentification Auth.js v5 + PostgreSQL (Neon)
+// Prisma 7 : les URLs de connexion vivent dans prisma.config.ts
+// (plus de url/directUrl ici) et le client est généré dans src/generated/prisma.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Utilisateur ──────────────────────────────────────────────
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String? // Bcrypt coût 12 — null = compte Google uniquement
+  role          String    @default("user")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // ── Licence Chariow (PARTIE 1) ─────────────────────────────
+  plan             String    @default("FREE") // FREE | BOOST | PRO
+  licenseKey       String?   @unique // clé UUID générée par Chariow
+  licenseStatus    String    @default("INACTIVE") // INACTIVE | ACTIVE | REVOKED | EXPIRED
+  expiresAt        DateTime? // fin de validité (BOOST 30 j / PRO 90 j)
+  // Compteurs d'usage — remis à zéro à l'activation d'une licence.
+  // usagePeriodStart pilote la fenêtre glissante de 30 jours du plan FREE.
+  searchesUsed     Int       @default(0)
+  coachAnalysesUsed Int       @default(0) // Coach de négociation : simulations du mois (plan Découverte)
+  usagePeriodStart DateTime? @default(now())
+
+  savedResumes          SavedResume[]
+  cvDocuments          CvDocument[]
+  generatedApplications GeneratedApplication[]
+  jobApplications       JobApplicationTracker[]
+  coverLetters          CoverLetter[]
+  salaryNegotiations SalaryNegotiation[]
+  
+  accounts            Account[]
+  sessions            Session[]
+  password            String?
+  resetPasswordToken  String?
+  resetPasswordExpiry DateTime?
+  publicResume        PublicResume?
+
+  @@map("users")
+}
+
+// ── Comptes OAuth (Google...) — requis par Auth.js ───────────
+model Account {
+  id                String   @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+// ── Sessions base de données (présentes pour compatibilité) ──
+model Session {
+  sessionToken String   @id
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ── Tokens de vérification (requis par Auth.js) ──────────────
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ── Réinitialisation de mot de passe ─────────────────────────
+model PasswordResetToken {
+  id      String   @id @default(cuid())
+  email   String
+  token   String   @unique // SHA-256 du token envoyé par email — jamais le token brut
+  expires DateTime
+
+  @@index([email])
+  @@map("password_reset_tokens")
+}
+
+// ── CV analysés (PARTIE 2) — sauvegarde automatique du parse-cv
+model SavedResume {
+  id             String   @id @default(cuid())
+  userId         String
+  fileName       String
+  extractedText  String // texte extrait, nettoyé et tronqué (anti-injection)
+  detectedSkills String[] // compétences extraites par l'IA
+  profileSummary String? // premiers lignes significatives du CV
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("saved_resumes")
+}
+
+// ── Dossiers générés (PARTIE 2) — historique complet
+model GeneratedApplication {
+  id               String   @id @default(cuid())
+  userId           String
+  jobTitle         String
+  companyName      String
+  jobUrl           String?
+  templateId       String   @default("moderne")
+  withPhoto        Boolean  @default(false)
+  cvJson           Json // CV optimisé (structure optimCvSchema)
+  coverLetter      String // lettre de motivation (JSON sérialisé)
+  interviewKitJson Json? // kit entretien (structure interviewKitSchema)
+  candidateJson    Json? // coordonnées extraites du CV
+  initialScore     Int?
+  optimizedScore   Int?
+  createdAt        DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("generated_applications")
+}
+
+// ── Suivi des candidatures (PARTIE 2) — tableau interactif
+model JobApplicationTracker {
+  id             String   @id @default(cuid())
+  userId         String
+  jobTitle       String
+  companyName    String
+  jobUrl         String?
+  status         String   @default("A_POSTULER")
+  lastActionDate DateTime @default(now())
+  notes          String?
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, lastActionDate])
+}
+
+// ── Journal des webhooks Chariow (PARTIE 1) — idempotence
+model ChariowEvent {
+  id            String   @id @default(cuid())
+  eventId       String   @unique // x-pulse-delivery-id (idempotence Chariow)
+  eventType     String // successful.sale | license.issued | license.revoked...
+  customerEmail String?
+  licenseKey    String?
+  payload       Json // payload brut complet (audit)
+  createdAt     DateTime @default(now())
+
+  @@index([customerEmail])
+  @@index([licenseKey])
+  @@map("chariow_events")
+}
+
+enum TrackerStatus {
+  A_POSTULER
+  ENVOYE
+  ENTRETIEN
+  OFFRE
+  REFUSEE
+}
+
+model PublicResume {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  slug       String   @unique
+  isPublic   Boolean  @default(true)
+  templateId String   @default("modern-accent")
+  cvData     Json
+  viewsCount Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ── Bibliothèque de CV du créateur (PARTIE CV BUILDER) ──────
+// Un CvDocument = un CV de la bibliothèque : contenu (data),
+// design, étape courante, état de publication et corbeille 30 j.
+model CvDocument {
+  id            String    @id @default(cuid())
+  userId        String
+  name          String    @default("Mon CV")
+  data          Json      // contenu complet du CV (CvBuilderData)
+  design        Json      // design du CV (CvDesign)
+  step          Int       @default(0) // étape courante du créateur (0-5)
+  isPublic      Boolean   @default(false) // CV actuellement en ligne
+  publishedSlug String?   // slug de la page /u/<slug> quand publié
+  trashedAt     DateTime? // corbeille : date de suppression (purge à 30 jours)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("cv_documents")
+}
+
+
+model CoverLetter {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String   @default("Lettre de motivation")
+  company   String   @default("")
+  position  String   @default("")
+  tone      String   @default("professionnel")
+  language  String   @default("fr")
+  jobOffer  String   @default("")
+  cvText    String   @default("")
+  content   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("cover_letters")
+}
+
+
+
+// --- Coach de Negotiation Salariale IA -- simulations sauvegardees ---
+model SalaryNegotiation {
+  id              String   @id @default(cuid())
+  userId          String
+  jobTitle        String
+  experienceYears Int
+  countryName     String
+  currencyCode    String
+  currencySymbol  String
+  keySkills       String
+  currentOffer    String?
+  resultJson      Json
+  shareToken      String?  @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("salary_negotiations")
+}
