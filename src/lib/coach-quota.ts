@@ -155,7 +155,7 @@ export async function etatCoach(userId: string): Promise<EtatCoach> {
 
   // 2. Fenêtre glissante de 30 jours : compteurs remis à zéro
   const debutFenetre = user.usagePeriodStart?.getTime() ?? 0;
-  let compteurPartage = user.generationsUsed;
+  let compteurPartage: number = user.generationsUsed;
   let compteurDedie = compteurDedieAvant;
   if (maintenant - debutFenetre > FENETRE_MS) {
     await prisma.user.update({

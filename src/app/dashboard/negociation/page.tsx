@@ -69,6 +69,7 @@ import {
   IconMessageCircle,
   IconPlus,
   IconSearch,
+  IconShare,
   IconShieldCheck,
   IconSparkles,
   IconTargetArrow,
@@ -812,7 +813,7 @@ export default function NegociationPage() {
           dateGeneration: formatDate(coaching.updatedAt || coaching.createdAt),
         },
       });
-      const blob = await pdf(element).toBlob();
+      const blob = await pdf(element as Parameters<typeof pdf>[0]).toBlob();
       const url = URL.createObjectURL(blob);
       const lien = document.createElement("a");
       lien.href = url;
@@ -1185,7 +1186,7 @@ export default function NegociationPage() {
                               aria-label="Copier un résumé prêt à envoyer"
                               className="rounded-lg border border-slate-200 p-2 text-[#051937] transition-colors hover:bg-[#051937]/5"
                             >
-                              <IconShare size={17} />
+                              <IconCopy size={17} />
                             </button>
                             <button
                               type="button"
